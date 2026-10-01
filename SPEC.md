@@ -80,6 +80,22 @@ in dozens of teams**, with 6-agent Forge as just one team.
 - **Performance target:** 500 agents and 50 events/s at 60 fps on the Fleet view (WebGL/Canvas
   renderer, e.g. Pixi or sigma.js; SVG only for the zoomed Team view).
 
+## Chief of Staff (2026-10-01, Zach)
+
+One agent is in charge of the whole fleet: the **Chief of Staff (CoS)**, which is the main
+assistant (`agent:main:main`). It is Zach's single point of contact. It routes work to
+team leads (e.g. `forge` for software delivery), collects their decisions and results,
+runs the heartbeat/follow-ups, and owns the **Needs you** inbox. Team leads report to
+the CoS; workers report to their team lead.
+
+In the UI:
+- **Fleet view:** the CoS sits at the center. Team clusters orbit it, and each team lead is
+  connected to it. Escalations to Zach flow CoS → Zach.
+- **Hierarchy is visible:** CoS → team lead → workers (parent tree and owner). Messages
+  that skip the chain (a worker messaging the CoS or Zach directly) are flagged.
+- **The "Needs you" inbox** shows only items the CoS escalated, de-duplicated across teams,
+  each with the CoS's recommendation.
+
 ## Layout
 
 ```
