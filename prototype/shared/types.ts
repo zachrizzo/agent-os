@@ -16,6 +16,10 @@ export interface Agent {
   tokens: number;
   model?: string;
   updatedAt: number;
+  agentId?: string; // OpenClaw agent id (e.g. "forge-coder")
+  kind?: 'main' | 'subagent' | 'cron' | 'other'; // session kind from the key
+  label?: string; // session label / task title
+  ask?: string; // when status === 'needs': what Zach is being asked
 }
 
 export interface Team {
@@ -49,6 +53,7 @@ export interface Snapshot {
   events: FleetEvent[]; // recent, newest last
   meters: Meters;
   error?: string;
+  windowHours?: number; // live: sessions older than this are hidden
 }
 
 export interface Delta {
