@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent OS · map dev</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #090c13; color: #e7ebf3; font: 12px Inter, ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+      #map { position: fixed; inset: 0; }
+      #bar { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); display: flex; gap: 4px; padding: 4px; border-radius: 10px; background: rgba(13,17,26,.9); border: 1px solid rgba(160,175,210,.16); z-index: 10; }
+      #bar button { all: unset; cursor: pointer; padding: 6px 14px; border-radius: 7px; color: #aab4c6; }
+      #bar button.on { background: rgba(255,255,255,.08); color: #fff; }
+      #info { position: fixed; right: 14px; top: 12px; color: #7d8799; z-index: 10; text-align: right; line-height: 1.5; }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div id="bar"><button data-z="fleet">Fleet</button><button data-z="team">Team</button><button data-z="agent">Agent</button></div>
+    <div id="info"></div>
+    <script type="module" src="./dev.ts"></script>
+  </body>
+</html>
