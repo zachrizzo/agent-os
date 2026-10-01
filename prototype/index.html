@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent OS</title>
+  </head>
+  <body>
+    <div id="app">
+      <header id="topbar">
+        <div class="brand"><svg width="22" height="22" viewBox="0 0 24 24"><path d="M12 3 L21 20 H3 Z" fill="none" stroke="#7aa2ff" stroke-width="2.2" stroke-linejoin="round"/></svg><span>Agent OS</span></div>
+        <div id="live-pill" class="pill live"><i></i><span>LIVE</span></div>
+        <div id="source-toggle" class="seg small"><button data-src="live">Live</button><button data-src="mock">Mock</button></div>
+        <div id="meters"></div>
+        <button id="needs-badge" class="needs-badge">⚠ Needs you · <b>0</b></button>
+        <div class="search">⌕ <span>Search agents, messages…</span><kbd>⌘K</kbd></div>
+      </header>
+      <aside id="rail">
+        <div class="rail-head"><h2>Teams</h2><span class="muted">+</span></div>
+        <div id="teams"></div>
+        <div class="rail-foot"><span class="dot ok"></span><span id="sys-status">All systems operational</span></div>
+      </aside>
+      <main id="center">
+        <div class="crumbs"><span id="crumb-back">‹</span> Workspace / <span id="crumb-team">All teams</span></div>
+        <h1 id="title">Fleet overview</h1>
+        <div class="subtitle" id="subtitle"></div>
+        <div class="map-tools"><div class="seg"><button class="on">◎ Topology</button><button id="labels-btn" class="on">⌖ Labels</button></div></div>
+        <canvas id="map"></canvas>
+        <canvas id="minimap" width="144" height="96"></canvas>
+        <div class="zoombar">
+          <div class="seg" id="zoom-seg"><button data-z="fleet" class="on">Fleet</button><button data-z="team">Team</button><button data-z="agent">Agent</button></div>
+          <div class="seg"><button id="zout">−</button><span id="zpct">100%</span><button id="zin">+</button></div>
+        </div>
+        <div class="legend" id="legend"></div>
+        <div id="tooltip" hidden></div>
+        <section id="drawer" hidden></section>
+      </main>
+      <aside id="activity">
+        <div class="act-head"><h2>Activity</h2><span class="pill live small"><i></i>Live</span></div>
+        <div class="chips" id="chips"></div>
+        <div id="stream"></div>
+      </aside>
+      <footer id="replay">
+        <div class="replay-left">
+          <div class="replay-title"><b>Replay</b><button class="play">▶</button><span class="seg small"><button>Last 60 min ▾</button></span></div>
+          <div class="muted tiny">By team (event density)</div>
+          <div id="replay-legend"></div>
+        </div>
+        <canvas id="spark"></canvas>
+        <button class="live-btn">Live</button>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
