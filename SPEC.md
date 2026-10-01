@@ -58,6 +58,28 @@ editing, raw trace waterfalls as the default view (only on drill-down).
 Later: ambient full-screen second-monitor mode (v1.1), checkpoint fork/edit-and-resend
 (AGDebugger-style), a pixel/character skin.
 
+## Scale: the whole fleet, not just Forge (2026-10-01, Zach)
+
+Agent OS covers **every agent on the Gateway**: Forge, the main assistant, ticket swarms,
+research, ops watchers, personal assistants, experiments. Design for **hundreds of agents
+in dozens of teams**, with 6-agent Forge as just one team.
+
+- **Teams are first-class.** Group by agent id prefix / owner / parent tree (configurable).
+  Each team has a hue, a hull on the map, a count, an active count, cost, and an activity bar.
+- **Semantic zoom.** **Fleet** (team clusters plus bundled cross-team arcs) → **Team**
+  (individual agents and their edges) → **Agent** (focus mode). Labels appear only at the
+  zoom level where they fit. Includes a mini-map.
+- **Calm at scale.** Idle agents fade out, edges are bundled between clusters, particles are
+  rate-limited (aggregate when more than N per second), and the layout stays stable so
+  dots don't jump.
+- **The left rail becomes "Teams":** collapsible groups with virtualized lists (1000+ rows).
+- **Activity stream:** grouped by team, with filter chips (All / Needs you / Errors / Handoffs
+  / Approvals) and a pinned "Needs you" section on top. Search across agents and messages (⌘K).
+- **Anomalies:** stalls, error spikes, cost spikes, and loops (two agents ping-ponging) get
+  marked on the replay timeline.
+- **Performance target:** 500 agents and 50 events/s at 60 fps on the Fleet view (WebGL/Canvas
+  renderer, e.g. Pixi or sigma.js; SVG only for the zoomed Team view).
+
 ## Layout
 
 ```
