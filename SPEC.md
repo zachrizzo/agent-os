@@ -43,8 +43,8 @@ editing, raw trace waterfalls as the default view (only on drill-down).
    with the full text, sender and receiver, the related card and commit, and any
    `FORGE-REPORT` rendered as a structured verdict.
 4. **Focus mode.** Click an agent to see its live tool-call stream, recent messages,
-   worktree/branch/HEAD, model, tokens and cost, and runtime. Actions: **message, steer,
-   pause/stop, open session**.
+   worktree/branch/HEAD, model, tokens and cost, and runtime. Actions: **message** (built: the
+   "Message agent" composer, see plugin/README.md), **steer, pause/stop, open session**.
 5. **Attention inbox.** Approvals waiting on Zach, blocked agents, gate denials, stalls
    (no progress for 30 minutes), failed runs. A badge in the top bar plus an optional
    subtle sound.

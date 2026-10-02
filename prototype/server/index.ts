@@ -1,10 +1,11 @@
-// Tiny read-only API: JSON + SSE, bound to 127.0.0.1 only.
+// Tiny local API: JSON + SSE, bound to 127.0.0.1 only. Reads are GET; the only write is POST /api/send.
 //   GET /api/config
 //   GET /api/snapshot?source=live|mock
 //   GET /api/stream?source=live|mock      (SSE: "snapshot" once, then "delta")
 //   GET /api/history?source=..&key=<sessionKey>
+//   POST /api/send?source=..   {key, message}  ("Message agent": one Gateway sessions.send; needs header x-agent-os-send: 1)
 // Every payload passes through redactDeep() before it is written.
-import { createServer, type ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createLiveSource } from './live.ts';
 import { createMockSource } from './mock.ts';
 import { redactDeep } from './redact.ts';
@@ -29,11 +30,34 @@ function json(res: ServerResponse, code: number, body: unknown) {
 }
 const sse = (res: ServerResponse, event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(redactDeep(data))}\n\n`);
 
+// Anything a web page can fire without a preflight is refused: JSON content type + a custom header, and no CORS
+// headers here, so another origin cannot pass the preflight. Body is capped.
+async function send(req: IncomingMessage, res: ServerResponse, src: string | null) {
+  if (req.headers['x-agent-os-send'] !== '1' || !String(req.headers['content-type'] ?? '').startsWith('application/json')) return json(res, 403, { error: 'forbidden' });
+  let raw = '';
+  for await (const chunk of req) {
+    raw += chunk;
+    if (raw.length > 16_384) return json(res, 413, { error: 'body too large' });
+  }
+  let body: { key?: unknown; message?: unknown };
+  try { body = JSON.parse(raw); } catch { return json(res, 400, { error: 'bad JSON' }); }
+  if (typeof body.key !== 'string' || typeof body.message !== 'string') return json(res, 400, { error: 'key and message are required strings' });
+  try {
+    const s = source(src);
+    await s.ready;
+    await s.send(body.key, body.message);
+    json(res, 200, { ok: true });
+  } catch (e) {
+    json(res, /unknown session|empty|too long/.test((e as Error).message) ? 400 : 502, { error: (e as Error).message });
+  }
+}
+
 const server = createServer(async (req, res) => {
   if (!ALLOWED_HOSTS.test(req.headers.host ?? '')) return json(res, 403, { error: 'forbidden host' });
   const url = new URL(req.url ?? '/', `http://${HOST}`);
-  if (req.method !== 'GET') return json(res, 405, { error: 'read-only' });
   const src = url.searchParams.get('source');
+  if (req.method === 'POST' && url.pathname === '/api/send') return send(req, res, src);
+  if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
   try {
     if (url.pathname === '/api/config') return json(res, 200, { defaultSource: DEFAULT_SOURCE, sources: ['live', 'mock'] });
     if (url.pathname === '/api/snapshot') {

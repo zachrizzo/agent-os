@@ -60,7 +60,7 @@ export function mountActivity(el: HTMLElement, store: ShellStore, openEvent: (e:
 
   function rowHtml(s: ShellState, e: FleetEvent) {
     const kc = KIND_COLOR[e.kind];
-    return `<span class="edot" style="--hue:${hueOf(s, e.from)}"></span>
+    return `<span class="edot" style="--hue:${hueOf(s, e.from === 'zach' ? e.to : e.from)}"></span>
       <div class="eline"><span class="who">${esc(nameOf(s, e.from))}</span><span class="arr">→</span><span class="who">${esc(nameOf(s, e.to))}</span>
         <span class="kchip" style="--k:${kc}">${e.kind}</span></div>
       <div class="etext">${esc(e.text)}</div>
@@ -99,7 +99,7 @@ export function mountActivity(el: HTMLElement, store: ShellStore, openEvent: (e:
     for (let i = all.length - 1; i >= 0 && total < MAX_ROWS * 3; i--) {
       const e = all[i];
       if (!matchesFilter(s, e, s.filter) || !matchesQuery(s, e, q)) continue;
-      const team = s.agentsAll.get(e.from)?.team ?? '?';
+      const team = s.agentsAll.get(e.from === 'zach' ? e.to : e.from)?.team ?? '?';
       if (s.hiddenTeams.has(team)) continue;
       let g = groups.get(team);
       if (!g) groups.set(team, (g = []));

@@ -1,5 +1,5 @@
 // Synthetic fleet: ~60 agents in 7 teams (CoS at the root), ~10 events/s, spawn/finish churn, rotating "needs you".
-import { COS_ID, TEAM_PALETTE, type Agent, type Delta, type EventKind, type FleetEvent, type Snapshot, type Team } from '../shared/types.ts';
+import { COS_ID, TEAM_PALETTE, type Agent, type Delta, type EventKind, type FleetEvent, type HistoryItem, type Snapshot, type Team } from '../shared/types.ts';
 import type { Source } from './source.ts';
 
 const TEAMS: Array<{ id: string; name: string; lead: string; size: number; workers: string[] }> = [
@@ -103,6 +103,7 @@ export function createMockSource(): Source {
   const events: FleetEvent[] = [];
   const listeners = new Set<(d: Delta) => void>();
   let pending: FleetEvent[] = [];
+  const sentLog = new Map<string, HistoryItem[]>(); // "Message agent" texts per session, echoed in history
   let changed = new Set<string>();
   let removed: string[] = [];
   const all = () => [...agents.values()];
@@ -217,7 +218,19 @@ export function createMockSource(): Source {
         { role: 'assistant', ts: t - 120_000, text: `${a.now}…` },
         { role: 'assistant', ts: t - 60_000, text: `⚙ exec · ${pick(MSG.check)}` },
         { role: 'assistant', ts: t - 5_000, text: a.ask ?? pick(MSG.report) },
+        ...(sentLog.get(key) ?? []),
       ];
+    },
+    async send(key, text) {
+      const message = String(text ?? '').trim();
+      if (!message) throw new Error('empty message');
+      if (message.length > 4000) throw new Error('message too long (max 4000 chars)');
+      const a = agents.get(key);
+      if (!a) throw new Error('unknown session');
+      const ts = Date.now();
+      sentLog.set(key, [...(sentLog.get(key) ?? []), { role: 'user', ts, text: message }]);
+      push({ ts, from: 'zach', to: key, kind: 'message', text: message });
+      a.updatedAt = ts; changed.add(key);
     },
     close() { clearInterval(t1); clearInterval(t2); clearInterval(t3); },
   };

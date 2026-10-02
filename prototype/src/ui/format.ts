@@ -46,7 +46,7 @@ export function nameOf(s: ShellState, id: string) {
 }
 
 export function hueOf(s: ShellState, agentId: string) {
-  const a = s.agentsAll.get(agentId);
+  const a = s.agentsAll.get(agentId === 'zach' ? '' : agentId);
   return (a && s.teamsById.get(a.team)?.hue) || '#7a8494';
 }
 
@@ -110,5 +110,6 @@ export const ICONS = {
   plus: '<path d="M12 5v14M5 12h14"/>',
   dots: '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
   back: '<path d="m15 18-6-6 6-6"/>',
+  send: '<path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7Z"/>',
   wifiOff: '<path d="M2 8.8a15 15 0 0 1 4.2-2.7M10.7 5.1A15 15 0 0 1 22 8.8M5 12.9a10 10 0 0 1 5.2-2.8M19 12.9a10 10 0 0 0-2-1.5M8.5 16.4a5 5 0 0 1 7 0M12 20h.01M2 2l20 20"/>',
 } as const;

@@ -1,11 +1,15 @@
-ok   webkit · agent-os live-only default + history toggle {live:60, hidden:120, withHistory:60/120}
+ok   webkit · agent-os live-only default + history toggle {live:60, hidden:150, withHistory:60/150}
+ok   webkit · Message agent composer (agent view, team view, drawer, Activity You -> agent)
+ok   webkit · rail erroring count is live-only {off:"All systems operational", on:"All systems operational"}
 ok   webkit · desktop, catalog settles after composer mounts {"live":true,"talk":1,"dict":0,"sends":0,"picker":0} activeAtTalk=true
 ok   webkit · narrow layout (Talk button display:none) {"live":true,"talk":1,"dict":0,"sends":0,"picker":0} activeAtTalk=true
 ok   webkit · catalog answers out of order (slow UI status) {"live":true,"talk":1,"dict":0,"sends":0,"picker":1} activeAtTalk=true
 ok   webkit · realtime unavailable {"live":false,"talk":0,"dict":0,"sends":0,"picker":0} activeAtTalk=null
 ok   webkit · draft in composer must not be sent {"live":false,"talk":0,"dict":0,"sends":0,"picker":0} activeAtTalk=null
 ok   webkit · no mic in composer {"live":false,"talk":0,"dict":0,"sends":0,"picker":0} activeAtTalk=null
-ok   chromium · agent-os live-only default + history toggle {live:60, hidden:130, withHistory:60/131}
+ok   chromium · agent-os live-only default + history toggle {live:60, hidden:150, withHistory:60/150}
+ok   chromium · Message agent composer (agent view, team view, drawer, Activity You -> agent)
+ok   chromium · rail erroring count is live-only {off:"3 agents erroring", on:"3 agents erroring"}
 ok   chromium · desktop, catalog settles after composer mounts {"live":true,"talk":1,"dict":0,"sends":0,"picker":0} activeAtTalk=true
 ok   chromium · narrow layout (Talk button display:none) {"live":true,"talk":1,"dict":0,"sends":0,"picker":0} activeAtTalk=true
 ok   chromium · catalog answers out of order (slow UI status) {"live":true,"talk":1,"dict":0,"sends":0,"picker":1} activeAtTalk=true

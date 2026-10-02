@@ -27,8 +27,11 @@ async function boot() {
   const store = createStore(source);
   document.documentElement.dataset.source = source;
 
-  const center = mountCenter($('center'), store, { onFocusMode: () => { app.classList.toggle('focus'); setTimeout(() => center.resize(), 260); } });
   const drawer = mountDrawer($('drawer'), store);
+  const center = mountCenter($('center'), store, {
+    onFocusMode: () => { app.classList.toggle('focus'); setTimeout(() => center.resize(), 260); },
+    onOpenSession: (key) => drawer.openSession(key, true),
+  });
   const activity = mountActivity($('activity'), store, (e) => drawer.open(e));
   const renderRail = mountRail($('rail'), store, (sel) => { center.focus(sel); app.classList.remove('rail-open'); });
   const renderTop = mountTopbar($('topbar'), store, {

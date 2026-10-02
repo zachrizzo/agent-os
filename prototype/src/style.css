@@ -308,6 +308,23 @@ button.who-btn:hover { background: rgba(255, 255, 255, 0.06); }
 @keyframes arrive { from { background: rgba(124, 156, 255, 0.1); } to { background: transparent; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 
+/* ---------- "Message agent" composer (drawer + agent/team view) ---------- */
+.composer { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.cmp-row { display: flex; align-items: flex-end; gap: 8px; }
+.composer textarea { flex: 1; min-width: 0; resize: none; max-height: 120px; padding: 8px 11px; border-radius: 10px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--line-2); color: var(--fg); font: inherit; line-height: 1.4; outline: none; transition: border-color 0.12s; }
+.composer textarea:focus { border-color: color-mix(in srgb, var(--hue, #7c9cff) 60%, #fff 10%); }
+.composer textarea:disabled { opacity: 0.55; }
+.cmp-send { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px; border-radius: 9px; font-weight: 600; color: #0b0d10; background: color-mix(in srgb, var(--hue, #7c9cff) 80%, #fff 20%); transition: opacity 0.12s; }
+.cmp-send:disabled { opacity: 0.35; cursor: default; }
+.cmp-status { min-height: 15px; padding: 0 2px; font-size: 11.5px; color: var(--muted); }
+.cmp-status.ok { color: #6ee7b7; }
+.cmp-status.err { color: #fca5a5; }
+.d-compose { padding: 10px 14px 12px; border-top: 1px solid var(--line); display: flex; }
+.c-compose { position: absolute; left: 50%; bottom: 66px; transform: translateX(-50%); width: min(560px, calc(100% - 40px)); z-index: 3; display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px 4px; border-radius: 12px; background: rgba(17, 20, 25, 0.88); border: 1px solid var(--line-2); backdrop-filter: blur(10px); box-shadow: 0 8px 30px -8px rgba(0, 0, 0, 0.6); }
+.c-compose[hidden] { display: none; }
+.cmp-thread { height: 34px; padding: 0 10px; border-radius: 9px; color: var(--fg-2); border: 1px solid var(--line-2); }
+.cmp-thread:hover { color: var(--fg); background: rgba(255, 255, 255, 0.06); }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 1440px) {
   #app { grid-template-columns: 240px minmax(0, 1fr) 360px; }

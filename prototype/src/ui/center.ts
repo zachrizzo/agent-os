@@ -1,9 +1,10 @@
 // Center column: map host + overlays (breadcrumb, title, zoom pills, legend) and empty/loading states.
 import type { MapApi, Selection, Zoom } from '../contract';
 import type { ShellState, ShellStore } from '../store';
+import { mountComposer } from './composer';
 import { esc, openNeeds, svg } from './format';
 
-export function mountCenter(el: HTMLElement, store: ShellStore, opts: { onFocusMode: () => void }) {
+export function mountCenter(el: HTMLElement, store: ShellStore, opts: { onFocusMode: () => void; onOpenSession: (key: string) => void }) {
   el.innerHTML = `
     <div class="map-host"></div>
     <div class="map-vignette"></div>
@@ -14,6 +15,7 @@ export function mountCenter(el: HTMLElement, store: ShellStore, opts: { onFocusM
     </div>
     <div class="c-tools"><button class="icon-btn tool focus-btn" title="Focus map (hide panels)">${svg('expand', 16)}</button></div>
     <div class="c-state" hidden></div>
+    <div class="c-compose" hidden><div class="cmp-mount"></div><button class="cmp-thread" title="Open this session's thread">Thread</button></div>
     <div class="c-bottom">
       <div class="seg zoom-seg">${(['fleet', 'team', 'agent'] as Zoom[]).map((z) => `<button data-z="${z}">${z[0].toUpperCase() + z.slice(1)}</button>`).join('')}</div>
       <div class="legend"></div>
@@ -27,6 +29,10 @@ export function mountCenter(el: HTMLElement, store: ShellStore, opts: { onFocusM
   const legend = el.querySelector<HTMLElement>('.legend')!;
   const stateEl = el.querySelector<HTMLElement>('.c-state')!;
   const seg = el.querySelector<HTMLElement>('.zoom-seg')!;
+  const compose = el.querySelector<HTMLElement>('.c-compose')!;
+  const composer = mountComposer(compose.querySelector<HTMLElement>('.cmp-mount')!, store);
+  let composeKey = '';
+  compose.querySelector('.cmp-thread')!.addEventListener('click', () => { if (composeKey) opts.onOpenSession(composeKey); });
   let map: MapApi | null = null;
 
   seg.addEventListener('click', (e) => {
@@ -69,6 +75,19 @@ export function mountCenter(el: HTMLElement, store: ShellStore, opts: { onFocusM
         const a = s.agentsById.get(sel.id);
         if (a) { t = a.name; subtitle = a.now; }
       }
+      // "Message agent": the selected agent, or a selected team's lead (else its first main session).
+      let target: { key: string; label: string } | null = null;
+      if (sel.type === 'agent') {
+        const a = s.agentsById.get(sel.id);
+        if (a) target = { key: a.id, label: a.name };
+      } else if (sel.type === 'team' && team) {
+        const lead = (team.lead && s.agentsById.get(team.lead)) || agents.find((a) => a.team === team.id && a.kind === 'main');
+        if (lead) target = { key: lead.id, label: `${team.name} lead` };
+      }
+      composeKey = target?.key ?? '';
+      compose.hidden = !target;
+      compose.style.setProperty('--hue', team?.hue ?? '#7c9cff');
+      if (target) composer.setTarget(target);
       title.textContent = t;
       title.style.setProperty('--hue', team?.hue ?? 'transparent');
       title.classList.toggle('has-hue', !!team);

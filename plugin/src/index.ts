@@ -1,13 +1,13 @@
 import { readFile } from "node:fs/promises";
-import { request } from "node:http";
+import { request, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineFeaturePlugin } from "openclaw/plugin-sdk/feature-plugin";
 import { contract } from "./contract.js";
 
-// Serves the built Agent OS app at /agent-os/ on the Gateway origin and proxies its read-only
-// /agent-os/api/* calls to the local data server (:5198). The Control UI tab frames it sandboxed
-// (opaque origin), so responses carry permissive CORS; nothing here mutates state.
+// Serves the built Agent OS app at /agent-os/ on the Gateway origin and proxies its /agent-os/api/* calls to
+// the local data server (:5198): GETs for reads, plus the single write POST /api/send ("Message agent").
+// The Control UI tab frames it sandboxed (opaque origin), so responses carry permissive CORS.
 const ROUTE = "/agent-os";
 const API = { host: "127.0.0.1", port: 5198 };
 const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app");
@@ -15,6 +15,8 @@ const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
   ".woff2": "font/woff2", ".woff": "font/woff", ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json",
 };
+const SEND_PATH = "/api/send";
+const SEND_BODY_MAX = 16_384;
 const cors = { "Access-Control-Allow-Origin": "*", "Cross-Origin-Resource-Policy": "cross-origin", "X-Content-Type-Options": "nosniff" };
 
 function apiUp(): Promise<boolean> {
@@ -24,6 +26,38 @@ function apiUp(): Promise<boolean> {
     req.on("timeout", () => { req.destroy(); resolve(false); });
     req.end();
   });
+}
+
+// The tab's iframe is sandboxed, so its Origin is "null"; a same-origin page is also fine. Any other web origin is refused.
+function sendOriginOk(req: IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (!origin || origin === "null") return true;
+  try { return new URL(origin).host === req.headers.host; } catch { return false; }
+}
+
+function sendMessage(req: IncomingMessage, res: ServerResponse, url: URL): boolean {
+  const head = { ...cors, "cache-control": "no-store", "content-type": "application/json" };
+  if (!sendOriginOk(req)) { res.writeHead(403, head); res.end('{"error":"forbidden origin"}'); return true; }
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, { ...cors, "access-control-allow-methods": "POST", "access-control-allow-headers": "content-type, x-agent-os-send", "access-control-max-age": "600" });
+    res.end();
+    return true;
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let over = false;
+  req.on("data", (c: Buffer) => { size += c.length; if (size > SEND_BODY_MAX) over = true; else chunks.push(c); });
+  req.on("end", () => {
+    if (over) { res.writeHead(413, head); res.end('{"error":"body too large"}'); return; }
+    const body = Buffer.concat(chunks);
+    const up = request({ ...API, path: SEND_PATH + url.search, method: "POST", headers: { "content-type": "application/json", "x-agent-os-send": "1", "content-length": body.length } }, (r) => {
+      res.writeHead(r.statusCode ?? 502, { ...head, "content-type": r.headers["content-type"] ?? "application/json" });
+      r.pipe(res);
+    });
+    up.on("error", () => { if (!res.headersSent) res.writeHead(502, head); res.end('{"error":"agent-os data server unavailable"}'); });
+    up.end(body);
+  });
+  return true;
 }
 
 export default defineFeaturePlugin({
@@ -37,8 +71,9 @@ export default defineFeaturePlugin({
       match: "prefix",
       handler: async (req, res) => {
         const url = new URL(req.url ?? "/", "http://gateway");
-        if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405, cors); res.end(); return true; }
         let rel = url.pathname.slice(ROUTE.length) || "/";
+        if (rel === SEND_PATH && (req.method === "POST" || req.method === "OPTIONS")) return sendMessage(req, res, url);
+        if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405, cors); res.end(); return true; }
         if (rel.startsWith("/api/")) {
           const up = request({ ...API, path: rel + url.search, method: "GET", headers: { accept: req.headers.accept ?? "*/*" } }, (r) => {
             res.writeHead(r.statusCode ?? 502, { ...cors, "content-type": r.headers["content-type"] ?? "application/json", "cache-control": "no-store" });

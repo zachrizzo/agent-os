@@ -204,7 +204,7 @@ export function mountRail(el: HTMLElement, store: ShellStore, focus: (sel: Selec
     if (!rows.length) inner.innerHTML = `<div class="empty-mini">${s.query ? 'No agents match “' + esc(s.query) + '”' : 'No agents running'}</div>`, els.clear();
 
     meta.textContent = s.teamsById.size ? `${s.teamsById.size} teams` : '';
-    const errs = [...s.agentsById.values()].filter((a) => a.status === 'error').length;
+    const errs = [...s.agentsById.values()].filter((a) => a.status === 'error' && !a.retired).length; // live only, even with History on
     const state = s.reconnecting ? 'warn' : errs || s.snapshot.error ? 'err' : 'ok';
     sysDot.className = `sys-dot ${state}`;
     sysText.textContent = s.reconnecting ? 'Reconnecting to fleet…' : s.snapshot.error ? 'Source degraded' : errs ? `${errs} agent${errs > 1 ? 's' : ''} erroring` : 'All systems operational';

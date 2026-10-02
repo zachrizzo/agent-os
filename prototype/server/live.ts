@@ -1,7 +1,8 @@
-// Live fleet from the local Gateway via `openclaw gateway call` (READ methods only).
+// Live fleet from the local Gateway via `openclaw gateway call`: READ methods, plus one write, sessions.send ("Message agent").
 // The CLI resolves Gateway auth itself; no token ever passes through this process or the browser.
 // At most one CLI call is in flight at a time; slow calls (>2s) back the poll interval off.
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { COS_ID, TEAM_PALETTE, type Agent, type AgentStatus, type Delta, type EventKind, type FleetEvent, type HistoryItem, type Meters, type Snapshot, type Team } from '../shared/types.ts';
@@ -11,6 +12,8 @@ import { redact } from './redact.ts';
 import type { Source } from './source.ts';
 
 const READ_METHODS = new Set(['sessions.list', 'agents.list', 'chat.history', 'usage.cost']);
+const SEND_METHOD = 'sessions.send';
+const MAX_MESSAGE_CHARS = 4000;
 const POLL_MS = 2500;
 const MAX_POLL_MS = 30_000;
 const SLOW_CALL_MS = 2000;
@@ -26,7 +29,7 @@ let chain: Promise<unknown> = Promise.resolve();
 let slowSince = 0; // set when any call exceeds SLOW_CALL_MS; read+cleared by the poll loop
 
 function call(method: string, params: Record<string, unknown> = {}, timeoutMs = 10_000): Promise<any> {
-  if (!READ_METHODS.has(method)) return Promise.reject(new Error(`method not allowed: ${method}`));
+  if (!READ_METHODS.has(method) && method !== SEND_METHOD) return Promise.reject(new Error(`method not allowed: ${method}`));
   const run = () => new Promise((resolve, reject) => {
     const t0 = Date.now();
     execFile(OPENCLAW, ['gateway', 'call', method, '--json', '--params', JSON.stringify(params), '--timeout', String(timeoutMs)],
@@ -104,6 +107,7 @@ export function createLiveSource(): Source {
   const teams = new Map<string, Team>();
   const ring: FleetEvent[] = [];
   const identities = new Map<string, string>(); // agentId -> display name
+  const sent = new Map<string, string>(); // session key -> last text Zach sent from the UI (its echo is not an agent message)
   let lastError: string | undefined;
   let eid = 0;
   let first = true;
@@ -271,7 +275,7 @@ export function createLiveSource(): Source {
         const inter = preview.match(INTER_RE);
         const at = Number(s.lastActivityAt ?? updatedAt);
         if (inter && visibleKeys.has(inter[1])) events.push(ev(at, inter[1], a.id, 'message', `Message to ${name}`));
-        else if (preview && !isCos && !preview.startsWith('[')) events.push(ev(at, a.id, to, /FORGE-REPORT/.test(preview) || s.status === 'done' ? 'report' : 'message', g));
+        else if (preview && !isCos && !preview.startsWith('[') && !isSentEcho(s.key, preview)) events.push(ev(at, a.id, to, /FORGE-REPORT/.test(preview) || s.status === 'done' ? 'report' : 'message', g));
         if (ask) events.push(ev(at, a.id, 'zach', 'approval', ask, true));
       } else if (!prev) {
         if (kind === 'subagent') events.push(ev(t, to, a.id, 'handoff', `Spawned ${name}${label && label !== name ? `: ${label}` : ''}`));
@@ -283,7 +287,7 @@ export function createLiveSource(): Source {
           const inter = preview.match(INTER_RE);
           if (inter) {
             events.push(ev(t, inter[1], a.id, 'message', `Message to ${name}`));
-          } else if (!isCos && !preview.startsWith('[')) {
+          } else if (!isCos && !preview.startsWith('[') && !isSentEcho(s.key, preview)) {
             const kindE: EventKind = /FORGE-REPORT/.test(preview) || s.status === 'done' ? 'report' : 'message';
             const asksCos = to === COS_ID && ASK_RE.test(preview);
             events.push(ev(t, a.id, to, kindE, g, asksCos || undefined));
@@ -310,6 +314,11 @@ export function createLiveSource(): Source {
     const teamsChanged = JSON.stringify([...teams.values()]) !== teamsBefore;
     first = false;
     broadcast({ ts: t, upserts, removed, events: events.slice(-200), meters: meters(), ...(teamsChanged ? { teams: [...teams.values()] } : {}) });
+  }
+
+  function isSentEcho(key: string, preview: string) {
+    const t = sent.get(key);
+    return !!t && oneLine(preview) === oneLine(t).slice(0, oneLine(preview).length);
   }
 
   function broadcast(d: Delta) { for (const l of listeners) l(d); }
@@ -345,6 +354,17 @@ export function createLiveSource(): Source {
         const sender = m.senderLabel ?? (m.senderSession?.sessionKey ? shortKey(m.senderSession.sessionKey) : undefined);
         return { role: String(m.role ?? '?'), ts: Number(m.timestamp ?? 0), ...(sender ? { sender: clip(sender, 60) } : {}), text: clip(body, 600) };
       }).filter((m) => m.text);
+    },
+    async send(key, text) {
+      const message = String(text ?? '').trim();
+      if (!message) throw new Error('empty message');
+      if (message.length > MAX_MESSAGE_CHARS) throw new Error(`message too long (max ${MAX_MESSAGE_CHARS} chars)`);
+      if (!agents.has(key)) throw new Error('unknown session');
+      await call(SEND_METHOD, { key, message, idempotencyKey: randomUUID() }, 20_000);
+      sent.set(key, message);
+      const e = ev(Date.now(), 'zach', key, 'message', message);
+      ringPush(ring, [e]);
+      broadcast({ ts: e.ts, upserts: [], removed: [], events: [e], meters: meters() });
     },
     close() { stopped = true; },
     ready,

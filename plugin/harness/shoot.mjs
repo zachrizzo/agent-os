@@ -1,4 +1,4 @@
-// First shoots the Agent OS map live-only (default) and with History on, then drives the mock-host harness in WebKit: Agent OS tab -> click "Talk to Voice" -> Voice pane live ->
+// First shoots the Agent OS map live-only (default) and with History on, then the "Message agent" composer (agent view, team view, session drawer after a send), then drives the mock-host harness in WebKit: Agent OS tab -> click "Talk to Voice" -> Voice pane live ->
 // header "Stop voice · Agent OS" -> back on the tab. Screenshots go to the directory in argv[2].
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -29,6 +29,35 @@ await page.click(".hist-btn");
 await page.waitForTimeout(2500);
 await shot("0b-agent-os-history-on");
 console.log("history on:", await page.locator(".c-sub").innerText());
+await page.click(".hist-btn"); // back to live-only
+
+// Message agent: agent view, team view, and the drawer after sending.
+const agentRow = page.locator("#rail .row.agent").first();
+await agentRow.click();
+await page.waitForSelector(".c-compose:visible");
+await page.locator(".c-compose textarea").fill("Status check from Zach: what are you on right now?");
+await page.waitForTimeout(900);
+await shot("0c-message-agent-agent-view");
+await page.keyboard.press("Enter");
+await page.waitForSelector(".c-compose .cmp-status.ok");
+await page.fill(".search input", "Status check from Zach"); // narrow the busy mock feed to the sent message
+await page.waitForTimeout(700);
+await page.locator("#activity .ev", { hasText: "Status check from Zach" }).first().click();
+await page.waitForSelector("#drawer.open .thread .msg");
+await page.locator("#drawer .d-compose textarea").fill("Thanks. Hold off on the merge until I review.");
+await page.locator("#drawer .cmp-send").click();
+await page.waitForSelector("#drawer .cmp-status.ok");
+await page.waitForTimeout(900);
+await shot("0e-message-agent-drawer");
+await page.keyboard.press("Escape");
+await page.fill(".search input", "");
+await page.locator("#rail .row.team").nth(1).click();
+await page.waitForSelector(".c-compose:visible");
+await page.locator(".c-compose textarea").fill("Team: please post a short status.");
+await page.waitForTimeout(900);
+await shot("0d-message-agent-team-view");
+await page.locator(".c-compose textarea").fill("");
+console.log("message agent shots done");
 await page.setViewportSize({ width: 1280, height: 760 });
 
 await page.goto(base);

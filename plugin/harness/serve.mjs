@@ -1,5 +1,5 @@
 // Dev harness server: serves the built plugin, a mock Control UI host page, the packaged app at
-// /agent-os/, and read-only GET proxying of /agent-os/api/* to the local data server (:5198, or the mock one with --mock).
+// /agent-os/, and GET proxying of /agent-os/api/* (plus POST /api/send, "Message agent") to the local data server (:5198, or the mock one with --mock).
 import { spawn } from "node:child_process";
 import { createServer, request } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -11,7 +11,7 @@ const port = Number(process.argv[2] ?? 5299);
 // `--mock`: run the prototype's mock data server on its own port (port + 1000) and proxy to it, so the
 // harness never touches a live Gateway or the default :5198 data server.
 const mock = process.argv.includes("--mock");
-const apiPort = mock ? port + 1000 : 5198;
+const apiPort = Number(process.env.AGENT_OS_API_PORT) || (mock ? port + 1000 : 5198); // AGENT_OS_API_PORT points the harness at a throwaway data server
 if (mock) {
   const proto = path.join(root, "..", "prototype");
   const api = spawn(path.join(proto, "node_modules", ".bin", "tsx"), ["server/index.ts", "--mock"], { cwd: proto, env: { ...process.env, AGENT_OS_API_PORT: String(apiPort) }, stdio: "inherit" });
@@ -26,13 +26,15 @@ const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/ja
 createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://harness");
   if (url.pathname.startsWith("/agent-os/api/")) {
-    const up = request({ host: "127.0.0.1", port: apiPort, path: url.pathname.slice("/agent-os".length) + url.search, method: "GET" }, (r) => {
+    const method = req.method === "POST" && url.pathname === "/agent-os/api/send" ? "POST" : "GET";
+    const headers = method === "POST" ? { "content-type": req.headers["content-type"] ?? "", "x-agent-os-send": req.headers["x-agent-os-send"] ?? "" } : {};
+    const up = request({ host: "127.0.0.1", port: apiPort, path: url.pathname.slice("/agent-os".length) + url.search, method, headers }, (r) => {
       res.writeHead(r.statusCode ?? 502, { ...cors, "content-type": r.headers["content-type"] ?? "application/json" });
       r.pipe(res);
       setTimeout(() => up.destroy(), 20_000);
     });
     up.on("error", () => { res.writeHead(502); res.end(); });
-    up.end();
+    if (method === "POST") req.pipe(up); else up.end();
     return;
   }
   let rel = url.pathname === "/" ? "/harness/index.html" : url.pathname;

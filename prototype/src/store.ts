@@ -30,6 +30,8 @@ export interface ShellStore extends Store {
   setFilter(f: Filter): void;
   setShowHistory(on: boolean): void;
   setPaused(p: boolean, scrubTs?: number | null): void;
+  /** "Message agent": POST the text to the data server, which sends it to the session. Rejects with the server's reason. */
+  sendMessage(sessionKey: string, text: string): Promise<void>;
   connect(): void;
   close(): void;
 }
@@ -96,7 +98,7 @@ export function createStore(source: Source): ShellStore {
       const b = Math.floor(e.ts / BUCKET_MS) * BUCKET_MS;
       let m = buckets.get(b);
       if (!m) buckets.set(b, (m = new Map()));
-      const t = teamOf(e.from);
+      const t = teamOf(e.from === 'zach' ? e.to : e.from);
       m.set(t, (m.get(t) ?? 0) + 1);
     }
     if (!added.length) return;
@@ -206,6 +208,17 @@ export function createStore(source: Source): ShellStore {
       state.paused = p;
       state.scrubTs = p ? scrubTs ?? Date.now() : null;
       notify();
+    },
+    async sendMessage(sessionKey, text) {
+      const r = await fetch(api(`send?source=${source}`), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-agent-os-send': '1' },
+        body: JSON.stringify({ key: sessionKey, message: text }),
+      });
+      if (!r.ok) {
+        const why = await r.json().then((j: { error?: string }) => j.error, () => undefined);
+        throw new Error(why ?? `HTTP ${r.status}`);
+      }
     },
     connect,
     close() { clearTimeout(timer); es?.close(); es = null; },
