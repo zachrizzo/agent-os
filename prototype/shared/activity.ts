@@ -22,6 +22,7 @@ export interface RawMessage {
   isError?: boolean;
   toolCallId?: string;
   idempotencyKey?: string;
+  api?: string;
   provenance?: { kind?: string; sourceSessionKey?: string; sourceTool?: string };
   senderSession?: { sessionKey?: string; agentId?: string };
   __openclaw?: { id?: string; seq?: number };
@@ -43,7 +44,7 @@ export interface SessionMeta {
   statusNote?: string;
 }
 
-export type TriggerType = 'user' | 'inter' | 'completion' | 'task' | 'cron' | 'heartbeat' | 'exec' | 'system' | 'unknown';
+export type TriggerType = 'user' | 'inter' | 'completion' | 'announce' | 'reply' | 'task' | 'cron' | 'heartbeat' | 'exec' | 'system' | 'unknown';
 export interface Trigger { type: TriggerType; from?: string; tool?: string; body: string; ts: number }
 
 const ERROR_STATUSES = new Set(['killed', 'failed', 'error', 'aborted', 'timeout', 'timed_out', 'crashed']);
@@ -51,8 +52,12 @@ const HEARTBEAT_RE = /^\s*(\[OpenClaw heartbeat[^\]]*\]|OpenClaw resumed this CL
 const EXEC_RE = /^\s*(\[OpenClaw exec[^\]]*\]|System:?\s*Exec (completed|finished|failed)|Exec (completed|finished|failed)\b)/i;
 const SYSTEM_RE = /^\s*\[System\]/i;
 const COMPLETION_TOOLS = /^subagent_/;
-const SILENT_RE = /^(NO_REPLY|NOREPLY|HEARTBEAT_OK)[.!\s]*$/i;
-const COO_TAG_RE = /^\s*\[COO\]\s*\*{0,2}\s*([A-Za-z][A-Za-z +,&/-]{1,40}?)\s*\*{0,2}\s*[:—-]\s*/;
+const A2A_STEP_RE = /^\s*Agent-to-agent (announce|reply) step\b/i; // OpenClaw's own protocol prompt after a sessions_send, not the sender's words
+const RESUME_RE = /^OpenClaw resumed this CLI session[^\n]*\n?/i;
+const SILENT_RE = /^(NO_REPLY|NOREPLY|HEARTBEAT_OK|ANNOUNCE_SKIP|REPLY_SKIP)[.!\s]*$/i;
+const TAG_WORDS = 'done|blocked|blocker|failed|decision|approval|fyi|update|status|ask|question|needs you';
+// "[COO] **done + decision**: ..." (bold: any short words) or "[COO] done: ..." (plain: known tag words only). "[COO] Add-on from Zach: ..." is not a tag.
+const COO_TAG_RE = new RegExp(`^\\s*\\[COO\\]\\s*(?:\\*\\*\\s*([A-Za-z][A-Za-z +,&/-]{1,40}?)\\s*\\*\\*\\s*[:\\u2014-]?|((?:${TAG_WORDS})(?:\\s*[+,&/]\\s*(?:${TAG_WORDS}))*)\\s*:)\\s*`, 'i');
 const FORGE_RE = /\bFORGE-REPORT\b/;
 const ASK_RE = /\b(decision[ _](needed|required)|needs? (your|a) (decision|approval|go-?ahead|sign-?off|input|call)|awaiting (your )?(approval|decision|input|go-?ahead)|waiting (on|for) (you|zach|your|approval)|please (approve|confirm|decide|choose|pick)|approve (this|the|deploy|merge|release)\b|your call\b|blocked on (you|zach)|want me to\b[^?]{0,140}\?|should i\b[^?]{0,140}\?|which (option|approach|one|path)\b[^?]{0,100}\?|(ok|okay) to (proceed|merge|deploy|ship|push)\?|say ["“]yes["”])/i;
 const APPROVAL_RE = /(\/approve\b|approval[- ](pending|required)|awaiting (exec )?approval|needs? approval to run)/i;
@@ -81,11 +86,14 @@ export function firstMeaningfulLine(text: string, max = 200): string {
   t = t.replace(/\[truncated-by-retention[^\]]*\]/gi, '').replace(/<\/?prompt-data>/g, '');
   const tag = COO_TAG_RE.exec(t);
   if (tag) t = t.slice(tag[0].length);
-  const lines = t.split('\n').map((l) => l.replace(/^\s*(?:[-*•]|\d+[.)]|#{1,6}|>)\s+/, '').replace(/[`*_]+/g, '').replace(/\s+/g, ' ').trim());
-  const real = lines.filter((l) => /[A-Za-z0-9]{2}/.test(l) && !/^NO_REPLY$/i.test(l) && !/^```/.test(l) && !/^\[?\s*(truncated|Subagent Context)/i.test(l));
-  const pick = real.find((l) => !(l.length <= 40 && /:$/.test(l)) ) ?? real[0] ?? '';
+  else t = t.replace(/^\s*\[[^\]\n]{1,40}\]\s+(?=\S)/, ''); // a leading sender tag like "[COO]" / "[Radar]": the row already names the sender
+  // A "label" is a bare heading ("**Branch / sha:**", "## Summary:", "Result:"), not a sentence that happens to end in a colon.
+  const isLabel = (l: string) => /:\*{0,2}$/.test(l) && (/^(\*\*|#{1,6}\s)/.test(l) || l.length <= 20);
+  const lines = t.split('\n').map((l) => ({ label: isLabel(l.trim()), text: l.replace(/^\s*(?:[-*\u2022]|\d+[.)]|#{1,6}|>)\s+/, '').replace(/[`*_]+/g, '').replace(/\s+/g, ' ').trim() }));
+  const real = lines.filter((l) => /[A-Za-z0-9]{2}/.test(l.text) && !/^NO_REPLY$/i.test(l.text) && !/^```/.test(l.text) && !/^\[?\s*(truncated|Subagent Context)/i.test(l.text));
+  const pick = (real.find((l) => !l.label) ?? real[0])?.text ?? '';
   const one = pick.length > max ? `${pick.slice(0, max - 1).trimEnd()}…` : pick;
-  return one || (tag ? tag[1].trim() : '');
+  return one || (tag ? (tag[1] ?? tag[2]).trim() : '');
 }
 
 function hash(s: string): string {
@@ -95,9 +103,12 @@ function hash(s: string): string {
 }
 /** Same sender, recipient and words -> same id, whichever side (sender tool call or recipient inbox) we read it from. */
 export function messageId(from: string, to: string, body: string): string {
-  const norm = body.replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 240);
-  return `msg:${from}>${to}:${hash(norm)}`;
+  const norm = body.replace(RESUME_RE, '').replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 240);
+  return `msg:${agentOfKey(from)}>${agentOfKey(to)}:${hash(norm)}`;
 }
+const agentOfKey = (key: string) => /^agent:([^:]+):/.exec(key)?.[1] ?? key;
+/** A run key ("agent:x:cron:<id>:run:<run>") names the same session as its prefix. */
+export const baseSession = (key: string) => key.replace(/:run:[^:]+$/, '');
 
 const msgKey = (m: RawMessage) => m.__openclaw?.id ?? m.idempotencyKey ?? String(m.timestamp ?? 0);
 const isToolName = (name: unknown, tool: string) => typeof name === 'string' && (name === tool || name.endsWith(`__${tool}`));
@@ -107,7 +118,7 @@ const isToolName = (name: unknown, tool: string) => typeof name === 'string' && 
 export function classifyText(text: string, opts: { askZach?: boolean } = {}): { kind: EventKind; needsYou: boolean } {
   const tag = COO_TAG_RE.exec(text);
   if (tag) {
-    const words = tag[1].toLowerCase().split(/[+,&/]|\band\b/).map((w) => w.trim());
+    const words = (tag[1] ?? tag[2]).toLowerCase().split(/[+,&/]|\band\b/).map((w) => w.trim());
     const has = (re: RegExp) => words.some((w) => re.test(w));
     if (has(/^(blocked|blocker|failed|error)/)) return { kind: 'blocked', needsYou: false };
     if (has(/^(decision|needs? you|needs? decision|ask|question)/)) return { kind: 'needs', needsYou: true };
@@ -123,6 +134,12 @@ export function classifyText(text: string, opts: { askZach?: boolean } = {}): { 
   if (APPROVAL_RE.test(text)) return { kind: 'approval', needsYou: true };
   if (opts.askZach && ASK_RE.test(text)) return { kind: 'needs', needsYou: true };
   return { kind: 'message', needsYou: false };
+}
+
+function interType(tool: string | undefined, body: string): TriggerType {
+  if (tool && COMPLETION_TOOLS.test(tool)) return 'completion';
+  const step = A2A_STEP_RE.exec(body.replace(RESUME_RE, ''));
+  return step ? (step[1].toLowerCase() === 'announce' ? 'announce' : 'reply') : 'inter';
 }
 
 export function classifyTrigger(m: RawMessage): Trigger | null {
@@ -143,10 +160,10 @@ export function classifyTrigger(m: RawMessage): Trigger | null {
   if (prov?.kind === 'inter_session') {
     const from = prov.sourceSessionKey ?? m.senderSession?.sessionKey;
     const tool = prov.sourceTool;
-    return { type: tool && COMPLETION_TOOLS.test(tool) ? 'completion' : 'inter', ...(from ? { from } : {}), ...(tool ? { tool } : {}), body: text, ts };
+    return { type: interType(tool, text), ...(from ? { from: baseSession(from) } : {}), ...(tool ? { tool } : {}), body: text, ts };
   }
   const inter = parseInterSession(text);
-  if (inter) return { type: inter.tool && COMPLETION_TOOLS.test(inter.tool) ? 'completion' : 'inter', from: inter.from, ...(inter.tool ? { tool: inter.tool } : {}), body: inter.body, ts };
+  if (inter) return { type: interType(inter.tool, inter.body), from: baseSession(inter.from), ...(inter.tool ? { tool: inter.tool } : {}), body: inter.body, ts };
   if (HEARTBEAT_RE.test(text)) return { type: 'heartbeat', body: text, ts };
   if (EXEC_RE.test(text)) return { type: 'exec', body: text, ts };
   if (SYSTEM_RE.test(text)) return { type: 'system', body: text, ts };
@@ -207,7 +224,7 @@ export interface DeriveOptions {
   maxText?: number;
 }
 
-const SYS_TEXT: Record<string, string> = { heartbeat: 'Heartbeat poll', exec: 'Exec completion notice', system: 'System notice', completion: 'Subagent completion delivered', cron: 'Scheduled run' };
+const SYS_TEXT: Record<string, string> = { announce: 'Announce step', reply: 'Reply step', heartbeat: 'Heartbeat poll', exec: 'Exec completion notice', system: 'System notice', completion: 'Subagent completion delivered', cron: 'Scheduled run' };
 
 /**
  * Events for one session from its recent history. `meta` is the session's list row (status, parent, label...).
@@ -235,11 +252,11 @@ export function deriveSessionEvents(meta: SessionMeta, history: RawMessage[], op
   for (const turn of turns) {
     const { trigger } = turn;
     const isSys = trigger.type === 'heartbeat' || trigger.type === 'exec' || trigger.type === 'system';
-    const isInternal = isSys || trigger.type === 'completion';
+    const isInternal = isSys || trigger.type === 'completion' || trigger.type === 'announce' || trigger.type === 'reply';
 
     // 1. Inbound inter-session message: sender -> this session (the same id the sender's own tool call produces).
     if (trigger.type === 'inter' && trigger.from && trigger.from !== meta.key) {
-      const body = trigger.body.replace(/^OpenClaw resumed this CLI session[^\n]*\n?/i, '').trim();
+      const body = trigger.body.replace(RESUME_RE, '').trim();
       if (body && isSilent(body)) {
         push({ id: `sys:${messageId(trigger.from, meta.key, body)}`, ts: trigger.ts, from: trigger.from, to: meta.key, kind: 'message', text: 'Inter-session message \u00b7 no reply', sys: true, session: trigger.from });
       } else if (body) {
@@ -269,7 +286,9 @@ export function deriveSessionEvents(meta: SessionMeta, history: RawMessage[], op
 
     // 3. The turn's own outcome: the last real assistant text. Never the trigger.
     const finals = turn.msgs.filter(isFinalAssistant);
-    const final = finals[finals.length - 1];
+    // The CLI runtime also mirrors the whole streamed text as one extra "final" (api "cli", idempotencyKey "cli-assistant:<run>"): prefer the real final.
+    const isMirror = (m: RawMessage) => m.api === 'cli' || /^cli-assistant:/.test(m.idempotencyKey ?? '');
+    const final = [...finals].reverse().find((m) => !isMirror(m)) ?? finals[finals.length - 1];
     const finalText = final ? textOf(final) : '';
     const err = turn.msgs.find((m) => m.role === 'custom' && m.customType === 'run-failed-before-reply');
     const aborted: RawMessage | undefined = !final ? [...turn.msgs].reverse().find((m) => m.role === 'assistant' && m.stopReason === 'aborted') : undefined;
@@ -303,10 +322,12 @@ export function deriveSessionEvents(meta: SessionMeta, history: RawMessage[], op
       continue;
     }
 
-    const toZach = trigger.type === 'user' && toZachOk;
+    // The announce step posts the agent's words to its own chat (Zach); a reply step answers the sender.
+    const toZach = (trigger.type === 'user' || trigger.type === 'announce') && toZachOk;
+    const to = toZach ? 'zach' : trigger.type === 'reply' && trigger.from ? trigger.from : '';
     const awaiting = toZach && turn === lastTurn && !meta.running;
     const c = classifyText(finalText, { askZach: awaiting });
-    push({ id: `turn:${meta.key}:${fid}`, ts, from: meta.key, to: toZach ? 'zach' : '', kind: c.kind, text: firstMeaningfulLine(finalText, maxText), session: meta.key, ...(c.needsYou ? { needsYou: true } : {}) });
+    push({ id: `turn:${meta.key}:${fid}`, ts, from: meta.key, to, kind: c.kind, text: firstMeaningfulLine(finalText, maxText), session: meta.key, ...(c.needsYou ? { needsYou: true } : {}) });
   }
 
   // A subagent that failed without producing any text still ended: say so once.

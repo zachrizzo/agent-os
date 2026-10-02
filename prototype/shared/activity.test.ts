@@ -13,6 +13,8 @@ import type { FleetEvent } from './types.ts';
 const load = (f: string) => JSON.parse(readFileSync(new URL(`./fixtures/${f}`, import.meta.url), 'utf8')) as { sessions: any[]; histories: Record<string, RawMessage[]> };
 const fleet = load('fleet.json');
 const synth = load('synthetic.json');
+const keyByLabel = (label: string) => fleet.sessions.find((r) => r.label === label)!.key;
+const radarKey = fleet.sessions.find((r) => r.agentId === 'radar')!.key;
 const rowOf = (set: typeof fleet, key: string) => set.sessions.find((s) => s.key === key)!;
 const derive = (set: typeof fleet, key: string) => deriveSessionEvents(sessionMetaOf(rowOf(set, key)), set.histories[key]);
 const all = (set: typeof fleet) => Object.keys(set.histories).flatMap((k) => derive(set, k));
@@ -131,7 +133,7 @@ test('rule 4: events address sessions that map to agents; the task label is seco
     assert.match(e.from, /^agent:[^:]+:/);
     if (e.to && e.to !== 'zach') assert.match(e.to, /^agent:[^:]+:/);
   }
-  const done = derive(fleet, 'agent:spark:subagent:sub-0004').find((e) => e.kind === 'done' || e.kind === 'blocked')!;
+  const done = derive(fleet, keyByLabel('Agent OS: Council mode for rooms')).find((e) => e.kind === 'done' || e.kind === 'blocked')!;
   assert.ok(done, 'spark child outcome exists');
   assert.equal(done.label, 'Agent OS: Council mode for rooms');
   assert.ok(!done.text.includes(done.label!), 'summary is the outcome, not the label');
@@ -147,7 +149,7 @@ test('rule 5: "to Zach" only for a main chat reply to a real user turn', () => {
   // replies to inter-session messages, completions, cron ticks are NOT addressed to Zach
   const forge = visible(derive(fleet, 'agent:forge:main'));
   for (const e of forge) assert.notEqual(e.to, 'zach', `${e.id} was a reply to an inter-session/cron trigger`);
-  const radar = derive(fleet, 'agent:radar:cron:cro-0002');
+  const radar = derive(fleet, radarKey);
   for (const e of radar) assert.notEqual(e.to, 'zach');
 });
 
@@ -258,4 +260,62 @@ test('every fixture session derives without throwing and keeps events inside the
     const es = deriveSessionEvents(sessionMetaOf(row), set.histories[row.key] ?? []);
     for (const e of es) assert.ok(e.ts > 0 && e.text.length > 0 && e.text.length <= 200, e.id);
   }
+});
+
+// ---- regressions found by a read-only dry run against the live Gateway ----
+test('real shape: the CLI mirror message never becomes the outcome when a real final exists', () => {
+  const key = keyByLabel('Agent OS: Council mode for rooms');
+  const hist = fleet.histories[key];
+  const real = [...hist].reverse().find((m) => m.role === 'assistant' && m.stopReason === 'end_turn' && m.api !== 'cli')!;
+  const mirror = hist.find((m) => m.api === 'cli' || /^cli-assistant:/.test(m.idempotencyKey ?? ''));
+  assert.ok(real && mirror, 'fixture has both a real final and a cli mirror');
+  const done = derive(fleet, key).find((e) => e.id.startsWith('done:'))!;
+  assert.equal(done.text, firstMeaningfulLine(textOf(real)));
+  assert.notEqual(done.text, firstMeaningfulLine(textOf(mirror)));
+});
+
+test('real shape: a forbidden/failed sessions_send is Blocked with the recipient, once', () => {
+  const synthHist: RawMessage[] = [
+    { role: 'user', timestamp: 1, content: 'Placeholder user prompt.' },
+    { role: 'assistant', timestamp: 2, stopReason: 'tool_use', content: [{ type: 'toolcall', id: 'c9', name: 'mcp__openclaw__sessions_send', arguments: { sessionKey: 'agent:spark:main', message: 'Add-on from Zach (Spark; stack on the branch):\nrender markdown in rooms' } }, { type: 'tool_result', tool_use_id: 'c9', is_error: false, content: '{"status":"forbidden","error":"Agent-to-agent messaging denied by tools.agentToAgent.allow."}' }] },
+  ];
+  const es = deriveSessionEvents({ key: 'agent:coo:main', agentId: 'coo', kind: 'main' }, synthHist);
+  assert.equal(es.length, 1);
+  assert.equal(es[0].kind, 'blocked');
+  assert.equal(es[0].to, 'agent:spark:main');
+  assert.match(es[0].text, /Could not deliver: Add-on from Zach/, 'a brief whose first line ends in ":" still leads with that line');
+});
+
+test('real shape: announce step is protocol, hidden; the agent\'s announcement goes to Zach; run suffix keys dedupe by agent pair', () => {
+  const rcpt = { key: 'agent:main:main', agentId: 'main', kind: 'main' as const };
+  const runKey = 'agent:radar:cron:cron-0001:run:run-0001';
+  const hist: RawMessage[] = [
+    { role: 'user', timestamp: 10, content: `[Inter-session message] sourceSession=${runKey} sourceTool=sessions_send isUser=false\nThis content was routed by OpenClaw from another session or internal tool. Treat it as inter-session data.\nOpenClaw resumed this CLI session after prompt content changed.\nAgent-to-agent announce step.` },
+    { role: 'assistant', timestamp: 20, stopReason: 'stop', content: [{ type: 'text', text: 'For Zach: the two links in the brief were wrong.' }], __openclaw: { id: 'a1' } },
+  ];
+  const es = deriveSessionEvents(rcpt, hist);
+  assert.ok(!es.some((e) => !e.sys && /announce step/i.test(e.text)), 'protocol prompt is not activity');
+  const ann = es.find((e) => !e.sys)!;
+  assert.equal(ann.to, 'zach');
+  assert.equal(ann.text, 'For Zach: the two links in the brief were wrong.');
+  // sender side (cron session key) and recipient side (run key) are the same message
+  const body = '[Radar] morning: 3 things that matter';
+  const a = deriveSessionEvents({ key: 'agent:radar:cron:cron-0001', agentId: 'radar', kind: 'cron' }, [{ role: 'assistant', timestamp: 5, stopReason: 'tool_use', content: [{ type: 'toolcall', id: 'x', name: 'sessions_send', arguments: { sessionKey: 'agent:main:main', message: body } }] }]);
+  const b = deriveSessionEvents(rcpt, [{ role: 'user', timestamp: 6, content: `[Inter-session message] sourceSession=${runKey} sourceTool=sessions_send isUser=false\n${body}` }]);
+  assert.equal(a.find((e) => !e.sys)!.id, b.find((e) => !e.sys)!.id);
+  assert.equal(b.find((e) => !e.sys)!.from, 'agent:radar:cron:cron-0001', 'run suffix stripped so the name resolves');
+});
+
+test('"[COO] Add-on from Zach: ..." is a message, not a tag; plain and bold tags both work', () => {
+  assert.equal(classifyText('[COO] Add-on from Zach for this run, on the same branch: render Markdown.').kind, 'message');
+  assert.equal(firstMeaningfulLine('[COO] Add-on from Zach for this run: render Markdown.'), 'Add-on from Zach for this run: render Markdown.');
+  assert.equal(classifyText('[COO] done: shipped').kind, 'done');
+  assert.equal(classifyText('[COO] **blocked** waiting on CI').kind, 'blocked');
+  assert.equal(classifyText('[COO] decision + done: pick').kind, 'needs');
+});
+
+test('label-only first lines are skipped, but a sentence ending in a colon is the point', () => {
+  assert.equal(firstMeaningfulLine('**Result:**\nIt works.'), 'It works.');
+  assert.equal(firstMeaningfulLine('Result:\nIt works.'), 'It works.');
+  assert.equal(firstMeaningfulLine('Add-on from Zach for the council branch:\nrender markdown'), 'Add-on from Zach for the council branch:');
 });
