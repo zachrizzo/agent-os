@@ -1,12 +1,13 @@
-// Drives the mock-host harness in WebKit: Agent OS tab -> click "Talk to Voice" -> Voice pane live ->
+// First shoots the Agent OS map live-only (default) and with History on, then drives the mock-host harness in WebKit: Agent OS tab -> click "Talk to Voice" -> Voice pane live ->
 // header "Stop voice · Agent OS" -> back on the tab. Screenshots go to the directory in argv[2].
 import { createRequire } from "node:module";
 import path from "node:path";
 const require = createRequire("/Users/zachrizzo/.openclaw/tools/node-v24.21.0/lib/node_modules/openclaw/");
 const { webkit, chromium } = require("playwright-core");
+import { ensureServer } from "./ensure-server.mjs";
 
 const out = process.argv[2];
-const base = process.argv[3] ?? "http://127.0.0.1:5299/";
+const base = await ensureServer(process.argv[3] ?? "http://127.0.0.1:5299/");
 const engine = process.argv[4] === "chromium" ? chromium : webkit;
 const tag = process.argv[4] === "chromium" ? "chromium" : "webkit";
 const browser = await engine.launch();
@@ -15,6 +16,20 @@ const logs = [];
 page.on("console", (m) => logs.push(m.text()));
 page.on("pageerror", (e) => logs.push("PAGEERROR " + e.message));
 const shot = (name) => page.screenshot({ path: path.join(out, `${tag}-${name}.png`) });
+
+// Live-only fleet: default view hides finished/aborted sessions; the History button carries the hidden count.
+await page.setViewportSize({ width: 1440, height: 860 });
+await page.goto(base + "agent-os/?source=mock");
+await page.waitForSelector(".hist-btn");
+await page.waitForFunction(() => document.querySelector(".meter[data-k=agents] b")?.textContent !== "–");
+await page.waitForTimeout(3500); // count tween + map layout settle
+await shot("0a-agent-os-live-only");
+console.log("live-only:", await page.locator(".meter[data-k=agents] b").innerText(), "agents; History", await page.locator(".hist-btn b").innerText());
+await page.click(".hist-btn");
+await page.waitForTimeout(2500);
+await shot("0b-agent-os-history-on");
+console.log("history on:", await page.locator(".c-sub").innerText());
+await page.setViewportSize({ width: 1280, height: 760 });
 
 await page.goto(base);
 await page.waitForSelector(".agent-os-voice__btn");

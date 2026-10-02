@@ -509,6 +509,7 @@ export const createMap: CreateMap = (el, store) => {
         const fade = n.dying ? Math.max(0, 1 - (now - n.dying) / 600) : age * age * (3 - 2 * age);
         if (fade <= 0.01) continue;
         let al = fade * (agentMode ? (related.has(a.id) ? 1 : 0.16) : ta < 1 ? 0.6 + ta * 0.4 : 1);
+        if (a.retired) al *= 0.4; // History view: finished sessions recede
         const isCos = a.id === COS_ID, isLead = a.role === 'lead' || n.fixed;
         const base = isCos ? 7.5 : isLead ? 4.6 : 3.4;
         const r = base * rs * (0.5 + 0.5 * fade) * px;

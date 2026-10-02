@@ -86,7 +86,7 @@ export function mountActivity(el: HTMLElement, store: ShellStore, openEvent: (e:
     needsN.textContent = `(${needs.length})`;
     needsList.innerHTML = needs.slice(0, 5).map((e) => {
       byId.set(e.id, e);
-      const a = s.agentsById.get(e.from);
+      const a = s.agentsAll.get(e.from);
       const team = a ? s.teamsById.get(a.team)?.name ?? a.team : '';
       return `<div class="need" data-ev="${e.id}"><span class="ndot"></span>
         <div class="grow"><div class="ntitle">${esc(e.text)}</div><div class="nsub">${esc(team)} · <span class="mono">${esc(nameOf(s, e.from))}</span></div></div>
@@ -99,7 +99,7 @@ export function mountActivity(el: HTMLElement, store: ShellStore, openEvent: (e:
     for (let i = all.length - 1; i >= 0 && total < MAX_ROWS * 3; i--) {
       const e = all[i];
       if (!matchesFilter(s, e, s.filter) || !matchesQuery(s, e, q)) continue;
-      const team = s.agentsById.get(e.from)?.team ?? '?';
+      const team = s.agentsAll.get(e.from)?.team ?? '?';
       if (s.hiddenTeams.has(team)) continue;
       let g = groups.get(team);
       if (!g) groups.set(team, (g = []));

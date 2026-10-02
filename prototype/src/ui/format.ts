@@ -39,20 +39,20 @@ export function rgba(hex: string, a: number) {
 /** Short display name for an agent id, falling back to a trimmed session key. */
 export function nameOf(s: ShellState, id: string) {
   if (id === 'zach') return 'You';
-  const a = s.agentsById.get(id);
+  const a = s.agentsAll.get(id);
   if (a) return a.name;
   const parts = id.split(':');
   return parts[1] ?? id;
 }
 
 export function hueOf(s: ShellState, agentId: string) {
-  const a = s.agentsById.get(agentId);
+  const a = s.agentsAll.get(agentId);
   return (a && s.teamsById.get(a.team)?.hue) || '#7a8494';
 }
 
 const ERR_RE = /\b(error|fail(ed|ure)?|exception|regression|crash|timeout)\b/i;
 export function isError(s: ShellState, e: FleetEvent) {
-  return s.agentsById.get(e.from)?.status === 'error' || ERR_RE.test(e.text);
+  return s.agentsAll.get(e.from)?.status === 'error' || ERR_RE.test(e.text);
 }
 
 export function matchesFilter(s: ShellState, e: FleetEvent, f: Filter) {
@@ -82,7 +82,7 @@ export function openNeeds(s: ShellState, events: FleetEvent[]) {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
     if (!e.needsYou || seenFrom.has(e.from)) continue;
-    const st = s.agentsById.get(e.from)?.status;
+    const st = s.agentsAll.get(e.from)?.status;
     if (st && st !== 'needs') continue;
     seenFrom.add(e.from);
     out.push(e);

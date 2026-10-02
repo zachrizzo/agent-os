@@ -26,7 +26,7 @@ export function mountDrawer(el: HTMLElement, store: ShellStore) {
   async function open(ev: FleetEvent) {
     current = ev;
     const s = store.get();
-    const a = s.agentsById.get(ev.from);
+    const a = s.agentsAll.get(ev.from);
     const team = a ? s.teamsById.get(a.team) : undefined;
     const hue = hueOf(s, ev.from);
     el.style.setProperty('--hue', hue);

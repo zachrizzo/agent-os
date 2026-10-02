@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { COS_ID, TEAM_PALETTE, type Agent, type AgentStatus, type Delta, type EventKind, type FleetEvent, type HistoryItem, type Meters, type Snapshot, type Team } from '../shared/types.ts';
+import { classifySession, isRunning } from '../shared/liveness.ts';
 import { ringPush } from './mock.ts';
 import { redact } from './redact.ts';
 import type { Source } from './source.ts';
@@ -192,7 +193,8 @@ export function createLiveSource(): Source {
     }
     const t = Date.now();
     const cutoff = t - WINDOW_HOURS * 3600_000;
-    const live = all.filter((s) => s?.key && !s.archived);
+    // Archived/finished sessions stay in the feed flagged `retired`; the browser hides them behind History.
+    const live = all.filter((s) => s?.key);
     const recent = live.filter((s) => s.key === COS_ID || s.hasActiveRun || Number(s.updatedAt ?? 0) >= cutoff);
     // Team leads anchor their teams: keep a lead visible whenever any of its members is.
     const leadsNeeded = new Set(recent.map((s) => teamOf(s.agentId ?? parseKey(s.key).agentId).lead));
@@ -226,10 +228,11 @@ export function createLiveSource(): Source {
         parent = role === 'lead' || !visibleKeys.has(tm.lead) ? COS_ID : tm.lead;
       }
 
-      const running = Boolean(s.hasActiveRun || s.status === 'running' || s.subagentRunState === 'active');
+      const running = isRunning(s);
+      const retired = !isCos && classifySession(s, t) === 'finished';
       const updatedAt = Number(s.updatedAt ?? s.lastActivityAt ?? 0);
       const errored = Boolean(s.abortedLastRun) || ERROR_STATUSES.has(String(s.status ?? ''));
-      const ask = errored ? undefined : needsAsk(s, running);
+      const ask = errored || retired ? undefined : needsAsk(s, running);
       const status: AgentStatus = errored ? 'error' : ask ? 'needs' : running || t - updatedAt < ACTIVE_MS ? 'active' : 'idle';
 
       const label = s.label ? clip(String(s.label).replace(/^Automation:\s*/, ''), 48) : undefined;
@@ -253,7 +256,7 @@ export function createLiveSource(): Source {
       const a: Agent = {
         id: s.key, name, team: tm.id, role, ...(parent ? { parent } : {}), status, now, costUsd, tokens,
         ...(s.model ? { model: String(s.model) } : {}), updatedAt, agentId, kind,
-        ...(label ? { label } : {}), ...(ask ? { ask } : {}),
+        ...(label ? { label } : {}), ...(ask ? { ask } : {}), ...(retired ? { retired: true } : {}),
       };
 
       const prev = raw.get(s.key);

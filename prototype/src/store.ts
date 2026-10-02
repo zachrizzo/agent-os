@@ -1,5 +1,7 @@
 // Shell store: owns the SSE connection and the view model. Implements the frozen `Store` contract
 // plus a few shell-only extras (search, filters, replay pause, density buckets).
+import { visibleView } from '../shared/liveness';
+import { COS_ID } from '../shared/types';
 import type { Agent, Delta, FleetEvent, Selection, Snapshot, State, Store, Team, Zoom } from './contract';
 
 export type Source = 'live' | 'mock';
@@ -11,6 +13,10 @@ export interface ShellState extends State {
   query: string;
   filter: Filter;
   scrubTs: number | null; // replay playhead when paused (stub)
+  showHistory: boolean;   // History toggle: reveal retired (finished/aborted/archived/stale) sessions
+  liveCount: number;      // live agents; the headline "agents" number
+  historyCount: number;   // retired sessions the toggle would reveal (or is revealing)
+  agentsAll: Map<string, Agent>; // every retained session, incl. hidden ones (name/team lookups for old events)
 }
 
 export interface ShellStore extends Store {
@@ -22,6 +28,7 @@ export interface ShellStore extends Store {
   density(): Map<number, Map<string, number>>;
   setQuery(q: string): void;
   setFilter(f: Filter): void;
+  setShowHistory(on: boolean): void;
   setPaused(p: boolean, scrubTs?: number | null): void;
   connect(): void;
   close(): void;
@@ -50,7 +57,12 @@ export function createStore(source: Source): ShellStore {
     query: '',
     filter: 'all',
     scrubTs: null,
+    showHistory: false,
+    liveCount: 0,
+    historyCount: 0,
+    agentsAll: new Map(),
   };
+  let rawTeams: Team[] = [];
   const subs = new Set<(s: State, fresh: FleetEvent[]) => void>();
   let ring: FleetEvent[] = [];
   const seen = new Set<string>();
@@ -73,7 +85,7 @@ export function createStore(source: Source): ShellStore {
     else setTimeout(run, 250);
   }
 
-  function teamOf(agentId: string) { return state.agentsById.get(agentId)?.team ?? '?'; }
+  function teamOf(agentId: string) { return state.agentsAll.get(agentId)?.team ?? '?'; }
 
   function ingest(evs: FleetEvent[], live: boolean) {
     const added: FleetEvent[] = [];
@@ -97,19 +109,25 @@ export function createStore(source: Source): ShellStore {
     if (live) fresh.push(...added);
   }
 
+  // Everything downstream (map, rail, counts) reads the filtered view; `agentsAll` keeps the rest.
   function rebuild(teams: Team[], extra: Partial<Snapshot>) {
-    state.teamsById = new Map(teams.map((t) => [t.id, t]));
+    rawTeams = teams;
+    const v = visibleView([...state.agentsAll.values()], teams, state.showHistory, COS_ID);
+    state.agentsById = new Map(v.agents.map((a) => [a.id, a]));
+    state.teamsById = new Map(v.teams.map((t) => [t.id, t]));
+    state.liveCount = v.liveCount;
+    state.historyCount = v.historyCount;
     state.snapshot = {
       ...state.snapshot,
       ...extra,
-      teams,
-      agents: [...state.agentsById.values()],
+      teams: v.teams,
+      agents: v.agents,
       events: ring.slice(-300),
     };
   }
 
   function applySnapshot(s: Snapshot) {
-    state.agentsById = new Map(s.agents.map((a) => [a.id, a]));
+    state.agentsAll = new Map(s.agents.map((a) => [a.id, a]));
     ring = [];
     seen.clear();
     buckets.clear();
@@ -122,10 +140,10 @@ export function createStore(source: Source): ShellStore {
   }
 
   function applyDelta(d: Delta) {
-    for (const a of d.upserts) state.agentsById.set(a.id, a as Agent);
-    for (const id of d.removed) state.agentsById.delete(id);
+    for (const a of d.upserts) state.agentsAll.set(a.id, a as Agent);
+    for (const id of d.removed) state.agentsAll.delete(id);
     ingest(d.events, true);
-    rebuild(d.teams ?? state.snapshot.teams, { ts: d.ts, meters: d.meters, error: d.error });
+    rebuild(d.teams ?? rawTeams, { ts: d.ts, meters: d.meters, error: d.error });
     notify();
   }
 
@@ -178,6 +196,12 @@ export function createStore(source: Source): ShellStore {
     density: () => buckets,
     setQuery(q) { if (q !== state.query) { state.query = q; notify(); } },
     setFilter(f) { if (f !== state.filter) { state.filter = f; notify(); } },
+    setShowHistory(on) {
+      if (on === state.showHistory) return;
+      state.showHistory = on;
+      rebuild(rawTeams, {});
+      notify();
+    },
     setPaused(p, scrubTs = null) {
       state.paused = p;
       state.scrubTs = p ? scrubTs ?? Date.now() : null;

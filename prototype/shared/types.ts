@@ -20,6 +20,7 @@ export interface Agent {
   kind?: 'main' | 'subagent' | 'cron' | 'other'; // session kind from the key
   label?: string; // session label / task title
   ask?: string; // when status === 'needs': what Zach is being asked
+  retired?: boolean; // finished/aborted/archived or stale session: hidden unless History is on (see liveness.ts)
 }
 
 export interface Team {

@@ -76,6 +76,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .needs-btn b { font-weight: 700; }
 .needs-btn .dotsep { opacity: 0.6; }
 .needs-btn[data-zero='1'] { color: var(--muted); background: var(--bg-2); border-color: var(--line-2); box-shadow: none; }
+.hist-btn {
+  display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px; border-radius: 8px; white-space: nowrap;
+  color: var(--muted); background: var(--bg-2); border: 1px solid var(--line-2); font-weight: 500; transition: filter 0.15s, color 0.15s;
+}
+.hist-btn:hover { filter: brightness(1.15); }
+.hist-btn b { font-weight: 700; font-variant-numeric: tabular-nums; }
+.hist-btn.on { color: var(--fg); border-color: rgba(157, 183, 255, 0.55); background: rgba(92, 124, 250, 0.16); }
 .search {
   display: flex; align-items: center; gap: 8px; width: 290px; height: 32px; padding: 0 8px 0 11px; border-radius: 8px;
   background: var(--bg-2); border: 1px solid var(--line-2); color: var(--muted); transition: border-color 0.15s, box-shadow 0.15s;

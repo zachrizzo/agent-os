@@ -74,6 +74,16 @@ export function createMockSource(): Source {
     return a;
   }
 
+  /** A finished session kept as history (done/aborted/…): the filtered-out noise the map must hide by default. */
+  function retire(a: Agent, ts: number, how: 'done' | 'aborted' | 'timeout' | 'killed' | 'archived'): Agent {
+    a.retired = true;
+    a.status = how === 'done' || how === 'archived' ? 'idle' : 'error';
+    a.now = how === 'done' ? `Done · ${pick(MSG.report)}`.slice(0, 60) : how === 'archived' ? 'Archived' : `${how === 'aborted' ? 'Aborted' : how === 'timeout' ? 'Timeout' : 'Killed'} · ${a.label ?? 'session'}`.slice(0, 60);
+    a.updatedAt = ts;
+    return a;
+  }
+  const HOW = ['done', 'done', 'done', 'aborted', 'timeout', 'killed', 'archived'] as const;
+
   for (const t of TEAMS) {
     const leadId = t.id === 'cos' ? COS_ID : `agent:${t.id}:main`;
     agents.set(leadId, {
@@ -83,6 +93,11 @@ export function createMockSource(): Source {
       agentId: t.id === 'cos' ? 'main' : t.id, kind: 'main',
     });
     t.workers.slice(0, t.size - 1).forEach((w) => spawnWorker(t.id, w, now));
+    // Retained finished sessions on every team (Forge-style pile-up): none running.
+    for (let i = 0; i < t.size * 2; i++) {
+      const ts = now - (3600 + i * 600) * 1000;
+      retire(spawnWorker(t.id, t.workers[i % t.workers.length], ts), ts, HOW[i % HOW.length]);
+    }
   }
 
   const events: FleetEvent[] = [];
@@ -91,12 +106,13 @@ export function createMockSource(): Source {
   let changed = new Set<string>();
   let removed: string[] = [];
   const all = () => [...agents.values()];
+  const liveAll = () => all().filter((a) => !a.retired);
   const push = (e: Omit<FleetEvent, 'id'>) => { const x = { id: `m${eid++}`, ...e }; pending.push(x); return x; };
   const workerOf = (a: Agent) => a.label?.split(' ').pop() ?? 'worker';
 
   function raiseNeed(ts: number) {
     const [teamId, text] = pick(ASKS);
-    const cands = all().filter((a) => a.team === teamId && a.role === 'worker' && a.status !== 'needs');
+    const cands = liveAll().filter((a) => a.team === teamId && a.role === 'worker' && a.status !== 'needs');
     if (!cands.length) return;
     const a = pick(cands);
     a.status = 'needs'; a.ask = text; a.now = `Needs you: ${text}`.slice(0, 60); a.updatedAt = ts;
@@ -107,7 +123,7 @@ export function createMockSource(): Source {
   for (let i = 0; i < 4; i++) raiseNeed(now - (4 - i) * 45_000);
 
   function emit(ts: number) {
-    const list = all();
+    const list = liveAll();
     const active = list.filter((a) => a.status === 'active');
     const src = rand() < 0.8 && active.length ? pick(active) : pick(list);
     const roll = rand();
@@ -138,18 +154,20 @@ export function createMockSource(): Source {
 
   function churn(ts: number) {
     // A worker finishes and leaves; its lead spawns a replacement (keeps the fleet ~60).
-    const done = all().filter((a) => a.role === 'worker' && a.status === 'idle');
+    const done = liveAll().filter((a) => a.role === 'worker' && a.status === 'idle');
     if (done.length) {
       const a = pick(done);
       push({ ts, from: a.id, to: a.parent ?? COS_ID, kind: 'report', text: `Finished · ${pick(MSG.report)}` });
-      agents.delete(a.id); changed.delete(a.id); removed.push(a.id);
+      retire(a, ts, pick(HOW)); changed.add(a.id); // stays in the feed as history
+      const hist = all().filter((x) => x.retired).sort((x, y) => x.updatedAt - y.updatedAt);
+      for (const old of hist.slice(0, Math.max(0, hist.length - 150))) { agents.delete(old.id); changed.delete(old.id); removed.push(old.id); }
       const b = spawnWorker(a.team, workerOf(a), ts);
       b.status = 'active';
       push({ ts, from: b.parent!, to: b.id, kind: 'handoff', text: `Spawned ${b.name}: ${pick(MSG.handoff)}` });
       changed.add(b.id);
     }
     // Resolve the oldest need, sometimes raise a new one.
-    const needs = all().filter((a) => a.status === 'needs').sort((x, y) => x.updatedAt - y.updatedAt);
+    const needs = liveAll().filter((a) => a.status === 'needs').sort((x, y) => x.updatedAt - y.updatedAt);
     if (needs.length > 2 && rand() < 0.5) {
       const a = needs[0];
       a.status = 'active'; delete a.ask; a.now = nowFor(workerOf(a)); a.updatedAt = ts;
@@ -176,7 +194,7 @@ export function createMockSource(): Source {
   }, 250);
 
   function meters() {
-    const list = all();
+    const list = liveAll();
     const active = list.filter((a) => a.status === 'active').length;
     return {
       tokPerMin: 250_000 + active * 3500 + Math.floor(rand() * 20000),

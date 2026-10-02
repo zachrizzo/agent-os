@@ -9,7 +9,8 @@
     "dev:api": "tsx watch server/index.ts",
     "dev:web": "vite",
     "build": "tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test shared/liveness.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

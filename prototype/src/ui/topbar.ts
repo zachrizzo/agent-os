@@ -4,7 +4,7 @@ import { fmtK, openNeeds, svg } from './format';
 interface Meter { key: string; label: string; value: (s: ShellState) => number; fmt: (n: number) => string }
 
 const METERS: Meter[] = [
-  { key: 'agents', label: 'agents', value: (s) => s.agentsById.size, fmt: (n) => String(Math.round(n)) },
+  { key: 'agents', label: 'agents', value: (s) => s.liveCount, fmt: (n) => String(Math.round(n)) },
   { key: 'active', label: 'active', value: (s) => count(s, 'active'), fmt: (n) => String(Math.round(n)) },
   { key: 'tok', label: 'tok/min', value: (s) => s.snapshot.meters.tokPerMin, fmt: fmtK },
   { key: 'cost', label: '/hr', value: (s) => s.snapshot.meters.costPerHr, fmt: (n) => `$${n.toFixed(2)}` },
@@ -30,6 +30,7 @@ export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds:
       ${METERS.map((m) => `<div class="meter" data-k="${m.key}"><b class="num">–</b><span>${m.label}</span></div>`).join('<i class="sep"></i>')}
     </div>
     <div class="spacer"></div>
+    <button class="hist-btn" aria-pressed="false" title="Show finished, aborted and archived sessions"><span>History</span><b>0</b></button>
     <button class="needs-btn" data-zero="1">${svg('warn', 15)}<span>Needs you</span><span class="dotsep">·</span><b>0</b></button>
     <label class="search">
       ${svg('search', 15)}
@@ -39,6 +40,7 @@ export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds:
 
   const input = el.querySelector('input')!;
   const needsBtn = el.querySelector<HTMLButtonElement>('.needs-btn')!;
+  const histBtn = el.querySelector<HTMLButtonElement>('.hist-btn')!;
   const conn = el.querySelector<HTMLElement>('.conn-pill')!;
   const err = el.querySelector<HTMLElement>('.err-pill')!;
   const nums = new Map<string, HTMLElement>();
@@ -52,6 +54,7 @@ export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds:
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); input.focus(); input.select(); }
   });
   needsBtn.addEventListener('click', opts.onNeeds);
+  histBtn.addEventListener('click', () => store.setShowHistory(!store.get().showHistory));
   el.querySelector('.menu-btn')!.addEventListener('click', opts.onMenu);
 
   // Numerals ease toward their target so the bar feels alive without flicker.
@@ -80,6 +83,9 @@ export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds:
     const n = openNeeds(s, store.events()).length;
     needsBtn.querySelector('b')!.textContent = String(n);
     needsBtn.dataset.zero = n ? '0' : '1';
+    histBtn.querySelector('b')!.textContent = String(s.historyCount);
+    histBtn.setAttribute('aria-pressed', String(s.showHistory));
+    histBtn.classList.toggle('on', s.showHistory);
     conn.hidden = !s.reconnecting;
     err.hidden = !s.snapshot.error;
     if (s.snapshot.error) { err.textContent = 'Source error'; err.title = s.snapshot.error; }
