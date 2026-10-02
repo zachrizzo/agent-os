@@ -21,7 +21,6 @@ function fromSnapshot(snap: Snapshot): State {
     selection: state?.selection ?? initialSel(snap),
     zoom: state?.zoom ?? ((q.get('zoom') as Zoom) || 'fleet'),
     hiddenTeams: state?.hiddenTeams ?? new Set(),
-    paused: false,
     connected: true,
   };
 }

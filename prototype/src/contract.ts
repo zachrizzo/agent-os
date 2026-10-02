@@ -17,7 +17,6 @@ export interface State {
   selection: Selection;
   zoom: Zoom;
   hiddenTeams: Set<string>;    // teams toggled off in the rail
-  paused: boolean;             // replay paused / live
   connected: boolean;
 }
 

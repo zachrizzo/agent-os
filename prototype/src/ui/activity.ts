@@ -28,12 +28,10 @@ export function mountActivity(el: HTMLElement, store: ShellStore, openEvent: (e:
   const needsN = el.querySelector<HTMLElement>('.needs-n')!;
   const stream = el.querySelector<HTMLElement>('.stream')!;
   const empty = el.querySelector<HTMLElement>('.act-empty')!;
-  const liveInd = el.querySelector<HTMLElement>('.live-ind')!;
 
   const expanded = new Set<string>();
   const rowEls = new Map<string, HTMLElement>();
   const groupEls = new Map<string, HTMLElement>();
-  let frozen: FleetEvent[] | null = null; // snapshot of the ring while paused
   let lastPaint = 0;
   let pending = false;
   let firstPaint = true;
@@ -69,15 +67,13 @@ export function mountActivity(el: HTMLElement, store: ShellStore, openEvent: (e:
 
   function paint(s: ShellState) {
     for (const b of chips.querySelectorAll<HTMLButtonElement>('button')) b.classList.toggle('on', b.dataset.f === s.filter);
-    liveInd.classList.toggle('paused', s.paused);
-    liveInd.querySelector('span')!.textContent = s.paused ? 'Paused' : 'Live';
 
     byId.clear();
     if (!s.loaded) {
       stream.innerHTML = Array.from({ length: 8 }, () => '<div class="skel-row"><i></i><b></b></div>').join('');
       return;
     }
-    const all = frozen ?? store.events();
+    const all = store.events();
     const q = s.query;
 
     // Needs you: pinned, up to 5.
@@ -174,8 +170,6 @@ export function mountActivity(el: HTMLElement, store: ShellStore, openEvent: (e:
 
   return {
     update(s: ShellState) {
-      if (s.paused && !frozen) frozen = store.events().slice();
-      if (!s.paused) frozen = null;
       schedule();
     },
     showNeeds() { store.setFilter('needs'); scroller.scrollTo({ top: 0, behavior: 'smooth' }); },

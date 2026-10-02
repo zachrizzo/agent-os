@@ -12,7 +12,6 @@ import { mountActivity } from './ui/activity';
 import { mountCenter, mountPlaceholder } from './ui/center';
 import { mountDrawer } from './ui/drawer';
 import { mountRail } from './ui/rail';
-import { mountReplay } from './ui/replay';
 import { mountRooms } from './ui/rooms';
 import { mountTopbar } from './ui/topbar';
 
@@ -43,17 +42,14 @@ async function boot() {
     onRooms: () => { rooms.toggle(); renderTop.setRooms(roomCount, rooms.isOpen()); },
   });
   window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && rooms.isOpen() && !drawer.isOpen()) { rooms.hide(); renderTop.setRooms(roomCount, false); } });
-  const renderReplay = mountReplay($('replay'), store);
 
   store.subscribe(() => {
     const s = store.get();
     app.classList.toggle('loading', !s.loaded);
-    app.classList.toggle('paused', s.paused);
     renderTop(s);
     renderRail(s);
     center.update(s);
     activity.update(s);
-    renderReplay(s);
   });
 
   let map: MapApi;
@@ -78,7 +74,7 @@ async function boot() {
   void rooms.prime();
   // Paint loading/skeleton state immediately.
   store.setQuery('');
-  renderTop(store.get()); renderRail(store.get()); center.update(store.get()); activity.update(store.get()); renderReplay(store.get());
+  renderTop(store.get()); renderRail(store.get()); center.update(store.get()); activity.update(store.get());
 
   if (import.meta.hot) import.meta.hot.dispose(() => { store.close(); map.destroy(); });
 }

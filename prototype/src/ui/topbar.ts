@@ -97,7 +97,6 @@ export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds:
     conn.hidden = !s.reconnecting;
     err.hidden = !s.snapshot.error;
     if (s.snapshot.error) { err.textContent = 'Source error'; err.title = s.snapshot.error; }
-    el.classList.toggle('paused', s.paused);
   };
   return Object.assign(render, { setRooms });
 }

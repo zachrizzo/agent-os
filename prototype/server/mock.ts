@@ -27,7 +27,7 @@ const NOW_BY_ROLE: Record<string, string[]> = {
   coder: ['Writing patch for card 51f52066', 'Running pytest · 4m in', 'Fixing 2 failing tests', 'Rebasing on main'],
   reviewer: ['Reviewing a8413d64 · 312 lines', 'Second pass on redaction diff', 'Checking test coverage'],
   adversary: ['Trying to break the parser', 'Fuzzing input edge cases', 'Refuting claim 3 of 5'],
-  qa: ['Running smoke suite on EE', 'Replaying flaky test x20', 'Verifying fix in staging'],
+  qa: ['Running smoke suite on EE', 'Re-running flaky test x20', 'Verifying fix in staging'],
   pm: ['Splitting epic into 4 cards', 'Writing acceptance criteria'],
   triage: ['Routing 12 new tickets', 'Tagging billing issues'],
   resolver: ['Drafting reply to ticket #4821', 'Looking up account history'],

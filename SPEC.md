@@ -39,7 +39,7 @@ editing, raw trace waterfalls as the default view (only on drill-down).
    report, finding, approval, steer).
 2. **"Now" line per agent.** One live sentence for each agent ("running pytest, 4m",
    "reviewing a8413d64", "waiting on you"), derived from tool and progress events.
-3. **IPC stream.** A timeline of every inter-agent message. Click one to open a drawer
+3. **IPC stream.** A live feed of every inter-agent message. Click one to open a drawer
    with the full text, sender and receiver, the related card and commit, and any
    `FORGE-REPORT` rendered as a structured verdict.
 4. **Focus mode.** Click an agent to see its live tool-call stream, recent messages,
@@ -48,11 +48,9 @@ editing, raw trace waterfalls as the default view (only on drill-down).
 5. **Attention inbox.** Approvals waiting on Zach, blocked agents, gate denials, stalls
    (no progress for 30 minutes), failed runs. A badge in the top bar plus an optional
    subtle sound.
-6. **Replay scrubber.** Drag back through time and the map, "now" lines, and stream
-   rewind to that moment. A live / paused toggle.
-7. **Resource meters.** Token and cost burn per minute (total and per agent), active
+6. **Resource meters.** Token and cost burn per minute (total and per agent), active
    runs, local Kind cluster memory and namespaces per card, and worktrees.
-8. **⌘K command palette.** Message an agent, jump to an agent or message, approve or
+7. **⌘K command palette.** Message an agent, jump to an agent or message, approve or
    deny, stop a run, open its session, toggle ambient mode.
 
 Later: ambient full-screen second-monitor mode (v1.1), checkpoint fork/edit-and-resend
@@ -76,7 +74,7 @@ in dozens of teams**, with 6-agent Forge as just one team.
 - **Activity stream:** grouped by team, with filter chips (All / Needs you / Errors / Handoffs
   / Approvals) and a pinned "Needs you" section on top. Search across agents and messages (⌘K).
 - **Anomalies:** stalls, error spikes, cost spikes, and loops (two agents ping-ponging) get
-  marked on the replay timeline.
+  flagged in the Activity stream.
 - **Performance target:** 500 agents and 50 events/s at 60 fps on the Fleet view (WebGL/Canvas
   renderer, e.g. Pixi or sigma.js; SVG only for the zoomed Team view).
 
@@ -99,14 +97,12 @@ In the UI:
 ## Layout
 
 ```
-┌ top bar: Agent OS · live●/paused · meters (tok/min · $ · runs · k8s mem) · inbox(3) · ⌘K ┐
+┌ top bar: Agent OS · live● · meters (tok/min · $ · runs · k8s mem) · inbox(3) · ⌘K ┐
 ├ left rail ────────┬ center: live comms map ──────────────────────┬ right: IPC stream ──┤
 │ agents (procs)    │  force/radial graph, animated message         │ newest first,        │
 │ role · now line   │  particles, orchestrator at center,           │ filter by agent/kind,│
 │ status dot · cost │  workers orbiting, idle agents dimmed         │ click → drawer       │
-├───────────────────┴───────────────────────────────────────────────┴──────────────────────┤
-│ bottom: replay scrubber (event density sparkline, live head)                             │
-└──────────────────────────────────────────────────────────────────────────────────────────┘
+└───────────────────┴───────────────────────────────────────────────┴──────────────────────┘
 ```
 
 ## Visual language

@@ -1,5 +1,5 @@
 // Shell store: owns the SSE connection and the view model. Implements the frozen `Store` contract
-// plus a few shell-only extras (search, filters, replay pause, density buckets).
+// plus a few shell-only extras (search, filters, history toggle, send).
 import { visibleView } from '../shared/liveness';
 import { COS_ID } from '../shared/types';
 import type { Agent, Delta, FleetEvent, Selection, Snapshot, State, Store, Team, Zoom } from './contract';
@@ -12,7 +12,6 @@ export interface ShellState extends State {
   reconnecting: boolean;  // lost the stream after having data
   query: string;
   filter: Filter;
-  scrubTs: number | null; // replay playhead when paused (stub)
   showHistory: boolean;   // History toggle: reveal retired (finished/aborted/archived/stale) sessions
   liveCount: number;      // live agents; the headline "agents" number
   historyCount: number;   // retired sessions the toggle would reveal (or is revealing)
@@ -24,21 +23,16 @@ export interface ShellStore extends Store {
   get(): ShellState;
   /** Full recent event ring (newest last), larger than snapshot.events. */
   events(): FleetEvent[];
-  /** Per-team event counts in BUCKET_MS buckets; key = bucket start ms. */
-  density(): Map<number, Map<string, number>>;
   setQuery(q: string): void;
   setFilter(f: Filter): void;
   setShowHistory(on: boolean): void;
-  setPaused(p: boolean, scrubTs?: number | null): void;
   /** "Message agent": POST the text to the data server, which sends it to the session. Rejects with the server's reason. */
   sendMessage(sessionKey: string, text: string): Promise<void>;
   connect(): void;
   close(): void;
 }
 
-export const BUCKET_MS = 30_000;
 const RING = 3000;
-const DENSITY_SPAN = 62 * 60_000;
 
 const emptySnapshot = (source: Source): Snapshot => ({
   source, ts: 0, teams: [], agents: [], events: [], meters: { tokPerMin: 0, costPerHr: 0, totalCostUsd: 0 },
@@ -52,13 +46,11 @@ export function createStore(source: Source): ShellStore {
     selection: { type: 'none' },
     zoom: 'fleet',
     hiddenTeams: new Set(),
-    paused: false,
     connected: false,
     loaded: false,
     reconnecting: false,
     query: '',
     filter: 'all',
-    scrubTs: null,
     showHistory: false,
     liveCount: 0,
     historyCount: 0,
@@ -68,7 +60,6 @@ export function createStore(source: Source): ShellStore {
   const subs = new Set<(s: State, fresh: FleetEvent[]) => void>();
   let ring: FleetEvent[] = [];
   const seen = new Set<string>();
-  const buckets = new Map<number, Map<string, number>>();
 
   // Coalesce notifications into one per animation frame; `fresh` accumulates in between.
   let fresh: FleetEvent[] = [];
@@ -87,27 +78,18 @@ export function createStore(source: Source): ShellStore {
     else setTimeout(run, 250);
   }
 
-  function teamOf(agentId: string) { return state.agentsAll.get(agentId)?.team ?? '?'; }
-
   function ingest(evs: FleetEvent[], live: boolean) {
     const added: FleetEvent[] = [];
     for (const e of evs) {
       if (seen.has(e.id)) continue;
       seen.add(e.id);
       added.push(e);
-      const b = Math.floor(e.ts / BUCKET_MS) * BUCKET_MS;
-      let m = buckets.get(b);
-      if (!m) buckets.set(b, (m = new Map()));
-      const t = teamOf(e.from === 'zach' ? e.to : e.from);
-      m.set(t, (m.get(t) ?? 0) + 1);
     }
     if (!added.length) return;
     ring.push(...added);
     if (ring.length > RING) {
       for (const e of ring.splice(0, ring.length - RING)) seen.delete(e.id);
     }
-    const cutoff = Date.now() - DENSITY_SPAN;
-    for (const k of buckets.keys()) if (k < cutoff) buckets.delete(k);
     if (live) fresh.push(...added);
   }
 
@@ -132,7 +114,6 @@ export function createStore(source: Source): ShellStore {
     state.agentsAll = new Map(s.agents.map((a) => [a.id, a]));
     ring = [];
     seen.clear();
-    buckets.clear();
     ingest(s.events, false);
     rebuild(s.teams, { source: s.source, ts: s.ts, meters: s.meters, error: s.error });
     state.loaded = true;
@@ -195,18 +176,12 @@ export function createStore(source: Source): ShellStore {
       notify();
     },
     events: () => ring,
-    density: () => buckets,
     setQuery(q) { if (q !== state.query) { state.query = q; notify(); } },
     setFilter(f) { if (f !== state.filter) { state.filter = f; notify(); } },
     setShowHistory(on) {
       if (on === state.showHistory) return;
       state.showHistory = on;
       rebuild(rawTeams, {});
-      notify();
-    },
-    setPaused(p, scrubTs = null) {
-      state.paused = p;
-      state.scrubTs = p ? scrubTs ?? Date.now() : null;
       notify();
     },
     async sendMessage(sessionKey, text) {

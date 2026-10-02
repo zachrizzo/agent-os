@@ -258,10 +258,29 @@ async function erroringCountChecks(browser, tag) {
   await page.close();
 }
 
+// Replay strip is gone: no element/text, and the map/panels run to the bottom of the viewport.
+async function noReplayChecks(browser, tag) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
+  await page.goto(base + "agent-os/?source=mock");
+  await page.waitForSelector(".hist-btn");
+  await page.waitForTimeout(1500);
+  const r = await page.evaluate(() => {
+    const bottom = (sel) => Math.round(document.querySelector(sel).getBoundingClientRect().bottom);
+    return { dom: document.querySelectorAll("#replay, [class^=rp-], canvas.rp").length, text: /Replay|Last 60 min|Go live/.test(document.body.innerText), center: bottom("#center"), rail: bottom("#rail"), act: bottom("#activity"), vh: innerHeight };
+  });
+  const bad = [];
+  if (r.dom || r.text) bad.push(["replay UI removed", JSON.stringify(r)]);
+  for (const k of ["center", "rail", "act"]) if (r[k] !== r.vh) bad.push([`${k} reaches viewport bottom`, `${r[k]} != ${r.vh}`]);
+  if (bad.length) failed++;
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · replay removed, map/panels fill height {${r.center}/${r.vh}}${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  await page.close();
+}
+
 let failed = 0;
 for (const [tag, engine] of [["webkit", webkit], ["chromium", chromium]]) {
   const browser = await engine.launch();
   await liveOnlyChecks(browser, tag);
+  await noReplayChecks(browser, tag);
   await messageAgentChecks(browser, tag);
   await a2aChecks(browser, tag);
   await roomsChecks(browser, tag);
