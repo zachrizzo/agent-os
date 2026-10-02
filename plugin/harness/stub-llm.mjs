@@ -1,8 +1,8 @@
 // Deterministic stand-in model for THROWAWAY Gateways only: an OpenAI-compatible /v1/chat/completions server (streaming and not)
-// that answers with the same scripted persona rules as the mock fleet (prototype/server/mock.ts scriptedReply). No network, no credentials.
+// that answers with the same scripted persona rules as the mock fleet (prototype/shared/scripted.ts). No network, no credentials.
 //   node harness/stub-llm.mjs <port>      GET /__stats -> every request seen (model, agent, prompt head)
 import http from "node:http";
-import { scriptedReply } from "../../prototype/server/mock.ts";
+import { scriptedReply } from "../../prototype/shared/scripted.ts";
 
 const port = Number(process.argv[2]);
 if (!(port >= 19400 && port <= 19499)) throw new Error("stub port must be in 19400-19499");

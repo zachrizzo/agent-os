@@ -1,7 +1,7 @@
 // Synthetic fleet: ~60 agents in 7 teams (CoS at the root), ~10 events/s, spawn/finish churn, rotating "needs you".
 import { COS_ID, TEAM_PALETTE, type Agent, type Delta, type EventKind, type FleetEvent, type HistoryItem, type Snapshot, type Team } from '../shared/types.ts';
 import { parseInterSession, shortSession } from '../shared/a2a.ts';
-import { PASS_TOKEN } from '../shared/rooms.ts';
+import { scriptedReply } from '../shared/scripted.ts';
 import { createRoomsService, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
 
@@ -12,23 +12,6 @@ const MOCK_ROSTER: RoomAgent[] = [
   { id: 'main', name: 'Chief of Staff', emoji: '🧭' }, { id: 'forge', name: 'Forge', emoji: '🔨' }, { id: 'spark', name: 'Spark', emoji: '⚡' },
   { id: 'research', name: 'Research', emoji: '🔎' }, { id: 'ops', name: 'Ops' }, { id: 'coo', name: 'COO' }, { id: 'phi', name: 'PHI Gateway' },
 ];
-
-/** Deterministic stand-in for an agent turn (same rules as harness/stub-llm.mjs): "pingpong" bounces @mentions, "quiet" makes bravo pass, follow-up rounds otherwise settle. */
-export function scriptedReply(prompt: string): string {
-  const me = /You are (.+?) \(@([\w-]+)\)\./.exec(prompt);
-  const ids = [...(/Members: ([^\]]*)\]/.exec(prompt)?.[1] ?? '').matchAll(/\(@([\w-]+)\)/g)].map((m) => m[1]);
-  const text = /(?:New|Original) message from You:\n([\s\S]*?)(?:\n\n|$)/.exec(prompt)?.[1] ?? '';
-  const follow = /Follow-up round/.test(prompt);
-  const id = me?.[2] ?? '';
-  if (/pingpong/i.test(text)) {
-    const others = ids.filter((x) => x !== id);
-    const next = others[(ids.indexOf(id) + 1) % Math.max(1, others.length)] ?? others[0];
-    return `@${next} pingpong`;
-  }
-  if (follow || (/quiet/i.test(text) && id === 'bravo')) return PASS_TOKEN;
-  return `${me?.[1] ?? 'Agent'} here. On "${text.replace(/\s+/g, ' ').slice(0, 48)}": noted, nothing blocking from my side.`;
-}
-
 
 const TEAMS: Array<{ id: string; name: string; lead: string; size: number; workers: string[] }> = [
   { id: 'cos', name: 'Chief of Staff', lead: 'Chief of Staff', size: 4, workers: ['scribe', 'heartbeat', 'memory'] },

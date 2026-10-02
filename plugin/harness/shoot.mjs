@@ -64,7 +64,6 @@ await page.locator("#rail .row.agent").first().click();
 await page.waitForSelector(".c-compose:visible");
 await page.click(".cmp-thread");
 await page.waitForSelector("#drawer.open .thread .a2a");
-await page.locator("#drawer .a2a-routing summary").first().click();
 await page.waitForTimeout(500);
 await shot("0f-compact-a2a-drawer");
 await page.keyboard.press("Escape");
@@ -127,3 +126,4 @@ await page.waitForTimeout(500);
 await shot("4-no-mic-landed-in-voice");
 console.log("logs:", JSON.stringify(logs));
 await browser.close();
+process.exit(0); // the harness server started by ensureServer would otherwise keep node alive

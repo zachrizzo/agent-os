@@ -1,10 +1,12 @@
 // Group rooms: one thread, several agents. Semantics mirror OpenClaw broadcast groups (channels/broadcast-groups.md):
 //   - @mention gating: explicit @mentions pick the round-1 responders; no match (or @all) picks everyone;
 //   - maxRounds 1-4 (default 1) including the first round; maxTurns caps agent runs started per Zach message;
-//   - a follow-up round runs only for members that replied or were @mentioned in the previous round, and "NO_REPLY" passes.
+//   - a follow-up round runs only for members that replied or were @mentioned in the previous round, and "PASS" passes.
 // Pure logic, no I/O: the server injects a transport (real Gateway sessions or a fake) so the loop is unit-testable.
 
-export const PASS_TOKEN = 'NO_REPLY';
+// Rooms ask for "PASS", not OpenClaw's NO_REPLY: in a direct session the Gateway treats an exact NO_REPLY as a failed turn and re-prompts
+// the agent ("The previous attempt did not produce a user-visible answer"), which would burn a turn and force an answer. NO_REPLY is still accepted as a pass.
+export const PASS_TOKEN = 'PASS';
 export const MAX_MEMBERS = 16;
 export const MAX_ROOMS = 50;
 export const MAX_ROOM_NAME = 60;
@@ -83,7 +85,7 @@ export function selectResponders(text: string, members: RoomMember[], gating: bo
 
 export const isPass = (reply: string | null | undefined) => {
   const t = (reply ?? '').trim();
-  return !t || new RegExp(`^${PASS_TOKEN}[.!]?$`, 'i').test(t);
+  return !t || /^(PASS|NO_REPLY)[.!]?$/i.test(t);
 };
 
 const clipText = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);

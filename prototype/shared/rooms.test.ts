@@ -34,8 +34,8 @@ test('phi is excluded, near-misses are not', () => {
 });
 
 test('pass detection', () => {
-  for (const t of ['NO_REPLY', ' no_reply. ', '', null]) assert.ok(isPass(t as never), String(t));
-  assert.ok(!isPass('NO_REPLY but actually here is more'));
+  for (const t of ['PASS', ' pass. ', 'NO_REPLY', ' no_reply. ', '', null]) assert.ok(isPass(t as never), String(t));
+  assert.ok(!isPass('PASS but actually here is more'));
 });
 
 function harness(settings: Partial<Room>, members = M) {
@@ -96,8 +96,8 @@ test('maxTurns caps total agent runs and says so in the thread', async () => {
   assert.equal(h.room.messages.at(-1)!.from, 'system');
 });
 
-test('NO_REPLY passes and is not shown; all passing ends the thread early', async () => {
-  const quiet: RoomTransport = { async turn() { return 'NO_REPLY'; } };
+test('PASS is not shown; all passing ends the thread early', async () => {
+  const quiet: RoomTransport = { async turn() { return 'PASS'; } };
   const h = harness({ maxRounds: 4 });
   const stop = await h.run('anyone?', quiet);
   assert.equal(stop, 'passed');

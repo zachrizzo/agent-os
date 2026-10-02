@@ -213,7 +213,8 @@ export function createLiveSource(): Source {
     const t = Date.now();
     const cutoff = t - WINDOW_HOURS * 3600_000;
     // Archived/finished sessions stay in the feed flagged `retired`; the browser hides them behind History.
-    const live = all.filter((s) => s?.key);
+    // Group-room sessions (agent:<id>:room-<roomId>) belong to the Rooms view; keeping them off the map/Activity leaves main and Forge views untouched.
+    const live = all.filter((s) => s?.key && !isRoomKey(s.key));
     const recent = live.filter((s) => s.key === COS_ID || s.hasActiveRun || Number(s.updatedAt ?? 0) >= cutoff);
     // Team leads anchor their teams: keep a lead visible whenever any of its members is.
     const leadsNeeded = new Set(recent.map((s) => teamOf(s.agentId ?? parseKey(s.key).agentId).lead));
