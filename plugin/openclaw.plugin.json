@@ -1,0 +1,23 @@
+{
+  "id": "agent-os",
+  "name": "Agent OS",
+  "description": "God's-eye view of the agent fleet as a Control UI tab.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": []
+  },
+  "controlUi": {
+    "entry": "dist/control-ui/3df9837ec46c9fca1796e92c501a23d10d72a3613b969025c181badba75922d5/index.js",
+    "styles": [
+      "dist/control-ui/3df9837ec46c9fca1796e92c501a23d10d72a3613b969025c181badba75922d5/index.css"
+    ]
+  }
+}

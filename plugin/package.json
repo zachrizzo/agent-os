@@ -1,0 +1,39 @@
+{
+  "name": "openclaw-plugin-agent-os",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json && openclaw plugins build",
+    "validate": "openclaw plugins validate --json",
+    "pack": "openclaw plugins pack --json"
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "openclaw": ">=2026.9.7"
+  },
+  "dependencies": {
+    "typebox": "^1.3.17"
+  },
+  "devDependencies": {
+    "openclaw": "latest",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "controlUi": "./src/control-ui.ts",
+    "compat": {
+      "pluginApi": ">=2026.9.7"
+    },
+    "build": {
+      "openclawVersion": "2026.9.7"
+    }
+  }
+}
