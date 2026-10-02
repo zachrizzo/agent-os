@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent OS voice control · mock Control UI host</title>
+<style>
+  :root { --bg:#0e1116; --text:#e6e8eb; --muted:#8b93a1; --border:#262c36; --accent:#ff5a36; --destructive:#ff6369; color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.4 Inter, system-ui, sans-serif; display:grid; grid-template-columns:200px 1fr; grid-template-rows:auto 1fr; height:100vh; }
+  #banner { grid-column:1/3; padding:4px 12px; background:#3a2f12; color:#f5d98a; font-size:11px; }
+  nav { border-right:1px solid var(--border); padding:10px; display:flex; flex-direction:column; gap:4px; }
+  nav button { text-align:left; padding:6px 8px; background:none; border:0; border-radius:6px; color:var(--text); font:inherit; cursor:pointer; }
+  nav button[aria-current="page"] { background:#1b212b; }
+  nav h4 { margin:10px 0 2px; font-size:10px; text-transform:uppercase; color:var(--muted); }
+  #view { min-width:0; min-height:0; display:flex; flex-direction:column; }
+  #view > .page { flex:1; min-height:0; }
+  .chat { display:flex; flex-direction:column; height:100%; }
+  .chat header { display:flex; gap:10px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--border); }
+  .chat header .title { font-weight:600; margin-right:auto; }
+  .chat header button { padding:4px 10px; border:1px solid var(--border); border-radius:6px; background:none; color:var(--text); font:inherit; cursor:pointer; }
+  .chat .transcript { flex:1; padding:12px; color:var(--muted); }
+  .chat footer { border-top:1px solid var(--border); padding:10px 12px; display:flex; gap:8px; align-items:center; }
+  .chat footer .input { flex:1; padding:8px 10px; border:1px solid var(--border); border-radius:8px; color:var(--muted); }
+  .chat-send-btn { width:34px; height:34px; border-radius:50%; border:1px solid var(--border); background:#1b212b; color:var(--text); cursor:pointer; }
+  .chat-send-btn--voice-live { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .live-note { color:#7ee2a8; font-size:12px; }
+</style>
+</head>
+<body>
+<div id="banner">MOCK Control UI host (dev harness). The Agent OS tab code below is the real built plugin; the Voice chat pane only reproduces the Control UI 2026.9.7 composer mic buttons. No audio, no Gateway Talk.</div>
+<nav id="nav"></nav>
+<main id="view"></main>
+<script type="module">
+const params = new URLSearchParams(location.search);
+const manifest = await (await fetch("/openclaw.plugin.json")).json();
+const css = document.createElement("link");
+css.rel = "stylesheet";
+css.href = "/" + manifest.controlUi.styles[0];
+document.head.append(css);
+const plugin = (await import("/" + manifest.controlUi.entry)).default;
+
+const view = document.getElementById("view");
+const navEl = document.getElementById("nav");
+const hostAbort = new AbortController();
+const pages = new Map();
+const navItems = [];
+const actions = [];
+let selectedKey = "agent:main:main";
+let current = null; // { dispose }
+let talkLive = false;
+const log = (...a) => console.log("[harness]", ...a);
+
+function unmount() {
+  if (!current) return;
+  if (current.kind === "chat" && talkLive) { talkLive = false; log("Voice pane unmounted -> Talk ended (mirrors Control UI)"); }
+  current.dispose?.();
+  current = null;
+}
+function renderNav(active) {
+  navEl.replaceChildren();
+  const add = (label, on, id) => { const b = document.createElement("button"); b.textContent = label; if (id === active) b.setAttribute("aria-current", "page"); b.onclick = on; navEl.append(b); };
+  add("Chat · main", () => host.sessions.open({ sessionKey: "agent:main:main" }), "agent:main:main");
+  const h = document.createElement("h4"); h.textContent = "Pinned"; navEl.append(h);
+  add("Voice", () => host.sessions.open({ sessionKey: "agent:voice:main" }), "agent:voice:main");
+  const h2 = document.createElement("h4"); h2.textContent = "Plugins"; navEl.append(h2);
+  for (const n of navItems) add(n.label, () => host.navigation.openPage(n.page), "page:" + n.page.id);
+}
+function mountPage(id) {
+  unmount();
+  const page = pages.get(id);
+  const ctl = new AbortController();
+  const c = document.createElement("div");
+  c.className = "page";
+  view.replaceChildren(c);
+  const ret = page.mount(c, { host, signal: ctl.signal, props: {}, presented: true, mountDefault: () => () => {} });
+  current = { kind: "page", dispose: () => { ctl.abort(); ret?.dispose?.(); c.remove(); } };
+  renderNav("page:" + id);
+}
+function showChat(sessionKey) {
+  unmount();
+  const root = document.createElement("section");
+  root.className = "chat";
+  const header = document.createElement("header");
+  const title = document.createElement("span");
+  title.className = "title";
+  title.textContent = sessionKey === "agent:voice:main" ? "Voice" : "Chat · main";
+  header.append(title);
+  for (const a of actions) {
+    const r = a.resolve?.({ sessionKey }) ?? {};
+    if (r.hidden) continue;
+    const b = document.createElement("button");
+    b.textContent = r.label ?? a.label;
+    b.onclick = () => a.run({ sessionKey, host, signal: hostAbort.signal });
+    header.append(b);
+  }
+  const transcript = document.createElement("div");
+  transcript.className = "transcript";
+  transcript.textContent = sessionKey === "agent:voice:main" ? "Voice session — Talk starts from the mic below." : "Main chat.";
+  const footer = document.createElement("footer");
+  const input = document.createElement("div");
+  input.className = "input";
+  input.textContent = "Message…";
+  const slot = document.createElement("span");
+  footer.append(input, slot);
+  const drawMic = () => {
+    slot.replaceChildren();
+    if (params.has("nomic")) return;
+    if (talkLive) {
+      slot.className = "chat-talk-control chat-talk-control--active";
+      slot.innerHTML = '<button class="chat-send-btn chat-send-btn--voice-live" aria-label="Stop voice input">■</button> <span class="live-note">Listening…</span>';
+      slot.querySelector("button").onclick = () => { talkLive = false; log("Talk stopped"); drawMic(); };
+    } else {
+      slot.className = "chat-talk-control";
+      slot.innerHTML = '<button class="chat-send-btn chat-send-btn--voice" type="button" aria-label="Start voice input">🎙</button>';
+      slot.querySelector("button").onclick = () => { setTimeout(() => { talkLive = true; log("Talk started"); drawMic(); }, 500); };
+    }
+  };
+  // Composer mounts a beat after the pane, like the real one.
+  setTimeout(() => { if (current?.root === root) drawMic(); }, 300);
+  root.append(header, transcript, footer);
+  view.replaceChildren(root);
+  current = { kind: "chat", root, dispose: () => root.remove() };
+  renderNav(sessionKey);
+}
+
+const host = {
+  apiVersion: 1, pluginId: "agent-os", signal: hostAbort.signal, basePath: "", locale: "en", redact: (t) => t,
+  connection: { connected: true, canRead: true, canWrite: true, canGrant: false, canAdmin: true, assistantAgentId: "main" },
+  components: {},
+  request: async (method) => (method === "plugins.sessionAction" ? { ok: true, result: { up: true, url: "/agent-os/" } } : {}),
+  onEvent: () => () => {},
+  subscribe: () => () => {},
+  sessions: {
+    rows: [],
+    get selectedKey() { return selectedKey; },
+    normalizeKey: (k) => k,
+    refresh: async () => {},
+    observe: () => ({ refresh: async () => {}, dispose() {} }),
+    open: ({ sessionKey }) => { setTimeout(() => { selectedKey = sessionKey; showChat(sessionKey); }, 60); },
+    create: async () => null,
+    patch: async () => {},
+  },
+  agents: { rows: [], selectedId: null, defaultId: null, scopeId: null, select() {}, setScope() {}, refresh: async () => {} },
+  navigation: { openPage: (t) => mountPage(t.id), pageHref: () => "#" },
+  ui: {
+    invalidate() {},
+    registerPage: (p) => { pages.set(p.id, p); return () => {}; },
+    registerNavigation: (n) => { navItems.push(n); return () => {}; },
+    registerPanel: () => () => {},
+    registerAction: (a) => { actions.push(a); return () => {}; },
+    registerAccessory: () => () => {},
+    registerWidget: () => () => {},
+    registerReplacement: () => () => {},
+    selectReplacement() {},
+  },
+};
+await plugin.activate(host);
+if (params.get("start") === "voice") host.sessions.open({ sessionKey: "agent:voice:main" });
+else host.navigation.openPage({ id: "agent-os" });
+</script>
+</body>
+</html>

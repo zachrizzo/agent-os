@@ -22,3 +22,9 @@ For agent-requested activation, run `npm run pack`. The receipt contains the exa
 After browser-only changes, run the build again and use **Plugins > Customize UI > Reload plugin UI** as an administrator. After editing installed backend source, run `openclaw plugins reload agent-os`. Rebuild compiled code before reloading; for a copied installation, reinstall the rebuilt package. Plugin install and update commands apply changes through the running Gateway. Native plugins run trusted code in the Gateway and browser; install only code you trust.
 
 Keep browser imports on the browser-safe `control-ui` and `feature-contract` SDK entrypoints. Bundle framework dependencies with the plugin. Return a dispose handle for DOM, subscriptions, and other resources; check the view's abort signal after asynchronous work.
+
+## Voice from the tab
+
+The tab bar has a **Talk to Voice** button. It opens `agent:voice:main` and presses that session's composer mic (Talk can only start from the Voice session). Leaving the Voice view ends Talk, so the Voice session header gets **Stop voice · Agent OS**, which presses Stop and returns to this tab. Code: `src/voice.ts`.
+
+Try it without the Gateway: `node harness/serve.mjs 5299`, then open `http://127.0.0.1:5299/` (mock host; no audio). `node harness/shoot.mjs <outdir>` replays the click-through in WebKit (`... chromium` for Chromium).
