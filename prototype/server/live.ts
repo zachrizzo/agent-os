@@ -17,6 +17,7 @@ import type { Source } from './source.ts';
 const READ_METHODS = new Set(['sessions.list', 'agents.list', 'chat.history', 'usage.cost']);
 const SEND_METHOD = 'sessions.send';
 const CREATE_METHOD = 'sessions.create'; // only for dedicated room sessions (agent:<id>:room-<roomId>), see call()
+const ABORT_METHOD = 'chat.abort'; // Stop / member timeout: only for dedicated room sessions, see call()
 const ROOM_TURN_TIMEOUT_MS = Number(process.env.AGENT_OS_ROOM_TURN_TIMEOUT_MS ?? 120_000) || 120_000;
 const ROOM_POLL_MS = 1200;
 const agentOfKey = (key: unknown) => String(key ?? '').match(/^agent:([^:]+):/)?.[1] ?? '';
@@ -36,8 +37,9 @@ let chain: Promise<unknown> = Promise.resolve();
 let slowSince = 0; // set when any call exceeds SLOW_CALL_MS; read+cleared by the poll loop
 
 function call(method: string, params: Record<string, unknown> = {}, timeoutMs = 10_000): Promise<any> {
-  if (!READ_METHODS.has(method) && method !== SEND_METHOD && method !== CREATE_METHOD) return Promise.reject(new Error(`method not allowed: ${method}`));
+  if (!READ_METHODS.has(method) && method !== SEND_METHOD && method !== CREATE_METHOD && method !== ABORT_METHOD) return Promise.reject(new Error(`method not allowed: ${method}`));
   if (method === CREATE_METHOD && !isRoomKey(String(params.key))) return Promise.reject(new Error('sessions.create is only allowed for room sessions'));
+  if (method === ABORT_METHOD && !isRoomKey(String(params.sessionKey))) return Promise.reject(new Error('chat.abort is only allowed for room sessions'));
   if (method === SEND_METHOD && isExcludedAgent(agentOfKey(params.key))) return Promise.reject(new Error('unknown session')); // the PHI agent is never messaged
   const run = () => new Promise((resolve, reject) => {
     const t0 = Date.now();
@@ -370,13 +372,16 @@ export function createLiveSource(): Source {
       }
       createdRoomSessions.add(key);
     },
-    async turn(agentId, roomId, prompt, signal) {
+    async abort(agentId, roomId) {
+      await call(ABORT_METHOD, { sessionKey: roomSessionKey(agentId, roomId) }, 15_000);
+    },
+    async turn(agentId, roomId, prompt, signal, timeoutMs) {
       const key = roomSessionKey(agentId, roomId);
       const seqOf = (m: any) => Number(m?.__openclaw?.seq ?? 0);
       const peek = async () => { const h = await call('chat.history', { sessionKey: key, limit: 60 }, 15_000); return { msgs: (h.messages ?? []) as any[], active: Boolean(h.sessionInfo?.hasActiveRun) }; };
       const base = Math.max(0, ...(await peek()).msgs.map(seqOf));
       await call(SEND_METHOD, { key, message: prompt, idempotencyKey: randomUUID() }, 20_000);
-      const deadline = Date.now() + ROOM_TURN_TIMEOUT_MS;
+      const deadline = Date.now() + (timeoutMs ?? ROOM_TURN_TIMEOUT_MS);
       let sawUser = false;
       let quiet = 0;
       while (Date.now() < deadline) {

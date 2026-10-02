@@ -226,7 +226,12 @@ export function createMockSource(): Source {
     async listAgents() { return MOCK_ROSTER; },
     async ensureSession() { /* nothing to create */ },
     async turn(_agentId, _roomId, prompt, signal) {
-      await new Promise((r) => setTimeout(r, 250));
+      // "slow" in Zach's message stretches each turn so the live council statuses can be watched (and Stop tried).
+      const ms = /Original message from You:\n[^\n]*\bslow\b/i.test(prompt) ? 2500 : 250;
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, ms);
+        signal.addEventListener('abort', () => { clearTimeout(t); reject(new Error('cancelled')); }, { once: true });
+      });
       if (signal.aborted) throw new Error('cancelled');
       return scriptedReply(prompt);
     },

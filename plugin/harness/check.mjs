@@ -142,6 +142,90 @@ async function a2aChecks(browser, tag) {
   await page.close();
 }
 
+// Council mode (default): one captain reply + a collapsible "Council thinking" panel, live statuses, @mention bypass, captain setting, Stop, persistence.
+async function councilChecks(browser, tag) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const bad = [];
+  const expect = (name, ok, detail = "") => { if (!ok) bad.push([name, detail]); };
+  const name = `Council ${tag} ${Date.now() % 100000}`;
+  await page.goto(base + "agent-os/?source=mock");
+  await page.waitForSelector(".rooms-btn");
+  await page.click(".rooms-btn");
+  await page.click("#rooms [data-act=new]");
+  await page.fill(".rm-name-in", name);
+  for (const id of ["spark", "forge", "research"]) await page.locator(`input[data-pick=${id}]`).check();
+  await page.click("[data-act=create]");
+  await page.waitForSelector(".rm-bar h3");
+  const send = async (text) => { await page.locator(".rm-compose textarea").fill(text); await page.keyboard.press("Enter"); };
+  const idle = () => page.waitForFunction(() => !document.querySelector(".rm-compose .rm-typing") && !document.querySelector(".rm-compose textarea[disabled]"), null, { timeout: 25000 });
+  const go = async (text) => { await send(text); await page.waitForSelector(".rm-status .rm-typing", { timeout: 8000 }); await idle(); };
+  expect("captain defaults to the first member (Spark), shown on its chip", (await page.locator("[data-set=captain]").inputValue()) === "spark" && (await page.locator(".rm-chip.captain").innerText()).includes("Spark"));
+
+  // live: statuses move through planning/working/critiquing while the panel is open; Stop is offered
+  await send("slow: is the migration safe? conflict");
+  await page.waitForSelector(".rm-council[open]", { timeout: 8000 });
+  const seen = new Set();
+  for (let i = 0; i < 40 && !seen.has("critiquing"); i++) {
+    for (const t of await page.locator(".rm-cst").allInnerTexts()) seen.add(t);
+    await page.waitForTimeout(250);
+  }
+  expect("live statuses planning, working and critiquing were all shown", ["planning", "working", "critiquing"].every((x) => seen.has(x)), [...seen].join(","));
+  expect("Stop is offered while the council runs", (await page.locator(".rm-status [data-act=stop]").count()) === 1);
+  expect("placeholder captain reply while working", (await page.locator(".rm-msg.captain.pending").count()) === 1 || seen.has("synthesizing"));
+  await idle();
+  const names = await page.locator(".rm-msg .rm-meta b").allInnerTexts();
+  expect("thread = You + ONE captain reply", names.join(",") === "You,Spark", names.join(","));
+  expect("panel collapsed once the council is done", (await page.locator(".rm-council").getAttribute("open")) === null);
+  expect("captain reply lists disagreements/trade-offs", /Disagreements resolved/.test(await page.locator(".rm-msg.captain .rm-text").innerText()));
+  await page.locator(".rm-council > summary").click();
+  await page.waitForSelector(".rm-council[open] .rm-note");
+  const rows = await page.locator(".rm-note").count();
+  expect("panel has compact note rows (plan + answers + critiques)", rows >= 7, String(rows));
+  expect("panel shows done chips for every agent", (await page.locator(".rm-cagent.st-done").count()) === 3);
+  await page.waitForTimeout(1500); // a poll repaint must not collapse what the user opened
+  expect("a poll repaint keeps the panel the user opened", (await page.locator(".rm-council[open]").count()) === 1);
+
+  // @mention bypass: goes straight to that agent, no council
+  await go("@research quick opinion?");
+  const after = await page.locator(".rm-msg .rm-meta b").allInnerTexts();
+  expect("@research: reply shows in the thread, no council flow", after.slice(2).join(",") === "You,Research" && (await page.locator(".rm-council").count()) === 1, after.join(","));
+
+  // captain is selectable
+  await page.selectOption("[data-set=captain]", "forge");
+  await page.waitForFunction(() => document.querySelector(".rm-chip.captain")?.textContent.includes("Forge"));
+  expect("captain can be changed in room settings", true);
+
+  // bad plan: fallback
+  await go("badplan: any risks?");
+  const lastPanel = page.locator(".rm-council").last();
+  await lastPanel.locator("summary").click();
+  expect("unparseable captain plan falls back (flagged) and still answers once", (await page.locator(".rm-cwarn").count()) === 1 && (await page.locator(".rm-msg.captain").count()) === 2);
+
+  // Stop cancels an in-flight council
+  await send("slow: stop me");
+  await page.waitForSelector(".rm-status [data-act=stop]", { timeout: 8000 });
+  await page.waitForTimeout(600);
+  await page.click(".rm-status [data-act=stop]");
+  await idle();
+  const sys = await page.locator(".rm-sys").allInnerTexts();
+  expect("Stop cancels the council (system note, no extra captain reply)", sys.some((t) => /council was cancelled/.test(t)) && (await page.locator(".rm-msg.captain").count()) === 2, sys.join("|"));
+
+  // persistence across reload
+  await page.reload();
+  await page.waitForSelector(".rooms-btn");
+  await page.click(".rooms-btn");
+  await page.locator(".rm-row", { hasText: name }).click();
+  await page.waitForSelector(".rm-msg");
+  expect("reload shows the same captain replies and panels", (await page.locator(".rm-msg.captain").count()) === 2 && (await page.locator(".rm-council").count()) === 3);
+  await page.click("[data-act=archive]"); // leave the mock data server's active rooms as we found them
+  if (errors.length) bad.push(["pageerrors", errors.join("; ")]);
+  if (bad.length) failed++;
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · council mode (one captain reply, live panel, bypass, captain, fallback, Stop, persistence)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  await page.close();
+}
+
 // Group rooms: create (live agent list, phi absent), one thread with per-agent avatar+name and "You", mention gating,
 // member add/remove, rename, archive, round/turn caps, persistence across reload, write guards.
 async function roomsChecks(browser, tag) {
@@ -167,6 +251,10 @@ async function roomsChecks(browser, tag) {
   await page.waitForSelector(".rm-bar h3");
   expect("room opens after create", (await page.locator(".rm-bar h3").innerText()).includes(name));
   expect("three members shown", (await page.locator(".rm-members .rm-chip").count()) === 3);
+  expect("new rooms default to council mode, captain = first member", (await page.locator("[data-set=mode]").inputValue()) === "council" && (await page.locator("[data-set=captain]").inputValue()) === "forge");
+  // The classic everyone-answers loop is kept as the Round-table mode; these checks run in it (council mode is covered by councilChecks).
+  await page.selectOption("[data-set=mode]", "roundtable");
+  await page.waitForSelector("[data-set=maxRounds]");
 
   // no mention -> everyone answers, in one thread, with name + avatar; Zach is "You"
   const send = async (text) => { await page.locator(".rm-compose textarea").fill(text); await page.keyboard.press("Enter"); };
@@ -196,6 +284,7 @@ async function roomsChecks(browser, tag) {
 
   // caps
   await page.selectOption("[data-set=maxRounds]", "3");
+  await page.waitForTimeout(700); // let the first update land (the view ignores a second change while one is in flight)
   await page.locator("[data-set=maxTurns]").fill("4");
   await page.locator("[data-set=maxTurns]").dispatchEvent("change");
   await page.waitForTimeout(500);
@@ -413,6 +502,7 @@ for (const [tag, engine] of [["webkit", webkit], ["chromium", chromium]]) {
   await messageAgentChecks(browser, tag);
   await a2aChecks(browser, tag);
   await roomsChecks(browser, tag);
+  await councilChecks(browser, tag);
   await erroringCountChecks(browser, tag);
   for (const sc of scenarios) {
     const page = await browser.newPage({ viewport: sc.viewport ?? { width: 1280, height: 760 } });

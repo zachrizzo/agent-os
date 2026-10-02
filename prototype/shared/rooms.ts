@@ -3,6 +3,8 @@
 //   - maxRounds 1-4 (default 1) including the first round; maxTurns caps agent runs started per Zach message;
 //   - a follow-up round runs only for members that replied or were @mentioned in the previous round, and "PASS" passes.
 // Pure logic, no I/O: the server injects a transport (real Gateway sessions or a fake) so the loop is unit-testable.
+// Default room mode is "council" (shared/council.ts: captain plans, members work in parallel, one critique round, captain synthesizes);
+// the loop above is kept as mode "roundtable" and as the @mention bypass.
 
 // Rooms ask for "PASS", not OpenClaw's NO_REPLY: in a direct session the Gateway treats an exact NO_REPLY as a failed turn and re-prompts
 // the agent ("The previous attempt did not produce a user-visible answer"), which would burn a turn and force an answer. NO_REPLY is still accepted as a pass.
@@ -28,12 +30,37 @@ export interface RoomMessage {
   from: string;
   text: string;
   round?: number;
+  /** Set on a captain reply: the Council (room.councils[].id = the triggering message id) that produced it. */
+  council?: string;
 }
-export interface RoomSettings { maxRounds: number; maxTurns: number; mentionGating: boolean }
+export type RoomMode = 'council' | 'roundtable';
+export type CouncilPhase = 'planning' | 'working' | 'critiquing' | 'synthesizing' | 'done' | 'stopped';
+export type CouncilAgentStatus = 'idle' | 'planning' | 'working' | 'critiquing' | 'synthesizing' | 'done' | 'timeout' | 'error' | 'skipped' | 'stopped';
+export interface CouncilNote { id: string; ts: number; agent: string; kind: 'plan' | 'answer' | 'critique' | 'system'; text: string; pass?: boolean }
+export interface CouncilTask { agent: string; question: string }
+export interface CouncilAgent { status: CouncilAgentStatus; startedAt?: number; endedAt?: number }
+/** One council run for one message from Zach. Persisted with the room; the UI renders it as the "Council thinking" panel. */
+export interface Council {
+  id: string; // the triggering message id
+  captain: string;
+  phase: CouncilPhase;
+  startedAt: number;
+  endedAt?: number;
+  plan?: { tasks: CouncilTask[]; fallback: boolean; reason?: string; note?: string };
+  agents: Record<string, CouncilAgent>;
+  notes: CouncilNote[];
+  turnsUsed: number;
+  maxTurns: number;
+  finalId?: string;
+}
+export interface RoomSettings { maxRounds: number; maxTurns: number; mentionGating: boolean; mode: RoomMode; memberTimeoutSec: number }
 export interface Room extends RoomSettings {
   id: string;
   name: string;
   members: string[]; // agent ids, join order
+  /** The council captain: always one of `members` (or '' for an empty room). */
+  captain: string;
+  councils: Council[];
   archived: boolean;
   createdAt: number;
   updatedAt: number;
@@ -47,6 +74,8 @@ export interface RoomRunState {
   maxTurns: number;
   maxRounds: number;
   current?: string; // agent id with a turn in flight
+  mode?: RoomMode;
+  phase?: CouncilPhase;
   stopReason?: 'maxRounds' | 'maxTurns' | 'passed' | 'cancelled' | 'complete';
 }
 
@@ -55,14 +84,38 @@ export const clampInt = (v: unknown, min: number, max: number, dflt: number) => 
   return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.trunc(n))) : dflt;
 };
 
-/** Defaults: 1 round, maxTurns = member count (as in OpenClaw broadcast groups), mention gating on. */
+export const MAX_COUNCILS = 60;
+export const DEFAULT_MEMBER_TIMEOUT_SEC = 90;
+/** A full council uses plan + one answer + one critique per member + synthesis = 2n + 2 agent turns. */
+export const councilTurns = (memberCount: number) => Math.max(1, Math.min(32, 2 * memberCount + 2));
+
+/** Defaults: council mode, 1 round (round-table / @mention path), maxTurns = a full council (2n+2) or, round-table, the member count (as in OpenClaw broadcast groups), mention gating on, 90s per member. */
 export function normalizeSettings(raw: Partial<RoomSettings> | undefined, memberCount: number): RoomSettings {
+  const mode: RoomMode = raw?.mode === 'roundtable' ? 'roundtable' : 'council';
   const maxRounds = clampInt(raw?.maxRounds, 1, 4, 1);
-  const maxTurns = clampInt(raw?.maxTurns, 1, 32, Math.max(1, Math.min(32, memberCount)));
-  return { maxRounds, maxTurns, mentionGating: raw?.mentionGating !== false };
+  const maxTurns = clampInt(raw?.maxTurns, 1, 32, mode === 'council' ? councilTurns(memberCount) : Math.max(1, Math.min(32, memberCount)));
+  return { maxRounds, maxTurns, mentionGating: raw?.mentionGating !== false, mode, memberTimeoutSec: clampInt(raw?.memberTimeoutSec, 1, 600, DEFAULT_MEMBER_TIMEOUT_SEC) };
 }
 
-const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+/** The captain is always a member. A saved captain that is still a member wins; otherwise `rfc-lead` when present, else the first member. */
+export function resolveCaptain(saved: unknown, members: string[]): string {
+  if (typeof saved === 'string' && members.includes(saved)) return saved;
+  return members.includes('rfc-lead') ? 'rfc-lead' : members[0] ?? '';
+}
+
+/**
+ * Backward-compatible load of a stored room (rooms.json version 1 had no mode/captain/councils):
+ * missing fields get the council defaults, the captain is resolved by resolveCaptain, and an old default turn cap (= member count, far too low for
+ * plan + answers + critiques + synthesis) is raised to a full council. Nothing is written until the room's next normal save.
+ */
+export function migrateRoom(r: Room): Room {
+  const legacy = (r as Partial<Room>).mode === undefined;
+  const s = normalizeSettings(r, r.members.length);
+  if (legacy && s.mode === 'council' && s.maxTurns <= r.members.length) s.maxTurns = councilTurns(r.members.length);
+  return { ...r, ...s, captain: resolveCaptain(r.captain, r.members), councils: Array.isArray(r.councils) ? r.councils : [], messages: r.messages ?? [] };
+}
+
+export const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
 
 /** Member ids explicitly @mentioned in `text`, by agent id or display name (spaces ignored), in member order. `@all`/`@everyone` returns null. */
 export function parseMentions(text: string, members: RoomMember[]): string[] | null {
@@ -131,6 +184,8 @@ export function followUpPrompt(ctx: PromptCtx, original: string, round: number, 
 export interface RoomTransport {
   /** One agent turn on that agent's dedicated room session. Resolve with the reply text, or null when it passed / produced nothing. */
   turn(agentId: string, prompt: string, signal: AbortSignal): Promise<string | null>;
+  /** Best effort: cancel that agent's in-flight run on the Gateway (Stop, or a member timeout). Never throws. */
+  abort?(agentId: string): void;
 }
 export interface RunHooks {
   append(msg: Omit<RoomMessage, 'id' | 'ts'>): RoomMessage;

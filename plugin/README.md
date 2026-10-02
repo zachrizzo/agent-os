@@ -55,6 +55,29 @@ A `sessions_send` reaches the receiving session as `[Inter-session message] sour
 
 The Control UI's own chat bubbles are not changed. The plugin API has a `transcript` replacement surface (`docs/plugins/feature-plugins.md`, `registerReplacement`: `workspace`, `session-list`, `composer`, `transcript`, `tool-result`), but it swaps the whole transcript view for one the plugin renders itself (only `mountDefault` can reuse the built-in view, with no per-message hook), is chosen per browser under Plugins > Customize UI, and is not persistent config. Compact bubbles would mean re-implementing the full message renderer, so this build does not ship one. Note `docs/web/control-ui/chat.md` says newer hosts already render forwarded messages as left-aligned bubbles with a **From** row.
 
+## Council mode (default for every room)
+
+Rooms work like Grok 4.20's multi-agent mode. Each room has one **captain** (room settings; default = first member, `rfc-lead` when it is a member). Per message from Zach (`prototype/shared/council.ts`):
+
+1. **Plan**: the captain splits the message into one sub-question per member and replies with JSON (`{"tasks":[{"agent","question"}],"notes"}`). Parsing accepts a fenced block, bare JSON, an array or an id->question map; unknown members/empty questions are dropped. If nothing parses (or the captain fails/times out) the fallback gives every member the whole question and the panel flags "fallback plan".
+2. **Work**: members answer their sub-question **in parallel**, each in its own `agent:<id>:room-<roomId>` session.
+3. **Critique**: one parallel round. Each member sees the others' answers (and its own) and flags contradictions/gaps, or replies `PASS`. One critic (the last non-captain member) is the contrarian and must push back unless it truly finds no flaw.
+4. **Synthesize**: the captain writes the ONE reply to Zach: answer first, "Disagreements resolved" and "Your call" (real trade-offs) only when they apply, and one line naming members that timed out. If the captain itself fails, Zach still gets one reply built from the member answers.
+
+The protocol is injected by the data server into every message (role line `Council role: CAPTAIN-PLAN|SPECIALIST|CRITIQUE|CAPTAIN-SYNTHESIZE` plus instructions); nothing depends on an agent's AGENTS.md and the agent's own rules still apply on top.
+
+UI: the thread shows Zach's message and one captain reply (a placeholder while the council works). Under it a collapsible **Council thinking** panel updates live: per-agent status chips (planning, working, critiquing, synthesizing, done, timed out, failed, skipped, stopped) and compact note rows like the A2A rows (plan, answers, critiques; long notes fold behind "more"). Open while running, collapsed once done (a user toggle is remembered across polls).
+
+Bounds: `maxTurns` (default 2n+2 = plan + n answers + n critiques + synthesis, max 32) is a hard cap across all phases: the synthesis turn is reserved, answers come first, critiques get what is left, skipped steps are noted. Each member turn has a timeout (`memberTimeoutSec`, default 90, room setting): on timeout the member is marked timed out, its Gateway run is aborted and the captain proceeds. **Stop** aborts every in-flight run. Both use `chat.abort {sessionKey}` through the data server's existing `openclaw gateway call` path, accepted only for room sessions (`agent:<id>:room-<roomId>`); the browser/plugin route needs nothing new (`POST api/rooms/:id/stop` already existed). `phi` is never listed, joined, captain or messaged.
+
+Bypass and other modes: a message that `@mentions` a member (mention gating on) goes straight to that agent through the classic round-table path, with no council. `@all`/`@everyone` or no mention runs the council. A one-member room has nothing to split and uses the classic path. The classic loop (everyone answers in turn, maxRounds, PASS) is kept as room mode **Round-table**.
+
+Persistence: `rooms.json` (version 2) stores `mode`, `captain`, `memberTimeoutSec` and `councils[]` (plan, per-agent status, notes, `finalId`) next to the messages; the captain's reply is a normal message with `council: <triggerId>`. Old version-1 files load unchanged: `migrateRoom` fills `mode: council`, resolves the captain (saved one, else `rfc-lead` when a member, else the first member), raises an old default turn cap (= member count) to a full council, and nothing is written until the room's next save. A council that was running when the data server died loads as `stopped`.
+
+Cost: a full council on n members is 2n+2 agent turns (RFC Council with 3 members: 8; with 5: 12), each with the room session's accumulated history, versus n turns for round-table and 1 for an @mention. Tune with `maxTurns`, `memberTimeoutSec`, or Round-table mode.
+
+Proof: `node harness/council-proof.mjs <dir> [port=19480]` (throwaway Gateway, stub model; parallelism by overlapping run intervals, critique, single reply, timeout, Stop, bypass, restart persistence, old-file migration, phi). `rooms-proof.mjs` keeps proving the round-table mode.
+
 ## Group rooms
 
 Topbar **Rooms**: create a room, pick agents from the live agent list (`agents.list`; the `phi` agent is never listed, joined or messaged), rename it, add/remove members, archive/restore. One thread shows every member with avatar and name; Zach's messages show as **You**. Rooms and threads persist in `~/.openclaw/agent-os/rooms.json` (0600; `AGENT_OS_ROOMS_FILE` overrides, mock mode keeps rooms in memory only).
@@ -64,7 +87,7 @@ Semantics mirror OpenClaw broadcast groups (`channels/broadcast-groups.md`), imp
 - **@mention gating**: `@id` or `@Name` picks who answers round 1; no match (or `@all`) means everyone.
 - **maxRounds** 1-4 (default 1, counting the first round). Later rounds run only for members that replied or were @mentioned in the previous round, each with a digest of the others' replies; they can answer `PASS` to stay out.
 - **maxTurns** 1-32 (default = member count) caps agent runs started per message, so ping-pong loops stop. Hitting a cap is written into the thread ("Stopped: turn cap reached …").
-- Turns in a round run one after another so each agent sees the earlier replies; every agent is sent the new message plus the last 12 room messages.
+- (Round-table mode.) Turns in a round run one after another so each agent sees the earlier replies; every agent is sent the new message plus the last 12 room messages.
 - Each member answers on its own session `agent:<id>:room-<roomId>` (created on first use), never its main session. Those sessions are kept off the fleet map and Activity.
 - The pass token is `PASS`, not `NO_REPLY`: in a direct session the Gateway treats an exact `NO_REPLY` as a failed turn and re-prompts the agent (seen on a throwaway Gateway). `NO_REPLY` is still accepted as a pass.
 

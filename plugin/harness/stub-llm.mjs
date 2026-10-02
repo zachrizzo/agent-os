@@ -1,6 +1,7 @@
 // Deterministic stand-in model for THROWAWAY Gateways only: an OpenAI-compatible /v1/chat/completions server (streaming and not)
 // that answers with the same scripted persona rules as the mock fleet (prototype/shared/scripted.ts). No network, no credentials.
-//   node harness/stub-llm.mjs <port>      GET /__stats -> every request seen (model, agent, prompt head)
+//   node harness/stub-llm.mjs <port>      GET /__stats -> every request seen (model, agent, council role, start/end times, aborted flag)
+// Cue in Zach's message: "[[delay:<agent>=<ms>]]" makes that agent's turns take that long (to prove parallelism, timeouts and Stop).
 import http from "node:http";
 import { scriptedReply } from "../../prototype/shared/scripted.ts";
 
@@ -22,8 +23,15 @@ http.createServer((req, res) => {
     const user = [...(j.messages ?? [])].reverse().find((m) => m.role === "user" && !textOf(m).startsWith("<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT"));
     const prompt = textOf(user);
     const agent = /You are (.+?) \(@([\w-]+)\)\./.exec(prompt)?.[2] ?? null;
-    seen.push({ at: Date.now(), model: j.model, agent, room: /\[Agent OS group room/.test(prompt), head: prompt.slice(0, 140) });
+    const rec = { at: Date.now(), end: 0, aborted: false, model: j.model, agent, role: /Council role: ([A-Z-]+)\./.exec(prompt)?.[1] ?? null, room: /\[Agent OS group room/.test(prompt), head: prompt.slice(0, 140) };
+    seen.push(rec);
     const reply = /\[Agent OS group room/.test(prompt) ? scriptedReply(prompt) : "ok";
+    const delay = Number(new RegExp(`\\[\\[delay:${agent}=(\\d+)\\]\\]`).exec(prompt)?.[1] ?? 0);
+    let gone = false;
+    res.on("close", () => { if (!res.writableEnded) { gone = true; rec.aborted = true; rec.end = Date.now(); } });
+    const finish = () => { if (gone) return; respond(); rec.end = Date.now(); };
+    if (delay) setTimeout(finish, delay); else finish();
+    function respond() {
     if (j.stream) {
       res.writeHead(200, { "content-type": "text/event-stream" });
       const chunk = (delta, finish) => res.write(`data: ${JSON.stringify({ id: "stub", object: "chat.completion.chunk", created: 1, model: j.model, choices: [{ index: 0, delta, finish_reason: finish ?? null }] })}\n\n`);
@@ -32,6 +40,7 @@ http.createServer((req, res) => {
       res.end("data: [DONE]\n\n");
     } else {
       json(200, { id: "stub", object: "chat.completion", created: 1, model: j.model, choices: [{ index: 0, message: { role: "assistant", content: reply }, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 } });
+    }
     }
   });
 }).listen(port, "127.0.0.1", () => console.log(`stub llm on 127.0.0.1:${port}`));

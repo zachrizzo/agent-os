@@ -79,6 +79,8 @@ await page.waitForTimeout(400);
 await shot("1a-room-create");
 await page.click("[data-act=create]");
 await page.waitForSelector(".rm-bar h3");
+await page.selectOption("[data-set=mode]", "roundtable"); // the classic everyone-answers thread; council mode is shot further down
+await page.waitForSelector("[data-set=maxRounds]");
 const say = async (t, n) => { await page.locator(".rm-compose textarea").fill(t); await page.keyboard.press("Enter"); await page.waitForFunction((k) => document.querySelectorAll(".rm-msg, .rm-sys").length >= k && !document.querySelector(".rm-typing"), n, { timeout: 15000 }); };
 await say("Where are we on the launch checklist?", 4);
 await say("@spark can you take the rollout comms?", 6);
@@ -100,6 +102,35 @@ await page.waitForTimeout(500);
 await say("pingpong between you all", 9);
 await page.waitForTimeout(400);
 await shot("1d-room-multi-agent-thread-caps");
+// Council mode (the default): live statuses, ONE captain reply with the panel collapsed / expanded, and the @mention bypass.
+await page.click("#rooms [data-act=new]");
+await page.fill(".rm-name-in", "RFC Council");
+for (const id of ["spark", "forge", "research"]) await page.locator(`input[data-pick=${id}]`).check();
+await page.click("[data-act=create]");
+await page.waitForSelector(".rm-bar h3");
+await page.locator(".rm-compose textarea").fill("slow: should we ship the migration this week? conflict");
+await page.keyboard.press("Enter");
+await page.waitForSelector(".rm-council .rm-cst");
+await page.waitForFunction(() => [...document.querySelectorAll(".rm-cst")].some((e) => e.textContent === "working"), null, { timeout: 15000 });
+await page.waitForTimeout(500);
+await shot("2a-council-live-working");
+await page.waitForFunction(() => [...document.querySelectorAll(".rm-cst")].some((e) => e.textContent === "critiquing"), null, { timeout: 15000 });
+await page.waitForTimeout(400);
+await shot("2b-council-live-critiquing");
+await page.waitForFunction(() => !document.querySelector(".rm-compose .rm-typing") && document.querySelector(".rm-msg.captain:not(.pending)"), null, { timeout: 25000 });
+await page.waitForTimeout(400);
+await shot("2c-council-done-collapsed");
+await page.locator(".rm-council > summary").click();
+await page.waitForSelector(".rm-council[open] .rm-note");
+await page.waitForTimeout(300);
+await shot("2d-council-done-expanded");
+await page.locator(".rm-compose textarea").fill("@research quick opinion on the rollback plan?");
+await page.keyboard.press("Enter");
+await page.waitForSelector(".rm-status .rm-typing");
+await page.waitForFunction(() => !document.querySelector(".rm-compose .rm-typing"), null, { timeout: 15000 });
+await page.locator(".rm-council > summary").click(); // fold the panel so the bypass reads clearly
+await page.waitForTimeout(300);
+await shot("2e-mention-bypass");
 await page.click(".rooms-btn");
 await page.setViewportSize({ width: 1280, height: 760 });
 

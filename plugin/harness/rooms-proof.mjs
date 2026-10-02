@@ -106,6 +106,9 @@ try {
   await page.click("[data-act=create]");
   await page.waitForSelector(".rm-bar h3");
   const ID = (await api("rooms")).json.rooms[0].id;
+  // Council is now the default room mode (covered by council-proof.mjs); this proof is about the classic round-table loop, which is kept as a mode.
+  check("new rooms default to council mode", (await api(`rooms/${ID}`)).json.room.mode === "council");
+  await api(`rooms/${ID}`, { mode: "roundtable" });
   const msgCount = async () => (await api(`rooms/${ID}`)).json.room.messages.length;
   // Type into the UI, then wait for: the message stored, the run finished, and the thread on screen caught up with the server.
   const send = async (text) => {

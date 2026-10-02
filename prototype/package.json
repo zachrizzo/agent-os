@@ -10,7 +10,7 @@
     "dev:web": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node --test shared/*.test.ts"
+    "test": "node --import tsx --test shared/*.test.ts server/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

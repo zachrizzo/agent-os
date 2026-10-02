@@ -21,7 +21,8 @@ test('gating: no mention = everyone, mention = only those, gating off = everyone
 });
 
 test('settings clamp: rounds 1-4 default 1, turns default = member count', () => {
-  assert.deepEqual(normalizeSettings(undefined, 3), { maxRounds: 1, maxTurns: 3, mentionGating: true });
+  assert.deepEqual(normalizeSettings({ mode: 'roundtable' }, 3), { maxRounds: 1, maxTurns: 3, mentionGating: true, mode: 'roundtable', memberTimeoutSec: 90 });
+  assert.deepEqual(normalizeSettings(undefined, 3), { maxRounds: 1, maxTurns: 8, mentionGating: true, mode: 'council', memberTimeoutSec: 90 }); // council default: plan + 3 answers + 3 critiques + synthesis
   assert.equal(normalizeSettings({ maxRounds: 99 } as never, 3).maxRounds, 4);
   assert.equal(normalizeSettings({ maxRounds: 0 } as never, 3).maxRounds, 1);
   assert.equal(normalizeSettings({ maxTurns: 500 } as never, 3).maxTurns, 32);
@@ -39,7 +40,7 @@ test('pass detection', () => {
 });
 
 function harness(settings: Partial<Room>, members = M) {
-  const room: Room = { id: 'r1', name: 'T', members: members.map((m) => m.id), archived: false, createdAt: 0, updatedAt: 0, messages: [], maxRounds: 1, maxTurns: 3, mentionGating: true, ...settings };
+  const room: Room = { id: 'r1', name: 'T', members: members.map((m) => m.id), captain: members[0].id, councils: [], archived: false, createdAt: 0, updatedAt: 0, messages: [], maxRounds: 1, maxTurns: 3, mentionGating: true, mode: 'roundtable', memberTimeoutSec: 90, ...settings };
   let n = 0;
   const state: Partial<RoomRunState> = {};
   const hooks = {
