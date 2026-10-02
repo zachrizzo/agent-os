@@ -22,7 +22,7 @@ export const P = {
   font: '',
   bg: '', glowA: '', glowB: '', star: '', fg: '', fg2: '', muted: '', halo: '', chipBg: '', chipText: '',
   tipBg: '', tipBorder: '', amber: '', red: '', idle: '', cos: '', hot: '', ring: '', ringHover: '', linkHi: '', miniIdle: '', miniView: '',
-  kind: { handoff: '', report: '', approval: '', finding: '', message: '', event: '', steer: '', check: '' } as Record<string, string>,
+  kind: { handoff: '', done: '', blocked: '', needs: '', approval: '', message: '' } as Record<string, string>,
 };
 
 let probe: HTMLElement | null = null;

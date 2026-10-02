@@ -5,7 +5,7 @@ import { COS_ID } from '../shared/types';
 import type { Agent, Delta, FleetEvent, Selection, Snapshot, State, Store, Team, Zoom } from './contract';
 
 export type Source = 'live' | 'mock';
-export type Filter = 'all' | 'needs' | 'errors' | 'handoffs' | 'approvals';
+export type Filter = 'all' | 'needs' | 'blocked' | 'handoffs' | 'approvals' | 'system';
 
 export interface ShellState extends State {
   loaded: boolean;        // first snapshot received
@@ -86,7 +86,9 @@ export function createStore(source: Source): ShellStore {
       added.push(e);
     }
     if (!added.length) return;
+    const last = ring.length ? ring[ring.length - 1].ts : 0;
     ring.push(...added);
+    if (added.some((e) => e.ts < last)) ring.sort((a, b) => a.ts - b.ts); // history-derived events arrive out of order
     if (ring.length > RING) {
       for (const e of ring.splice(0, ring.length - RING)) seen.delete(e.id);
     }

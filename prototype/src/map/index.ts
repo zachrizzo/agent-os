@@ -180,6 +180,7 @@ export const createMap: CreateMap = (el, store) => {
     const red = reduced();
     const tNow = Date.now();
     fresh.forEach((e, i) => {
+      if (e.sys || !e.to) return; // internal turns and un-addressed outcomes are not traffic between agents
       logRate(e, tNow);
       const to = e.to === 'zach' ? COS_ID : e.to;
       const fa = layout.nodes.get(e.from), fb = layout.nodes.get(to);

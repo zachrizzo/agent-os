@@ -7,9 +7,9 @@ import { existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { COS_ID, TEAM_PALETTE, type Agent, type AgentStatus, type Delta, type EventKind, type FleetEvent, type HistoryItem, type Meters, type Snapshot, type Team } from '../shared/types.ts';
 import { parseInterSession, shortSession } from '../shared/a2a.ts';
+import { attentionEvent, deriveSessionEvents, mergeEvents, sessionMetaOf, spawnEvent, openNeedsOf, type RawMessage } from '../shared/activity.ts';
 import { classifySession, isRunning } from '../shared/liveness.ts';
 import { isExcludedAgent } from '../shared/rooms.ts';
-import { ringPush } from './mock.ts';
 import { redact } from './redact.ts';
 import { createRoomsService, isRoomKey, roomSessionKey, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
@@ -22,6 +22,9 @@ const ROOM_TURN_TIMEOUT_MS = Number(process.env.AGENT_OS_ROOM_TURN_TIMEOUT_MS ??
 const ROOM_POLL_MS = 1200;
 const agentOfKey = (key: unknown) => String(key ?? '').match(/^agent:([^:]+):/)?.[1] ?? '';
 const MAX_MESSAGE_CHARS = 4000;
+const HIST_PER_POLL = 2; // chat.history reads per poll (single-flight CLI; main's history is ~3 MB)
+const HIST_MESSAGES = 120;
+const RING_MAX = 600;
 const POLL_MS = 2500;
 const MAX_POLL_MS = 30_000;
 const SLOW_CALL_MS = 2000;
@@ -41,6 +44,7 @@ function call(method: string, params: Record<string, unknown> = {}, timeoutMs = 
   if (method === CREATE_METHOD && !isRoomKey(String(params.key))) return Promise.reject(new Error('sessions.create is only allowed for room sessions'));
   if (method === ABORT_METHOD && !isRoomKey(String(params.sessionKey))) return Promise.reject(new Error('chat.abort is only allowed for room sessions'));
   if (method === SEND_METHOD && isExcludedAgent(agentOfKey(params.key))) return Promise.reject(new Error('unknown session')); // the PHI agent is never messaged
+  if (method === 'chat.history' && isExcludedAgent(agentOfKey(params.sessionKey))) return Promise.reject(new Error('unknown session')); // ...nor read
   const run = () => new Promise((resolve, reject) => {
     const t0 = Date.now();
     execFile(OPENCLAW, ['gateway', 'call', method, '--json', '--params', JSON.stringify(params), '--timeout', String(timeoutMs)],
@@ -60,8 +64,8 @@ const oneLine = (s: unknown) => redact(String(s ?? '').replace(/[`*#>]+/g, '').r
 const clip = (s: unknown, n: number) => { const t = oneLine(s); return t.length > n ? `${t.slice(0, n - 1).trimEnd()}…` : t; };
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-const ASK_RE = /\b(decision[ _](needed|required)|needs? (your|a) (decision|approval|go-?ahead|sign-?off|input|call)|awaiting (your )?(approval|decision|input|go-?ahead)|waiting (on|for) (you|zach|your|approval)|please (approve|confirm|decide|choose|pick)|approve (this|the|deploy|merge|release)\b|your call\b|blocked on (you|zach)|want me to\b[^?]{0,140}\?|should i\b[^?]{0,140}\?|which (option|approach|one|path)\b[^?]{0,100}\?|(ok|okay) to (proceed|merge|deploy|ship|push)\?|status:\s*blocked)/i;
 const ERROR_STATUSES = new Set(['killed', 'failed', 'error', 'aborted', 'timeout', 'timed_out', 'crashed']);
+const INTERNAL_PREVIEW_RE = /^\s*(\[OpenClaw (heartbeat|exec)[^\]]*\]|NO_REPLY|HEARTBEAT_OK)/i;
 const INTER_RE = /^\[Inter-session message\]\s+sourceSession=(\S+)/;
 const CRON_RE = /^\[cron:\S+\s+([^\]]+)\]\s*/;
 
@@ -82,7 +86,7 @@ function teamOf(agentId: string): { id: string; name: string; lead: string } {
 
 /** Short human gist of a last-message preview. */
 function gist(preview: string, n = 60): string {
-  if (!preview) return '';
+  if (!preview || INTERNAL_PREVIEW_RE.test(preview)) return '';
   const inter = preview.match(INTER_RE);
   if (inter) return `Message from ${shortKey(inter[1])}`;
   const cron = preview.match(CRON_RE);
@@ -102,18 +106,10 @@ function shortKey(key: string): string {
   return kind === 'main' ? agentId : `${agentId} ${kind}`;
 }
 
-/** Activity text for a sessions_send: the sender's actual words, not the routing wrapper. */
-function interGist(preview: string, toName: string): string {
-  const p = parseInterSession(preview);
-  return p?.body ? clip(p.body, 140) : `Message to ${toName}`;
-}
-
-function needsAsk(s: any, running: boolean): string | undefined {
+/** Only an explicit attention flag + note from the session means it awaits Zach; reply-text heuristics live in shared/activity.ts and are scoped to real replies to Zach. */
+function needsAsk(s: any): string | undefined {
   const note = s.statusNote ?? s.sidebar?.statusNote;
-  if (note && (s.attention || s.sidebar?.attention)) return clip(note, 80);
-  const p = String(s.lastMessagePreview ?? '');
-  if (running || !p || p.startsWith('[')) return undefined; // inter-session / cron previews are not asks to Zach
-  return ASK_RE.test(p) ? clip(p, 80) : undefined;
+  return note && (s.attention || s.sidebar?.attention) ? clip(note, 80) : undefined;
 }
 
 // ---------- source ----------
@@ -124,7 +120,8 @@ export function createLiveSource(): Source {
   const teams = new Map<string, Team>();
   const ring: FleetEvent[] = [];
   const identities = new Map<string, string>(); // agentId -> display name
-  const sent = new Map<string, string>(); // session key -> last text Zach sent from the UI (its echo is not an agent message)
+  const histSig = new Map<string, string>(); // session key -> run-state signature last read from history
+  const agentLabel = (agentId: string, isCos: boolean) => (isCos || agentId === 'main' ? 'Chief of Staff' : identities.get(agentId) ?? cap(agentId));
   let lastError: string | undefined;
   let eid = 0;
   let first = true;
@@ -216,7 +213,7 @@ export function createLiveSource(): Source {
     const cutoff = t - WINDOW_HOURS * 3600_000;
     // Archived/finished sessions stay in the feed flagged `retired`; the browser hides them behind History.
     // Group-room sessions (agent:<id>:room-<roomId>) belong to the Rooms view; keeping them off the map/Activity leaves main and Forge views untouched.
-    const live = all.filter((s) => s?.key && !isRoomKey(s.key));
+    const live = all.filter((s) => s?.key && !isRoomKey(s.key) && !isExcludedAgent(agentOfKey(s.key)));
     const recent = live.filter((s) => s.key === COS_ID || s.hasActiveRun || Number(s.updatedAt ?? 0) >= cutoff);
     // Team leads anchor their teams: keep a lead visible whenever any of its members is.
     const leadsNeeded = new Set(recent.map((s) => teamOf(s.agentId ?? parseKey(s.key).agentId).lead));
@@ -228,6 +225,11 @@ export function createLiveSource(): Source {
     const events: FleetEvent[] = [];
     let dTok = 0;
     let dCost = 0;
+
+    const evOpts = { redact, since: cutoff };
+    const openAsk = new Map<string, string>(); // session -> what it is asking Zach, from its latest real reply
+    for (const e of openNeedsOf(ring, t)) if (e.to === 'zach') openAsk.set(e.from, clip(e.text, 80));
+    const histDue: Array<{ s: any; meta: ReturnType<typeof sessionMetaOf>; sig: string; at: number }> = [];
 
     // Active children per parent, for CoS/lead "now" lines.
     const activeKids = new Map<string, number>();
@@ -254,7 +256,7 @@ export function createLiveSource(): Source {
       const retired = !isCos && classifySession(s, t) === 'finished';
       const updatedAt = Number(s.updatedAt ?? s.lastActivityAt ?? 0);
       const errored = Boolean(s.abortedLastRun) || ERROR_STATUSES.has(String(s.status ?? ''));
-      const ask = errored || retired ? undefined : needsAsk(s, running);
+      const ask = errored || retired ? undefined : needsAsk(s) ?? openAsk.get(s.key);
       const status: AgentStatus = errored ? 'error' : ask ? 'needs' : running || t - updatedAt < ACTIVE_MS ? 'active' : 'idle';
 
       const label = s.label ? clip(String(s.label).replace(/^Automation:\s*/, ''), 48) : undefined;
@@ -276,49 +278,38 @@ export function createLiveSource(): Source {
       const tokens = Number(s.totalTokens ?? (Number(s.inputTokens ?? 0) + Number(s.outputTokens ?? 0))) || 0;
       const costUsd = Number(s.estimatedCostUsd ?? 0) || 0;
       const a: Agent = {
-        id: s.key, name, team: tm.id, role, ...(parent ? { parent } : {}), status, now, costUsd, tokens,
+        id: s.key, name, agentName: agentLabel(agentId, isCos), team: tm.id, role, ...(parent ? { parent } : {}), status, now, costUsd, tokens,
         ...(s.model ? { model: String(s.model) } : {}), updatedAt, agentId, kind,
         ...(label ? { label } : {}), ...(ask ? { ask } : {}), ...(retired ? { retired: true } : {}),
       };
 
-      const prev = raw.get(s.key);
       const prevA = agents.get(s.key);
       if (prevA) { dTok += Math.max(0, tokens - prevA.tokens); dCost += Math.max(0, costUsd - prevA.costUsd); }
-      const to = a.parent ?? 'zach';
 
-      if (first) {
-        // Seed the stream with recent history so a fresh client has context.
-        const created = Number(s.createdAt ?? 0);
-        if (kind === 'subagent' && created >= cutoff) events.push(ev(created, to, a.id, 'handoff', `Spawned ${name}${label && label !== name ? `: ${label}` : ''}`));
-        const inter = preview.match(INTER_RE);
-        const at = Number(s.lastActivityAt ?? updatedAt);
-        if (inter && visibleKeys.has(inter[1])) events.push(ev(at, inter[1], a.id, 'message', interGist(preview, name)));
-        else if (preview && !isCos && !preview.startsWith('[') && !isSentEcho(s.key, preview)) events.push(ev(at, a.id, to, /FORGE-REPORT/.test(preview) || s.status === 'done' ? 'report' : 'message', g));
-        if (ask) events.push(ev(at, a.id, 'zach', 'approval', ask, true));
-      } else if (!prev) {
-        if (kind === 'subagent') events.push(ev(t, to, a.id, 'handoff', `Spawned ${name}${label && label !== name ? `: ${label}` : ''}`));
-        else events.push(ev(t, a.id, to, 'event', kind === 'cron' ? `Cron run: ${label ?? name}` : `${name} came online`));
-        if (ask) events.push(ev(t, a.id, 'zach', 'approval', ask, true));
-      } else {
-        const prevPreview = String(prev.lastMessagePreview ?? '');
-        if (preview && preview !== prevPreview) {
-          const inter = preview.match(INTER_RE);
-          if (inter) {
-            events.push(ev(t, inter[1], a.id, 'message', interGist(preview, name)));
-          } else if (!isCos && !preview.startsWith('[') && !isSentEcho(s.key, preview)) {
-            const kindE: EventKind = /FORGE-REPORT/.test(preview) || s.status === 'done' ? 'report' : 'message';
-            const asksCos = to === COS_ID && ASK_RE.test(preview);
-            events.push(ev(t, a.id, to, kindE, g, asksCos || undefined));
-          }
-        } else if (prev.status !== s.status && s.status && s.status !== 'running') {
-          events.push(ev(t, a.id, to, status === 'error' ? 'event' : 'report', status === 'error' ? `${name}: ${s.abortedLastRun ? 'aborted' : s.status}` : `${name} finished${g ? ` · ${g}` : ''}`));
-        }
-        if (ask && prevA?.ask !== ask) events.push(ev(t, a.id, 'zach', 'approval', ask, true));
-      }
+      // Activity: a spawn is a Handoff (parent -> child agent, task label secondary); needs-you comes from the session's own attention flag.
+      const meta = sessionMetaOf(s);
+      const sp = spawnEvent({ ...meta, ...(a.parent ? { parent: a.parent } : {}) }, evOpts);
+      if (sp) events.push(sp);
+      const at = attentionEvent(meta, updatedAt || t, evOpts);
+      if (at) events.push(at);
+      // Everything else (messages, outcomes, Done/Blocked) is read from the session's history, never from the list preview.
+      const sig = [s.lastRunId, s.status, s.endedAt, s.hasActiveRun ? 1 : 0, s.abortedLastRun ? 1 : 0].join('|');
+      if (!retired || updatedAt >= cutoff) if (histSig.get(s.key) !== sig) histDue.push({ s, meta: { ...meta, ...(a.parent && meta.kind === 'subagent' ? { parent: a.parent } : {}) }, sig, at: updatedAt });
 
       raw.set(s.key, s);
       if (!prevA || JSON.stringify(prevA) !== JSON.stringify(a)) upserts.push(a);
       agents.set(s.key, a);
+    }
+
+    // Read history for sessions whose run state changed: newest first, a couple per poll so the backfill never starves the poll loop.
+    histDue.sort((x, y) => y.at - x.at);
+    for (const d of histDue.slice(0, HIST_PER_POLL)) {
+      try {
+        const h = await call('chat.history', { sessionKey: d.s.key, limit: 80 }, 15_000);
+        const msgs = ((h.messages ?? []) as RawMessage[]).slice(-HIST_MESSAGES);
+        events.push(...deriveSessionEvents(d.meta, msgs, evOpts));
+        histSig.set(d.s.key, d.sig);
+      } catch { /* retried next poll; the list-derived events above still stand */ }
     }
 
     const removed = [...agents.keys()].filter((k) => !visibleKeys.has(k));
@@ -327,16 +318,10 @@ export function createLiveSource(): Source {
     for (const id of [...teams.keys()]) if (!liveTeams.has(id)) teams.delete(id);
     if (!first) samples.push({ t, tok: dTok, cost: dCost });
 
-    events.sort((x, y) => x.ts - y.ts);
-    ringPush(ring, first ? events.slice(-200) : events);
+    const fresh = mergeEvents(ring, events, RING_MAX);
     const teamsChanged = JSON.stringify([...teams.values()]) !== teamsBefore;
     first = false;
-    broadcast({ ts: t, upserts, removed, events: events.slice(-200), meters: meters(), ...(teamsChanged ? { teams: [...teams.values()] } : {}) });
-  }
-
-  function isSentEcho(key: string, preview: string) {
-    const t = sent.get(key);
-    return !!t && oneLine(preview) === oneLine(t).slice(0, oneLine(preview).length);
+    broadcast({ ts: t, upserts, removed, events: fresh, meters: meters(), ...(teamsChanged ? { teams: [...teams.values()] } : {}) });
   }
 
   function broadcast(d: Delta) { for (const l of listeners) l(d); }
@@ -406,7 +391,7 @@ export function createLiveSource(): Source {
   return {
     rooms,
     snapshot(): Snapshot {
-      return { source: 'live', ts: Date.now(), teams: [...teams.values()], agents: [...agents.values()], events: ring.slice(-200), meters: meters(), windowHours: WINDOW_HOURS, ...(lastError ? { error: lastError } : {}) };
+      return { source: 'live', ts: Date.now(), teams: [...teams.values()], agents: [...agents.values()], events: ring.slice(-400), meters: meters(), windowHours: WINDOW_HOURS, ...(lastError ? { error: lastError } : {}) };
     },
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     async history(key): Promise<HistoryItem[]> {
@@ -432,9 +417,8 @@ export function createLiveSource(): Source {
       if (message.length > MAX_MESSAGE_CHARS) throw new Error(`message too long (max ${MAX_MESSAGE_CHARS} chars)`);
       if (!agents.has(key)) throw new Error('unknown session');
       await call(SEND_METHOD, { key, message, idempotencyKey: randomUUID() }, 20_000);
-      sent.set(key, message);
-      const e = ev(Date.now(), 'zach', key, 'message', message);
-      ringPush(ring, [e]);
+      const e = { ...ev(Date.now(), 'zach', key, 'message', message), session: key };
+      mergeEvents(ring, [e], RING_MAX);
       broadcast({ ts: e.ts, upserts: [], removed: [], events: [e], meters: meters() });
     },
     close() { stopped = true; rooms.close(); },

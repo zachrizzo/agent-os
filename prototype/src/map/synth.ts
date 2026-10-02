@@ -4,7 +4,7 @@ import { COS_ID, TEAM_PALETTE, type Agent, type Delta, type EventKind, type Flee
 const NAMES = ['Forge', 'Main assistant', 'SonderMind ticket swarm', 'Research', 'Ops watchers', 'Personal assistants', 'Experiments', 'Billing', 'Growth', 'Infra', 'Docs', 'Evals', 'Security', 'Support'];
 const ROLES = ['triage', 'resolver', 'policy', 'qa', 'memory', 'intake', 'audit', 'reply', 'sync', 'guard', 'scout', 'synth', 'probe', 'eval', 'watch', 'builder'];
 const NOW = ['Routing intake', 'Reviewing context', 'Drafting response', 'Checking coverage', 'running pytest, 4m', 'reading 6 sources', 'waiting on CI', 'writing patch', 'tailing logs'];
-const KINDS: EventKind[] = ['handoff', 'report', 'message', 'message', 'finding', 'check', 'event', 'steer', 'approval'];
+const KINDS: EventKind[] = ['handoff', 'done', 'message', 'message', 'blocked', 'needs', 'approval'];
 
 export function synthFleet(total: number, teamCount: number, eventsPerSec: number, onDelta: (d: Delta) => void): { snapshot: Snapshot; stop(): void } {
   let s = 1234;

@@ -493,6 +493,64 @@ async function themeChecks(browser, tag) {
   await page.close();
 }
 
+// Activity panel semantics: one chronological stream (newest first), honest kinds, agent names that never truncate, noise hidden behind System,
+// "-> You" only on what truly went to Zach, click opens the session, optional team grouping.
+async function activityChecks(browser, tag) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.goto(base + "agent-os/?source=mock");
+  await page.waitForSelector("#activity .ev");
+  await page.waitForTimeout(5000); // the mock emits ~10 events/s, ~15% internal heartbeat rows
+  const bad = [];
+  const KINDS = ["message", "handoff", "done", "blocked", "needs you", "approval"];
+  const rows = await page.evaluate(() => [...document.querySelectorAll("#activity .stream .ev")].map((r) => ({
+    kind: r.querySelector(".kchip")?.textContent?.trim().toLowerCase() ?? "",
+    time: r.querySelector("time")?.textContent ?? "",
+    whos: [...r.querySelectorAll(".eline .who")].map((w) => ({ t: w.textContent, trunc: w.scrollWidth > w.clientWidth + 1, ell: getComputedStyle(w).textOverflow === "ellipsis" })),
+    text: r.querySelector(".esum")?.textContent ?? "",
+    ell: getComputedStyle(r.querySelector(".esum")).textOverflow === "ellipsis",
+    hue: r.querySelector(".edot")?.getAttribute("style") ?? "",
+    toYou: /→/.test(r.querySelector(".eline")?.textContent ?? "") && r.querySelectorAll(".eline .who")[1]?.textContent === "You",
+  })));
+  if (rows.length < 8) bad.push(["stream has rows", String(rows.length)]);
+  if (await page.locator("#activity .stream .group").count()) bad.push(["default is a single stream, not team groups", "found .group"]);
+  const times = rows.map((r) => r.time);
+  if (times.some((t, i) => i && t > times[i - 1])) bad.push(["newest first", times.slice(0, 6).join(" ")]);
+  const badKind = rows.filter((r) => !KINDS.includes(r.kind)).map((r) => r.kind);
+  if (badKind.length) bad.push(["only Message/Handoff/Done/Blocked/Needs you/Approval", [...new Set(badKind)].join(",")]);
+  if (rows.some((r) => /heartbeat|NO_REPLY|exec completion|no reply/i.test(r.text))) bad.push(["system noise hidden by default", rows.find((r) => /heartbeat|NO_REPLY|no reply/i.test(r.text)).text]);
+  if (rows.some((r) => r.whos.some((w) => w.trunc || w.ell))) bad.push(["actor names never truncate", JSON.stringify(rows.find((r) => r.whos.some((w) => w.trunc || w.ell)).whos)]);
+  if (!rows.every((r) => r.ell)) bad.push(["summary is ellipsized", "text-overflow"]);
+  if (!rows.every((r) => /--hue:/.test(r.hue))) bad.push(["team colour dot on every row", "missing --hue"]);
+  if (rows.some((r) => r.toYou && !["approval", "needs you", "message"].includes(r.kind))) bad.push(["-> You only for real asks/replies", rows.find((r) => r.toYou && !["approval", "needs you", "message"].includes(r.kind)).kind]);
+  if (!rows.some((r) => r.kind === "handoff")) bad.push(["handoff rows exist", "none"]);
+  // System filter reveals the hidden rows.
+  await page.click('#activity .chips button[data-f=system]');
+  await page.waitForTimeout(500);
+  const sys = await page.locator("#activity .stream .ev").allInnerTexts();
+  if (!sys.length || !sys.every((t) => /heartbeat|no reply|system/i.test(t))) bad.push(["System filter shows only internal rows", `${sys.length}: ${(sys[0] ?? "").replace(/\s+/g, " ").slice(0, 80)}`]);
+  await page.click('#activity .chips button[data-f=all]');
+  await page.waitForTimeout(400);
+  // Optional team grouping.
+  await page.click("#activity .grp-btn");
+  await page.waitForTimeout(500);
+  if (!(await page.locator("#activity .stream .group").count())) bad.push(["By team groups the stream", "no .group"]);
+  await page.click("#activity .grp-btn");
+  await page.waitForTimeout(400);
+  if (await page.locator("#activity .stream .group").count()) bad.push(["By team toggles back to one stream", "still grouped"]);
+  // Click opens the relevant session thread.
+  const first = await page.locator("#activity .stream .ev .who").first().innerText();
+  await page.locator("#activity .stream .ev").first().click();
+  await page.waitForSelector("#drawer.open .thread");
+  const route = await page.locator("#drawer .d-route").innerText();
+  if (!route.includes(first)) bad.push(["click opens the row's session", `${first} not in "${route}"`]);
+  if (errors.length) bad.push(["pageerrors", errors.join("; ")]);
+  if (bad.length) failed++;
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · Activity semantics (${rows.length} rows, kinds ${[...new Set(rows.map((r) => r.kind))].join("/")})${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  await page.close();
+}
+
 let failed = 0;
 for (const [tag, engine] of [["webkit", webkit], ["chromium", chromium]]) {
   const browser = await engine.launch();
@@ -504,6 +562,7 @@ for (const [tag, engine] of [["webkit", webkit], ["chromium", chromium]]) {
   await roomsChecks(browser, tag);
   await councilChecks(browser, tag);
   await erroringCountChecks(browser, tag);
+  await activityChecks(browser, tag);
   for (const sc of scenarios) {
     const page = await browser.newPage({ viewport: sc.viewport ?? { width: 1280, height: 760 } });
     const errors = [];

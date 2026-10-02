@@ -1,11 +1,14 @@
 import type { EventKind } from '../../shared/types';
+import { openNeedsOf } from '../../shared/activity';
 import type { FleetEvent } from '../contract';
 import type { ShellState, Filter } from '../store';
 
 /** Event-kind colour tokens (defined per light/dark mode in style.css). */
 export const KIND_COLOR: Record<EventKind, string> = {
-  handoff: 'var(--k-handoff)', report: 'var(--k-report)', approval: 'var(--k-approval)', finding: 'var(--k-finding)',
-  message: 'var(--k-message)', event: 'var(--k-event)', steer: 'var(--k-steer)', check: 'var(--k-check)',
+  message: 'var(--k-message)', handoff: 'var(--k-handoff)', done: 'var(--k-done)', blocked: 'var(--k-blocked)', needs: 'var(--k-needs)', approval: 'var(--k-approval)',
+};
+export const KIND_LABEL: Record<EventKind, string> = {
+  message: 'Message', handoff: 'Handoff', done: 'Done', blocked: 'Blocked', needs: 'Needs you', approval: 'Approval',
 };
 
 export function esc(s: string) {
@@ -29,29 +32,28 @@ export function fmtHM(ts: number) {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-/** Short display name for an agent id, falling back to a trimmed session key. */
+/** Display name of a session's AGENT (Spark, COO, Chief of Staff), never a subagent's task label. '' / zach map to nothing / You. */
 export function nameOf(s: ShellState, id: string) {
   if (id === 'zach') return 'You';
+  if (!id) return '';
   const a = s.agentsAll.get(id);
-  if (a) return a.name;
-  const parts = id.split(':');
-  return parts[1] ?? id;
+  if (a) return a.agentName ?? a.name;
+  const agent = id.split(':')[1] ?? id;
+  return agent === 'main' ? 'Chief of Staff' : agent; // session not in the fleet view (older than the window): the bare agent id
 }
 
+/** Team colour of an event: the sender's team, or the recipient's when You send. */
 export function hueOf(s: ShellState, agentId: string) {
   const a = s.agentsAll.get(agentId === 'zach' ? '' : agentId);
   return (a && s.teamsById.get(a.team)?.hue) || 'var(--idle)';
 }
 
-const ERR_RE = /\b(error|fail(ed|ure)?|exception|regression|crash|timeout)\b/i;
-export function isError(s: ShellState, e: FleetEvent) {
-  return s.agentsAll.get(e.from)?.status === 'error' || ERR_RE.test(e.text);
-}
-
-export function matchesFilter(s: ShellState, e: FleetEvent, f: Filter) {
+export function matchesFilter(_s: ShellState, e: FleetEvent, f: Filter) {
+  if (f === 'system') return !!e.sys;
+  if (e.sys) return false;
   switch (f) {
     case 'needs': return !!e.needsYou;
-    case 'errors': return isError(s, e);
+    case 'blocked': return e.kind === 'blocked';
     case 'handoffs': return e.kind === 'handoff';
     case 'approvals': return e.kind === 'approval';
     default: return true;
@@ -62,25 +64,16 @@ export function matchesQuery(s: ShellState, e: FleetEvent, q: string) {
   if (!q) return true;
   return (
     e.text.toLowerCase().includes(q) ||
-    e.kind.includes(q) ||
+    (e.label ?? '').toLowerCase().includes(q) ||
+    KIND_LABEL[e.kind].toLowerCase().includes(q) ||
     nameOf(s, e.from).toLowerCase().includes(q) ||
     nameOf(s, e.to).toLowerCase().includes(q)
   );
 }
 
-/** Open "needs you" items: needsYou events whose sender is still waiting (or unknown). */
-export function openNeeds(s: ShellState, events: FleetEvent[]) {
-  const out: FleetEvent[] = [];
-  const seenFrom = new Set<string>();
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (!e.needsYou || seenFrom.has(e.from)) continue;
-    const st = s.agentsAll.get(e.from)?.status;
-    if (st && st !== 'needs') continue;
-    seenFrom.add(e.from);
-    out.push(e);
-  }
-  return out;
+/** Open "needs you" items: per sender -> recipient thread only the latest real event counts, and it must still ask (shared/activity.ts). */
+export function openNeeds(_s: ShellState, events: FleetEvent[]) {
+  return openNeedsOf(events, Date.now());
 }
 
 /** Stable accent for an agent id (rooms: avatar + name colour). */

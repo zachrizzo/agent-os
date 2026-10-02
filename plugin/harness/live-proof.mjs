@@ -103,7 +103,7 @@ try {
   await page.waitForTimeout(1200);
   const evRows = page.locator("#activity .ev", { hasText: text });
   const line = (await evRows.first().locator(".eline").innerText()).replace(/\s+/g, " ");
-  check("Activity feed shows You -> agent", /^You\s*→\s*proof target/.test(line), line);
+  check("Activity feed shows You -> agent (the agent's name, not the session label)", /^You\s*→\s*Chief of Staff$/.test(line), line);
   check("Activity shows it exactly once (no echo from the session preview)", (await evRows.count()) === 1, `${await evRows.count()} row(s)`);
   await page.screenshot({ path: path.join(outDir, "live-1-agent-view-sent.png") });
 

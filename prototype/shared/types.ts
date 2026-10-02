@@ -2,7 +2,8 @@
 
 export type AgentStatus = 'active' | 'idle' | 'needs' | 'error';
 export type AgentRole = 'cos' | 'lead' | 'worker';
-export type EventKind = 'handoff' | 'report' | 'approval' | 'finding' | 'message' | 'event' | 'steer' | 'check';
+/** Small, honest set. Derived from real signals (tool calls, run status, explicit [COO] tags), never from "a run finished". */
+export type EventKind = 'message' | 'handoff' | 'done' | 'blocked' | 'needs' | 'approval';
 
 export interface Agent {
   id: string; // session key
@@ -19,6 +20,7 @@ export interface Agent {
   agentId?: string; // OpenClaw agent id (e.g. "forge-coder")
   kind?: 'main' | 'subagent' | 'cron' | 'other'; // session kind from the key
   label?: string; // session label / task title
+  agentName?: string; // the agent's own display name (identity), e.g. "Spark"; `name` is the session's name (a subagent's task label)
   ask?: string; // when status === 'needs': what Zach is being asked
   retired?: boolean; // finished/aborted/archived or stale session: hidden unless History is on (see liveness.ts)
 }
@@ -31,12 +33,15 @@ export interface Team {
 }
 
 export interface FleetEvent {
-  id: string;
+  id: string; // stable per real event (run / message / spawn), so re-deriving never duplicates
   ts: number;
-  from: string; // agent id
-  to: string; // agent id or 'zach'
+  from: string; // session key
+  to: string; // session key, 'zach' (only a real reply to Zach), or '' when nothing was addressed (e.g. a finished cron run)
   kind: EventKind;
-  text: string;
+  text: string; // the outcome: first meaningful line of the agent's own words
+  label?: string; // secondary text: the task label (e.g. a spawned subagent's task)
+  session?: string; // session whose thread a click opens (defaults to the sender)
+  sys?: boolean; // heartbeat / silent / exec-completion / internal turn: hidden unless the System filter is on
   needsYou?: boolean;
 }
 

@@ -43,13 +43,11 @@ const NOW_GENERIC = ['Reviewing context', 'Drafting response', 'Validating outpu
 const LEAD_NOW = ['Balancing workload', 'Reviewing worker reports', 'Planning next batch', 'Unblocking a worker'];
 const MSG: Record<EventKind, string[]> = {
   handoff: ['New intake routed with full context', 'Picked up card 51f52066', 'Escalated with transcript', 'Take the flaky test, repro first'],
-  report: ['Patch ready · 18 checks passed', 'Run finished in 3m12s', 'Summary attached · 4 findings', 'Verdict: APPROVED', 'Verdict: CHANGES_REQUESTED'],
+  done: ['Patch ready · 18 checks passed', 'Run finished in 3m12s', 'Summary attached · 4 findings', 'Verdict: APPROVED', 'Coverage verified · no exceptions'],
+  blocked: ['Typecheck fails on parser.ts:88', 'Waiting on CI, retrying in 5m', 'Verdict: CHANGES_REQUESTED', 'Regression in eval set B'],
+  needs: ['Which approach do you prefer?', 'Decision needed: ship or hold'],
   approval: ['Production gate awaiting approval', 'Response ready for your review', 'External source access requested'],
-  finding: ['6 sources added to evidence set', 'Contradiction in source 3', 'Regression in eval set B', 'Null deref in parser.ts:88'],
-  message: ['Can you take the next ticket?', 'Context synced', 'ack', 'On it', 'Need the repro steps'],
-  event: ['Latency back within baseline', 'Disk 71% on node-2', 'Cert renews in 12d', 'Cron run: memory-dreaming'],
-  steer: ['Narrow scope to billing only', 'Prefer the cached result', 'Stop, wait for review'],
-  check: ['Coverage verified · no exceptions', 'Lint clean', 'Typecheck clean'],
+  message: ['Can you take the next ticket?', 'Context synced', 'On it', 'Need the repro steps', 'Narrow scope to billing only', 'Prefer the cached result'],
 };
 const ASKS: Array<[string, string]> = [
   ['forge', 'Approve production deploy of e5330081?'],
@@ -89,7 +87,7 @@ export function createMockSource(): Source {
   function retire(a: Agent, ts: number, how: 'done' | 'aborted' | 'timeout' | 'killed' | 'archived'): Agent {
     a.retired = true;
     a.status = how === 'done' || how === 'archived' ? 'idle' : 'error';
-    a.now = how === 'done' ? `Done · ${pick(MSG.report)}`.slice(0, 60) : how === 'archived' ? 'Archived' : `${how === 'aborted' ? 'Aborted' : how === 'timeout' ? 'Timeout' : 'Killed'} · ${a.label ?? 'session'}`.slice(0, 60);
+    a.now = how === 'done' ? `Done · ${pick(MSG.done)}`.slice(0, 60) : how === 'archived' ? 'Archived' : `${how === 'aborted' ? 'Aborted' : how === 'timeout' ? 'Timeout' : 'Killed'} · ${a.label ?? 'session'}`.slice(0, 60);
     a.updatedAt = ts;
     return a;
   }
@@ -129,7 +127,7 @@ export function createMockSource(): Source {
     const a = pick(cands);
     a.status = 'needs'; a.ask = text; a.now = `Needs you: ${text}`.slice(0, 60); a.updatedAt = ts;
     changed.add(a.id);
-    push({ ts, from: a.id, to: 'zach', kind: 'approval', text, needsYou: true });
+    push({ ts, from: a.id, to: 'zach', kind: 'approval', text, needsYou: true, session: a.id });
   }
   // Seed a few "Needs you" items, then backfill a minute of history so a fresh client has context.
   for (let i = 0; i < 4; i++) raiseNeed(now - (4 - i) * 45_000);
@@ -144,10 +142,11 @@ export function createMockSource(): Source {
     else if (roll < 0.85) to = agents.get(src.parent ?? COS_ID);
     else to = pick(list.filter((a) => (a.role === 'lead' || a.role === 'cos') && a.id !== src.id));
     if (!to || to.id === src.id) return;
-    const kind = src.role !== 'worker' && rand() < 0.4 ? pick<EventKind>(['handoff', 'steer'])
-      : to.id === src.parent ? pick<EventKind>(['report', 'report', 'finding', 'check', 'message'])
-      : pick<EventKind>(['message', 'message', 'handoff', 'finding', 'event', 'check']);
-    push({ ts, from: src.id, to: to.id, kind, text: pick(MSG[kind]) });
+    const kind = src.role !== 'worker' && rand() < 0.4 ? pick<EventKind>(['handoff', 'message'])
+      : to.id === src.parent ? pick<EventKind>(['done', 'done', 'blocked', 'message'])
+      : pick<EventKind>(['message', 'message', 'handoff']);
+    push({ ts, from: src.id, to: to.id, kind, text: pick(MSG[kind]), ...(kind === 'handoff' ? { label: `Task ${Math.floor(rand() * 90 + 10)}` } : {}), session: src.id });
+    if (rand() < 0.15) push({ ts, from: src.id, to: '', kind: 'message', text: 'Heartbeat poll · no reply', sys: true, session: src.id }); // internal noise: hidden unless System is on
     src.updatedAt = ts;
     src.tokens += Math.floor(500 + rand() * 3000);
     src.costUsd += 0.002 + rand() * 0.01;
@@ -157,7 +156,7 @@ export function createMockSource(): Source {
       if (a.role === 'worker') {
         const r = rand();
         a.status = r < 0.03 ? 'error' : a.status === 'active' ? 'idle' : 'active';
-        a.now = a.status === 'error' ? 'Aborted · tool timeout' : a.status === 'idle' ? `Done · ${pick(MSG.report)}`.slice(0, 60) : nowFor(workerOf(a));
+        a.now = a.status === 'error' ? 'Aborted · tool timeout' : a.status === 'idle' ? `Done · ${pick(MSG.done)}`.slice(0, 60) : nowFor(workerOf(a));
       } else a.now = a.role === 'cos' ? pick([`Coordinating ${TEAMS.length} teams`, 'Reading team reports', 'Drafting your daily brief']) : pick(LEAD_NOW);
       a.updatedAt = ts;
       changed.add(a.id);
@@ -169,13 +168,13 @@ export function createMockSource(): Source {
     const done = liveAll().filter((a) => a.role === 'worker' && a.status === 'idle');
     if (done.length) {
       const a = pick(done);
-      push({ ts, from: a.id, to: a.parent ?? COS_ID, kind: 'report', text: `Finished · ${pick(MSG.report)}` });
+      push({ ts, from: a.id, to: a.parent ?? COS_ID, kind: 'done', text: pick(MSG.done), session: a.id });
       retire(a, ts, pick(HOW)); changed.add(a.id); // stays in the feed as history
       const hist = all().filter((x) => x.retired).sort((x, y) => x.updatedAt - y.updatedAt);
       for (const old of hist.slice(0, Math.max(0, hist.length - 150))) { agents.delete(old.id); changed.delete(old.id); removed.push(old.id); }
       const b = spawnWorker(a.team, workerOf(a), ts);
       b.status = 'active';
-      push({ ts, from: b.parent!, to: b.id, kind: 'handoff', text: `Spawned ${b.name}: ${pick(MSG.handoff)}` });
+      push({ ts, from: b.parent!, to: b.id, kind: 'handoff', text: pick(MSG.handoff), label: b.label, session: b.id });
       changed.add(b.id);
     }
     // Resolve the oldest need, sometimes raise a new one.
@@ -183,7 +182,7 @@ export function createMockSource(): Source {
     if (needs.length > 2 && rand() < 0.5) {
       const a = needs[0];
       a.status = 'active'; delete a.ask; a.now = nowFor(workerOf(a)); a.updatedAt = ts;
-      push({ ts, from: COS_ID, to: a.id, kind: 'steer', text: 'Zach approved · proceed' });
+      push({ ts, from: COS_ID, to: a.id, kind: 'message', text: 'Zach approved · proceed', session: a.id });
       changed.add(a.id);
     }
     if (needs.length < 6 && rand() < 0.5) raiseNeed(ts);
@@ -251,8 +250,8 @@ export function createMockSource(): Source {
       return [
         briefItem(t - 180_000, a.parent ?? COS_ID, `Brief: ${pick(MSG.handoff)}`),
         { role: 'assistant', ts: t - 120_000, text: `${a.now}…` },
-        { role: 'assistant', ts: t - 60_000, text: `⚙ exec · ${pick(MSG.check)}` },
-        { role: 'assistant', ts: t - 5_000, text: a.ask ?? pick(MSG.report) },
+        { role: 'assistant', ts: t - 60_000, text: `⚙ exec · ${pick(MSG.done)}` },
+        { role: 'assistant', ts: t - 5_000, text: a.ask ?? pick(MSG.done) },
         ...(sentLog.get(key) ?? []),
       ];
     },
@@ -264,7 +263,7 @@ export function createMockSource(): Source {
       if (!a) throw new Error('unknown session');
       const ts = Date.now();
       sentLog.set(key, [...(sentLog.get(key) ?? []), { role: 'user', ts, text: message }]);
-      push({ ts, from: 'zach', to: key, kind: 'message', text: message });
+      push({ ts, from: 'zach', to: key, kind: 'message', text: message, session: key });
       a.updatedAt = ts; changed.add(key);
     },
     close() { clearInterval(t1); clearInterval(t2); clearInterval(t3); rooms.close(); },

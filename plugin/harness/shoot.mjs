@@ -34,6 +34,20 @@ await shot("0b-agent-os-history-on");
 console.log("history on:", await page.locator(".c-sub").innerText());
 await page.click(".hist-btn"); // back to live-only
 
+// Activity: one chronological stream (default), the System filter, and optional team grouping.
+await page.waitForTimeout(2500);
+await shot("1a-activity-stream");
+await page.locator("#activity").screenshot({ path: path.join(out, `${tag}-${scheme}-1b-activity-panel.png`) });
+await page.click('#activity .chips button[data-f=system]');
+await page.waitForTimeout(500);
+await page.locator("#activity").screenshot({ path: path.join(out, `${tag}-${scheme}-1c-activity-system-filter.png`) });
+await page.click('#activity .chips button[data-f=all]');
+await page.click("#activity .grp-btn");
+await page.waitForTimeout(500);
+await page.locator("#activity").screenshot({ path: path.join(out, `${tag}-${scheme}-1d-activity-by-team.png`) });
+await page.click("#activity .grp-btn");
+await page.waitForTimeout(300);
+
 // Message agent: agent view, team view, and the drawer after sending.
 const agentRow = page.locator("#rail .row.agent").first();
 await agentRow.click();

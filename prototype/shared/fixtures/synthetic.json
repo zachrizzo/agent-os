@@ -1,0 +1,42 @@
+{
+  "_about": "SYNTHETIC cases built by hand from the structural markers in the brief; the live Gateway history retained no heartbeat or exec-completion turns (heartbeat only survives as a sessions.list lastMessagePreview). Shapes follow the real provenance/role conventions seen in fleet.json.",
+  "sessions": [
+    { "key": "agent:coo:main", "kind": "main", "agentId": "coo", "status": "done", "hasActiveRun": false, "updatedAt": 1790976000000, "lastMessagePreview": "[OpenClaw heartbeat poll]" },
+    { "key": "agent:main:main", "kind": "main", "agentId": "main", "status": "done", "hasActiveRun": false, "updatedAt": 1790976000000 },
+    { "key": "agent:spark:subagent:sub-9001", "kind": "subagent", "agentId": "spark", "label": "Synthetic task label", "status": "done", "spawnedBy": "agent:coo:main", "parentSessionKey": "agent:coo:main", "createdAt": 1790975000000, "endedAt": 1790975900000, "lastRunId": "run-9001", "hasActiveRun": false },
+    { "key": "agent:spark:subagent:sub-9002", "kind": "subagent", "agentId": "spark", "label": "Synthetic failing task", "status": "failed", "spawnedBy": "agent:coo:main", "parentSessionKey": "agent:coo:main", "createdAt": 1790975000000, "endedAt": 1790975950000, "lastRunId": "run-9002", "hasActiveRun": false, "abortedLastRun": true },
+    { "key": "agent:spark:subagent:sub-9003", "kind": "subagent", "agentId": "spark", "label": "Synthetic running task", "status": "running", "spawnedBy": "agent:coo:main", "parentSessionKey": "agent:coo:main", "createdAt": 1790975500000, "lastRunId": "run-9003", "hasActiveRun": true }
+  ],
+  "histories": {
+    "agent:coo:main": [
+      { "role": "user", "timestamp": 1790975100000, "__openclaw": { "id": "syn-hb-1" }, "content": "[OpenClaw heartbeat poll]\nPlaceholder heartbeat instructions." },
+      { "role": "assistant", "timestamp": 1790975104000, "stopReason": "stop", "__openclaw": { "id": "syn-hb-1a" }, "content": [{ "type": "text", "text": "HEARTBEAT_OK" }] },
+      { "role": "user", "timestamp": 1790975200000, "__openclaw": { "id": "syn-hb-2" }, "content": "[OpenClaw heartbeat poll]\nPlaceholder heartbeat instructions." },
+      { "role": "assistant", "timestamp": 1790975204000, "stopReason": "stop", "__openclaw": { "id": "syn-hb-2a" }, "content": [{ "type": "text", "text": "Nothing changed since the last poll.\n\nNO_REPLY" }] },
+      { "role": "user", "timestamp": 1790975300000, "provenance": { "kind": "internal_system", "sourceTool": "exec" }, "__openclaw": { "id": "syn-ex-1" }, "content": "[OpenClaw exec completion] Placeholder: background command exited 0." },
+      { "role": "assistant", "timestamp": 1790975303000, "stopReason": "stop", "__openclaw": { "id": "syn-ex-1a" }, "content": [{ "type": "text", "text": "Placeholder: the build finished, nothing to report." }] },
+      { "role": "user", "timestamp": 1790975400000, "__openclaw": { "id": "syn-ex-2" }, "content": "[OpenClaw exec completion] Placeholder: background command exited 1." },
+      { "role": "user", "timestamp": 1790975500000, "__openclaw": { "id": "syn-u-1" }, "content": "Placeholder user prompt that must never become a preview." },
+      { "role": "assistant", "timestamp": 1790975510000, "stopReason": "stop", "__openclaw": { "id": "syn-u-1a" }, "content": [{ "type": "text", "text": "Placeholder reply to Zach. I need your approval to run the deploy: /approve abc123 allow-once" }] }
+    ],
+    "agent:main:main": [
+      { "role": "user", "timestamp": 1790975600000, "__openclaw": { "id": "syn-m-1" }, "content": "Placeholder user prompt one." },
+      { "role": "assistant", "timestamp": 1790975610000, "stopReason": "stop", "__openclaw": { "id": "syn-m-1a" }, "content": [{ "type": "text", "text": "Placeholder answer. Should I merge it now?" }] },
+      { "role": "user", "timestamp": 1790975700000, "__openclaw": { "id": "syn-m-2" }, "content": "Placeholder user prompt two." },
+      { "role": "assistant", "timestamp": 1790975710000, "stopReason": "stop", "__openclaw": { "id": "syn-m-2a" }, "content": [{ "type": "text", "text": "Placeholder answer. Should I merge it now?" }] }
+    ],
+    "agent:spark:subagent:sub-9001": [
+      { "role": "user", "timestamp": 1790975000000, "__openclaw": { "id": "syn-s-0" }, "content": "[Subagent Context] You are running as a subagent (depth 1/5).\n\n[Subagent Task]\n\nPlaceholder task brief." },
+      { "role": "assistant", "timestamp": 1790975890000, "stopReason": "end_turn", "__openclaw": { "id": "syn-s-1" }, "content": [{ "type": "text", "text": "**Branch / sha:**\n\nPlaceholder: the change is built and verified; 12 tests pass.\n\n- detail" }] }
+    ],
+    "agent:spark:subagent:sub-9002": [
+      { "role": "user", "timestamp": 1790975000000, "__openclaw": { "id": "syn-f-0" }, "content": "[Subagent Context] You are running as a subagent (depth 1/5).\n\n[Subagent Task]\n\nPlaceholder task brief." },
+      { "role": "assistant", "timestamp": 1790975940000, "stopReason": "end_turn", "__openclaw": { "id": "syn-f-1" }, "content": [{ "type": "text", "text": "Placeholder: stopped, the tests could not run." }] }
+    ],
+    "agent:spark:subagent:sub-9003": [
+      { "role": "user", "timestamp": 1790975500000, "__openclaw": { "id": "syn-r-0" }, "content": "[Subagent Context] You are running as a subagent (depth 1/5).\n\n[Subagent Task]\n\nPlaceholder task brief." },
+      { "role": "assistant", "timestamp": 1790975800000, "stopReason": "tool_use", "__openclaw": { "id": "syn-r-1" }, "content": [{ "type": "text", "text": "Placeholder progress note, still working." }] },
+      { "role": "assistant", "timestamp": 1790975850000, "stopReason": "end_turn", "__openclaw": { "id": "syn-r-2" }, "content": [{ "type": "text", "text": "Placeholder interim text while the run is still active." }] }
+    ]
+  }
+}

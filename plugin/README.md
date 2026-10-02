@@ -95,6 +95,19 @@ Write path: browser `POST api/rooms[/:id[/send|/stop]]` with the same guard as `
 
 Checks: `cd prototype && npm test` (unit: mentions, gating, caps, passes, a2a parsing); `node harness/check.mjs` (mock fleet: compact row, room create/gating/members/caps/archive/persistence/guards); `node harness/shoot.mjs <dir> [baseUrl] [chromium]` (screenshots in dark and light, plus a live theme toggle; committed in `harness/screens/`). Throwaway-Gateway proof with a stub model provider (`harness/stub-llm.mjs`, no credentials): `node harness/rooms-proof.mjs <dir> [port=19470]` uses ports 19470-19473, covers real `sessions.create`/`sessions.send`/`chat.history`, gating, caps, PASS, phi refusal, restart persistence and the compact row against real `chat.history`, then cleans up.
 
+## Activity panel semantics
+
+The right panel is one chronological stream (newest first, team colour dots; **By team** groups it, optional). Each row reads `Sender → Recipient`, a kind chip and the outcome; the task label is secondary text; clicking opens the relevant session thread. Names are agent names (Spark, COO, Chief of Staff, You), never a subagent's task label, and never truncated; the summary is ellipsized.
+
+- **Preview** = first meaningful line of the agent's own final assistant text (`prototype/shared/activity.ts`, read from `chat.history`), never the message that triggered the run. The list-row `lastMessagePreview` is no longer used for events.
+- **One row per real event**: stable ids (`spawn:`, `done:<session>:<run>`, `turn:<session>:<message>`, `msg:<from>><to>:<hash>`), so a send read from the sender's tool call and from the recipient's inbox is one row, and re-reads never duplicate.
+- **Kinds**: Message, Handoff, Done, Blocked, Needs you, Approval. Handoff = a spawn (parent → child). Done/Blocked = a child run ended (child → parent) or an explicit `[COO] **done|blocked|decision**` / `FORGE-REPORT status:` tag, a failed send or failed run. Needs you = the session's attention flag, a `[COO]` decision tag, or the latest reply to Zach that asks him something (open until a later event in that thread). A run finishing is not a REPORT.
+- **→ You** only for a main-chat reply to a real user turn. Replies to inter-session messages, completions and cron ticks carry no recipient; sessions_send shows sender → recipient agent.
+- **System** (hidden by default, behind the System chip): heartbeat polls, NO_REPLY / silent turns, exec-completion notices, restart-recovery and other internal turns, subagent completion deliveries.
+- The data server reads `chat.history` for a session only when its run state changes (newest first, 2 reads per poll), so a fresh start backfills over about a minute.
+
+Tests: `cd prototype && npm test` (`shared/activity.test.ts` runs every rule over `shared/fixtures/fleet.json`, anonymized real fleet shapes, plus `synthetic.json` for heartbeat / exec-completion / approval turns that Gateway history does not retain).
+
 ## Installing this build
 
 The Agent OS tab (plugin) and its data server (`prototype/server`, the process on 127.0.0.1:5198) are separate. Rooms and the compact rows need both.

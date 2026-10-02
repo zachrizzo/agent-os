@@ -3,7 +3,7 @@ import type { HistoryItem } from '../../shared/types';
 import type { FleetEvent } from '../contract';
 import type { ShellStore } from '../store';
 import { mountComposer } from './composer';
-import { KIND_COLOR, esc, fmtTime, hueOf, nameOf, svg } from './format';
+import { KIND_COLOR, KIND_LABEL, esc, fmtTime, hueOf, nameOf, svg } from './format';
 
 export function mountDrawer(el: HTMLElement, store: ShellStore) {
   let current: string | null = null; // session key shown
@@ -25,7 +25,7 @@ export function mountDrawer(el: HTMLElement, store: ShellStore) {
   }
 
   /** The session whose thread the drawer shows: the sender, or the receiver of a message from Zach. */
-  const sessionOf = (ev: FleetEvent) => (ev.from === 'zach' ? ev.to : ev.from);
+  const sessionOf = (ev: FleetEvent) => ev.session ?? (ev.from === 'zach' ? ev.to : ev.from);
 
   function open(ev: FleetEvent) { return show(sessionOf(ev), ev); }
   /** Open any session without an event (agent/team views). */
@@ -40,17 +40,17 @@ export function mountDrawer(el: HTMLElement, store: ShellStore) {
     el.style.setProperty('--hue', hue);
     const who = (id: string) => id === 'zach' ? '<span class="who-btn you">You</span>' : `<button class="who-btn" data-agent="${esc(id)}">${esc(nameOf(s, id))}</button>`;
     const route = ev
-      ? `${who(ev.from)}<span class="arr">→</span>${who(ev.to)}
+      ? `${who(ev.from)}${ev.to ? `<span class="arr">→</span>${who(ev.to)}` : ''}
         <time>${new Date(ev.ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · ${fmtTime(ev.ts)}</time>`
       : who(key);
     el.innerHTML = `
       <header class="d-head">
-        <div class="d-crumb"><span class="gdot"></span>${esc(team?.name ?? 'Unassigned')}${ev ? `<span class="kchip" style="--k:${KIND_COLOR[ev.kind]}">${ev.kind}</span>` : ''}${ev?.needsYou ? '<span class="kchip need">needs you</span>' : ''}</div>
+        <div class="d-crumb"><span class="gdot"></span>${esc(team?.name ?? 'Unassigned')}${ev ? `<span class="kchip" style="--k:${KIND_COLOR[ev.kind]}">${KIND_LABEL[ev.kind]}</span>` : ''}${ev?.needsYou && ev.kind !== 'needs' ? '<span class="kchip need">needs you</span>' : ''}</div>
         <button class="icon-btn d-close" title="Close (Esc)">${svg('close', 16)}</button>
       </header>
       <div class="d-route">${route}</div>
       <div class="d-body">
-        ${ev ? `<blockquote class="d-text">${esc(ev.text)}</blockquote>` : ''}
+        ${ev ? `<blockquote class="d-text">${esc(ev.text)}${ev.label && ev.label !== ev.text ? `<small class="d-label">${esc(ev.label)}</small>` : ''}</blockquote>` : ''}
         <dl class="d-meta">
           <div><dt>Session</dt><dd class="mono">${esc(key)}</dd></div>
           ${a ? `<div><dt>Now</dt><dd>${esc(a.now)}</dd></div><div><dt>Model</dt><dd class="mono">${esc(a.model ?? '—')}</dd></div><div><dt>Spend</dt><dd>$${a.costUsd.toFixed(2)} · ${Math.round(a.tokens / 1000)}k tok</dd></div>` : ''}
