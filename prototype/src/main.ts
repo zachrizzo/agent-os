@@ -14,6 +14,7 @@ import { mountDrawer } from './ui/drawer';
 import { mountRail } from './ui/rail';
 import { mountRooms } from './ui/rooms';
 import { mountTopbar } from './ui/topbar';
+import { initTheme } from './theme';
 
 // The map renderer lives in src/map/index.ts (owned separately). A glob import keeps the shell
 // booting before that module exists; Vite re-evaluates this when the file appears.
@@ -22,6 +23,7 @@ const mapModules = import.meta.glob<{ createMap: CreateMap }>('./map/index.ts');
 const $ = (id: string) => document.getElementById(id)!;
 
 async function boot() {
+  initTheme();
   const app = $('app');
   const source = await resolveSource();
   const store = createStore(source);

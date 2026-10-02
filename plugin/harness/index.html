@@ -4,13 +4,17 @@
 <meta charset="utf-8">
 <title>Agent OS voice control · mock Control UI host</title>
 <style>
-  :root { --bg:#0e1116; --text:#e6e8eb; --muted:#8b93a1; --border:#262c36; --accent:#ff5a36; --destructive:#ff6369; color-scheme: dark; }
+  /* Control UI 2026.9.7 palette (dist/control-ui core stylesheet): dark :root, light under [data-theme-mode=light]. The real host flips data-theme-mode on <html>. */
+  :root { --bg:#0e1015; --bg-elevated:#191c24; --card:#161920; --text:#bcbcc0; --text-strong:#f4f4f5; --muted:#8b8b94; --border:#1e2028; --accent:#ff5c5c; --accent-foreground:#0e1015; --accent-2:#14b8a6; --ok:#22c55e; --warn:#f59e0b; --danger:#f87171; --destructive:#ef4444; --info:#60a5fa; --font-body:"Instrument Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; --mono:"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; color-scheme: dark; }
+  :root[data-theme-mode="light"] { --bg:#faf9f7; --bg-elevated:#fff; --card:#fff; --text:#403c35; --text-strong:#211e1a; --muted:#6e6960; --border:#e8e4dc; --accent:#bd4531; --accent-foreground:#fff; --accent-2:#0d9488; --ok:#166534; --warn:#92400e; --danger:#b91c1c; --destructive:#dc2626; --info:#1d4ed8; color-scheme: light; }
   * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.4 Inter, system-ui, sans-serif; display:grid; grid-template-columns:200px 1fr; grid-template-rows:auto 1fr; height:100vh; }
-  #banner { grid-column:1/3; padding:4px 12px; background:#3a2f12; color:#f5d98a; font-size:11px; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.4 var(--font-body); display:grid; grid-template-columns:200px 1fr; grid-template-rows:auto 1fr; height:100vh; }
+  #banner { grid-column:1/3; padding:4px 12px; background:color-mix(in srgb, var(--warn) 18%, var(--bg)); color:var(--text-strong); font-size:11px; display:flex; gap:12px; align-items:center; }
+  #banner span { flex:1; }
+  #theme-toggle { padding:2px 10px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--text); font:inherit; cursor:pointer; }
   nav { border-right:1px solid var(--border); padding:10px; display:flex; flex-direction:column; gap:4px; }
   nav button { text-align:left; padding:6px 8px; background:none; border:0; border-radius:6px; color:var(--text); font:inherit; cursor:pointer; }
-  nav button[aria-current="page"] { background:#1b212b; }
+  nav button[aria-current="page"] { background:var(--bg-elevated); }
   nav h4 { margin:10px 0 2px; font-size:10px; text-transform:uppercase; color:var(--muted); }
   #view { min-width:0; min-height:0; display:flex; flex-direction:column; }
   #view > .page { flex:1; min-height:0; }
@@ -24,10 +28,10 @@
   .agent-chat__input--chat textarea { flex:1; min-width:0; resize:none; padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:transparent; color:var(--text); font:inherit; }
   .agent-chat__composer-actions { display:flex; gap:6px; align-items:center; position:relative; }
   .chat-talk-control { display:inline-flex; align-items:center; gap:6px; }
-  .chat-send-btn { min-width:34px; height:34px; border-radius:17px; border:1px solid var(--border); background:#1b212b; color:var(--text); cursor:pointer; font:inherit; }
-  .chat-send-btn--voice-live { background:var(--accent); border-color:var(--accent); color:#fff; }
-  .live-note { color:#7ee2a8; font-size:12px; }
-  .picker { position:absolute; bottom:40px; right:0; width:240px; padding:8px; border:1px solid var(--border); border-radius:8px; background:#161b23; font-size:12px; }
+  .chat-send-btn { min-width:34px; height:34px; border-radius:17px; border:1px solid var(--border); background:var(--bg-elevated); color:var(--text); cursor:pointer; font:inherit; }
+  .chat-send-btn--voice-live { background:var(--accent); border-color:var(--accent); color:var(--accent-foreground); }
+  .live-note { color:var(--ok); font-size:12px; }
+  .picker { position:absolute; bottom:40px; right:0; width:240px; padding:8px; border:1px solid var(--border); border-radius:8px; background:var(--card); font-size:12px; }
   /* From the Control UI 2026.9.7 stylesheet: base hides the mobile variants; narrow width swaps them in and hides the Talk button. */
   .chat-mobile-dictation-action,.chat-mobile-talk-action,.chat-mobile-primary-action{display:none}
   .chat-desktop-primary-action{display:contents}
@@ -39,11 +43,15 @@
 </style>
 </head>
 <body>
-<div id="banner">MOCK Control UI host (dev harness). The Agent OS tab code below is the real built plugin; the Voice chat pane reproduces the Control UI 2026.9.7 composer (tap/hold mic, dictation-only twin, talk.catalog gating, draft-sends-on-tap). No audio, no Gateway Talk.</div>
+<div id="banner"><span>MOCK Control UI host (dev harness). The Agent OS tab code below is the real built plugin; the Voice chat pane reproduces the Control UI 2026.9.7 composer (tap/hold mic, dictation-only twin, talk.catalog gating, draft-sends-on-tap). No audio, no Gateway Talk.</span><button id="theme-toggle" type="button">Theme: dark</button></div>
 <nav id="nav"></nav>
 <main id="view"></main>
 <script type="module">
 const params = new URLSearchParams(location.search);
+// Mock of the Control UI theme switch: it sets data-theme-mode on <html> (and wa-light/wa-dark); the plugin's theme bridge watches that.
+const setMode = (m) => { const el = document.documentElement; el.dataset.themeMode = m; el.dataset.themeResolved = m; el.classList.toggle("wa-light", m === "light"); el.classList.toggle("wa-dark", m === "dark"); document.getElementById("theme-toggle").textContent = "Theme: " + m; };
+setMode(params.get("theme") === "light" ? "light" : "dark");
+document.getElementById("theme-toggle").onclick = () => setMode(document.documentElement.dataset.themeMode === "light" ? "dark" : "light");
 const manifest = await (await fetch("/openclaw.plugin.json")).json();
 const css = document.createElement("link");
 css.rel = "stylesheet";

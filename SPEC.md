@@ -106,6 +106,7 @@ In the UI:
 ```
 
 ## Visual language
+Follows the Control UI's light/dark mode live (see plugin/README.md, "Light / dark theme"); the notes below describe the dark palette.
 
 - **Mood:** calm mission control, closer to Linear/Raycast/Vercel polish than an admin
   panel. Dark first (follow the host theme tokens; also support light). Dense but quiet:

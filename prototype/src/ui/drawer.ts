@@ -81,7 +81,7 @@ export function mountDrawer(el: HTMLElement, store: ShellStore) {
     const bubble = (role: string, text: string, ts: number, sender?: string) => {
       const mine = role === 'assistant';
       const name = mine ? nameOf(s, key) : sender ? nameOf(s, sender) : role === 'user' ? 'You' : role;
-      return `<div class="msg ${mine ? 'me' : 'them'} r-${esc(role)}" style="--hue:${mine ? hue : sender ? hueOf(s, sender) : '#7a8494'}">
+      return `<div class="msg ${mine ? 'me' : 'them'} r-${esc(role)}" style="--hue:${mine ? hue : sender ? hueOf(s, sender) : 'var(--idle)'}">
         <div class="m-head"><span class="m-who">${esc(name)}</span><span class="m-role">${esc(role)}</span><time>${fmtTime(ts)}</time></div>
         <div class="m-text">${esc(text)}</div></div>`;
     };

@@ -123,7 +123,7 @@ export function mountActivity(el: HTMLElement, store: ShellStore, openEvent: (e:
         groupEls.set(id, g);
       }
       keepGroups.add(id);
-      g.style.setProperty('--hue', team?.hue ?? '#7a8494');
+      g.style.setProperty('--hue', team?.hue ?? 'var(--idle)');
       g.querySelector('.gname')!.textContent = team?.name ?? 'Unassigned';
       g.querySelector('.gcount')!.textContent = String(evs.length);
       const body = g.querySelector<HTMLElement>('.gbody')!;

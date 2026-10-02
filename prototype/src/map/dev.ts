@@ -5,9 +5,12 @@
 //   ?zoom=team&team=ID  start zoomed into a team;  ?zoom=agent&agent=ID
 import type { Selection, State, Store, Zoom } from '../contract';
 import type { Delta, FleetEvent, Snapshot } from '../../shared/types';
+import '../style.css';
+import { initTheme } from '../theme';
 import { createMap } from './index';
 import { synthFleet } from './synth';
 
+initTheme();
 const q = new URLSearchParams(location.search);
 const bench = q.has('bench');
 const listeners = new Set<(s: State, fresh: FleetEvent[]) => void>();

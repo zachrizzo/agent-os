@@ -86,7 +86,7 @@ export function mountCenter(el: HTMLElement, store: ShellStore, opts: { onFocusM
       }
       composeKey = target?.key ?? '';
       compose.hidden = !target;
-      compose.style.setProperty('--hue', team?.hue ?? '#7c9cff');
+      compose.style.setProperty('--hue', team?.hue ?? 'var(--accent)');
       if (target) composer.setTarget(target);
       title.textContent = t;
       title.style.setProperty('--hue', team?.hue ?? 'transparent');

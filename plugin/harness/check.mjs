@@ -276,11 +276,140 @@ async function noReplayChecks(browser, tag) {
   await page.close();
 }
 
+// ---- Theme: Agent OS follows the Control UI's light/dark mode live, with readable contrast -----------------------------------
+const parseRgb = (c) => { const m = c.match(/^(rgba?|color)\(([^)]*)\)/); if (!m) return null; const n = m[2].replace("srgb", "").replace("/", " ").split(/[\s,]+/).filter(Boolean).map(Number); const k = m[1] === "color" ? 255 : 1; return { r: n[0] * k, g: n[1] * k, b: n[2] * k, a: n.length > 3 ? n[3] : 1 }; };
+const HOST = { dark: { bg: [14, 16, 21], card: [22, 25, 32], accent: [255, 92, 92], textStrong: [244, 244, 245] }, light: { bg: [250, 249, 247], card: [255, 255, 255], accent: [189, 69, 49], textStrong: [33, 30, 26] } };
+const near = (a, b, t = 3) => a.every((v, i) => Math.abs(v - b[i]) <= t);
+
+// Runs inside the Agent OS frame: sweeps every visible text node, composites its colour over the opaque ancestors, returns WCAG ratios.
+const contrastSweep = () => {
+  const parse = (c) => { const m = c.match(/^(rgba?|color)\(([^)]*)\)/); if (!m) return null; const n = m[2].replace("srgb", "").replace("/", " ").split(/[\s,]+/).filter(Boolean).map(Number); const k = m[1] === "color" ? 255 : 1; return [n[0] * k, n[1] * k, n[2] * k, n.length > 3 ? n[3] : 1]; };
+  const over = (f, b) => [0, 1, 2].map((i) => f[i] * f[3] + b[i] * (1 - f[3]));
+  const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+  const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+  const bgOf = (el) => { const chain = []; for (let e = el; e; e = e.parentElement) { const c = parse(getComputedStyle(e).backgroundColor); if (c && c[3] > 0) chain.push(c); if (c && c[3] >= 1) break; } let base = [255, 255, 255]; for (const c of chain.reverse()) base = over(c, base); return base; };
+  const out = [];
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n; (n = walker.nextNode());) {
+    const t = n.textContent.trim(); const el = n.parentElement;
+    if (!t || /^[^\p{L}\p{N}]+$/u.test(t) || !el || /^(SCRIPT|STYLE)$/.test(el.tagName) || el.closest(":disabled")) continue; // disabled controls are exempt (WCAG 1.4.3)
+    const r = el.getBoundingClientRect(); const cs = getComputedStyle(el);
+    if (r.width < 1 || r.height < 1 || cs.visibility === "hidden" || cs.display === "none" || Number(cs.opacity) < 0.05) continue;
+    let op = 1; for (let e = el; e; e = e.parentElement) op *= Number(getComputedStyle(e).opacity);
+    if (op < 0.05) continue; // a fully faded-out ancestor (closed drawer) is not visible text
+    const fg = parse(cs.color); if (!fg) continue;
+    const bg = bgOf(el); const fgc = over([fg[0], fg[1], fg[2], fg[3] * op], bg);
+    out.push({ t: t.slice(0, 28), cls: (el.className?.baseVal ?? el.className ?? "").toString().slice(0, 24), ratio: +ratio(fgc, bg).toFixed(2), px: parseFloat(cs.fontSize) });
+  }
+  return out;
+};
+const canvasPx = (frame) => frame.evaluate(() => { const c = document.querySelector(".aos-map canvas"); const g = c.getContext("2d"); const d = g.getImageData(c.width - 6, c.height - 6, 1, 1).data; return [d[0], d[1], d[2]]; });
+
+async function themeChecks(browser, tag) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const bad = [];
+  // 1) Embedded in the (mock) Control UI host, starting light: the host's own variables must drive the app.
+  await page.goto(base + "?theme=light");
+  await page.waitForSelector(".agent-os-voice__btn");
+  const frame = () => page.frames().find((f) => f.url().includes("/agent-os/"));
+  await page.waitForFunction(() => document.querySelector("iframe"), null, { timeout: 8000 });
+  await page.waitForTimeout(3500);
+  const snap = (f) => f.evaluate(() => { const cs = (s, p) => getComputedStyle(document.querySelector(s))[p]; return { mode: document.documentElement.dataset.mode, body: cs("body", "backgroundColor"), rail: cs("#rail", "backgroundColor"), title: cs(".brand span", "color"), chip: cs(".chips button.on", "backgroundColor"), font: cs("body", "fontFamily"), scheme: cs("html", "colorScheme") }; });
+  const checkMode = async (mode, what) => {
+    const s = await snap(frame());
+    const want = HOST[mode];
+    const body = parseRgb(s.body), rail = parseRgb(s.rail), chip = parseRgb(s.chip), title = parseRgb(s.title);
+    if (s.mode !== mode) bad.push([what + " mode attr", s.mode]);
+    if (!body || !near([body.r, body.g, body.b], want.bg)) bad.push([what + " page background = host --bg", s.body]);
+    if (!rail || !near([rail.r, rail.g, rail.b], want.card)) bad.push([what + " panel background = host --card", s.rail]);
+    if (!chip || !near([chip.r, chip.g, chip.b], want.accent)) bad.push([what + " active chip = host --accent", s.chip]);
+    if (!title || !near([title.r, title.g, title.b], want.textStrong)) bad.push([what + " text = host --text-strong", s.title]);
+    if (!s.font.includes("Instrument Sans")) bad.push([what + " font follows host --font-body", s.font]);
+    if (s.scheme !== mode) bad.push([what + " color-scheme", s.scheme]);
+    const px = await canvasPx(frame());
+    if (!near(px, want.bg, 6)) bad.push([what + " map canvas background", px.join(",")]);
+    const sweep = await frame().evaluate(contrastSweep);
+    const low = sweep.filter((x) => x.ratio < (x.px >= 18 ? 3 : 4.5));
+    if (low.length) bad.push([what + " text contrast < 4.5 (3 for large)", `${low.length}/${sweep.length}: ` + low.slice(0, 6).map((x) => `${x.cls || "?"}:"${x.t}" ${x.ratio}`).join("; ")]);
+    return { sweep: sweep.length, min: Math.min(...sweep.map((x) => x.ratio)) };
+  };
+  const light = await checkMode("light", "light");
+  await frame().evaluate(() => { window.__noReload = 7; });
+  // 2) Live toggle, no reload.
+  await page.click("#theme-toggle");
+  await page.waitForFunction(() => document.querySelector("iframe") && true);
+  await frame().waitForFunction(() => document.documentElement.dataset.mode === "dark", null, { timeout: 4000 }).catch(() => {});
+  await page.waitForTimeout(600);
+  const dark = await checkMode("dark", "dark after live toggle");
+  if ((await frame().evaluate(() => window.__noReload)) !== 7) bad.push(["toggle reloads the app", "frame state lost"]);
+  // Open the drawer in dark, flip back to light with the drawer open (overlays follow too).
+  await frame().locator("#activity .ev").first().click();
+  await frame().waitForSelector("#drawer.open .thread");
+  await page.click("#theme-toggle");
+  await page.waitForTimeout(900);
+  const drawerBg = parseRgb(await frame().evaluate(() => getComputedStyle(document.querySelector("#drawer")).backgroundColor));
+  if (!drawerBg || drawerBg.r < 200) bad.push(["drawer follows light theme", JSON.stringify(drawerBg)]);
+  const lightDrawer = await frame().evaluate(contrastSweep);
+  const lowD = lightDrawer.filter((x) => x.ratio < (x.px >= 18 ? 3 : 4.5));
+  if (lowD.length) bad.push(["light drawer text contrast", lowD.slice(0, 5).map((x) => `${x.cls}:"${x.t}" ${x.ratio}`).join("; ")]);
+  // Light: composer in the agent view and the rooms UI (create form + thread) are readable too.
+  await frame().evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }))); // focus lives in the host page, so dispatch inside the frame
+  await frame().waitForFunction(() => !document.querySelector("#drawer.open"));
+  await page.waitForTimeout(500); // let the drawer fade out
+  await frame().locator("#rail .row.agent").first().click();
+  await frame().waitForSelector(".c-compose:visible");
+  await frame().locator(".c-compose textarea").fill("Draft to check contrast");
+  await page.waitForTimeout(400); // Send fades in once there is a draft
+  const lowC = (await frame().evaluate(contrastSweep)).filter((x) => x.ratio < (x.px >= 18 ? 3 : 4.5));
+  if (lowC.length) bad.push(["light composer/agent view contrast", lowC.slice(0, 5).map((x) => `${x.cls}:"${x.t}" ${x.ratio}`).join("; ")]);
+  // 3) Voice UI (host-side) follows the same variables.
+  await page.click("#theme-toggle");
+  await page.waitForTimeout(400);
+  const voice = await page.evaluate(() => { const b = document.querySelector(".agent-os-voice__btn"); const cs = getComputedStyle(b); return { color: cs.color, border: cs.borderTopColor }; });
+  const vc = parseRgb(voice.color);
+  if (!vc || !near([vc.r, vc.g, vc.b], [188, 188, 192], 3)) bad.push(["voice button uses host --text (dark)", voice.color]);
+  // 4) Standalone (no host): prefers-color-scheme drives it, live.
+  const solo = await browser.newPage({ viewport: { width: 1440, height: 860 }, colorScheme: "light" });
+  await solo.goto(base + "agent-os/?source=mock");
+  await solo.waitForSelector(".hist-btn");
+  await solo.waitForTimeout(2500);
+  await solo.click(".rooms-btn");
+  await solo.waitForSelector("#rooms:not([hidden])");
+  await solo.click("#rooms [data-act=new]");
+  await solo.fill(".rm-name-in", "Theme room");
+  for (const id of ["forge", "spark"]) await solo.locator(`input[data-pick=${id}]`).check();
+  await solo.click("[data-act=create]");
+  await solo.waitForSelector(".rm-bar h3");
+  await solo.locator(".rm-compose textarea").fill("hello @spark");
+  await solo.keyboard.press("Enter");
+  await solo.waitForFunction(() => document.querySelectorAll(".rm-msg, .rm-sys").length >= 2, null, { timeout: 15000 });
+  await solo.waitForTimeout(800);
+  const lowR = (await solo.evaluate(contrastSweep)).filter((x) => x.ratio < (x.px >= 18 ? 3 : 4.5));
+  if (lowR.length) bad.push(["light rooms contrast (rooms need the data server's POST, so standalone)", lowR.slice(0, 5).map((x) => `${x.cls}:"${x.t}" ${x.ratio}`).join("; ")]);
+  await solo.click("[data-act=archive]"); // leave the mock data server's active rooms as we found them
+  await solo.waitForTimeout(400);
+  const m1 = await solo.evaluate(() => document.documentElement.dataset.mode);
+  await solo.emulateMedia({ colorScheme: "dark" });
+  await solo.waitForTimeout(800);
+  const m2 = await solo.evaluate(() => document.documentElement.dataset.mode);
+  const sp = await canvasPx(solo.mainFrame());
+  if (m1 !== "light" || m2 !== "dark") bad.push(["standalone follows prefers-color-scheme live", `${m1} -> ${m2}`]);
+  if (!near(sp, HOST.dark.bg, 6)) bad.push(["standalone map follows scheme", sp.join(",")]);
+  await solo.close();
+  if (errors.length) bad.push(["pageerrors", errors.join("; ")]);
+  if (bad.length) failed++;
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · theme: host light/dark live toggle (no reload), tokens, map canvas, drawer, voice, standalone {minContrast light:${light.min} dark:${dark.min}, text nodes:${light.sweep}}${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  await page.close();
+}
+
 let failed = 0;
 for (const [tag, engine] of [["webkit", webkit], ["chromium", chromium]]) {
   const browser = await engine.launch();
   await liveOnlyChecks(browser, tag);
   await noReplayChecks(browser, tag);
+  await themeChecks(browser, tag);
   await messageAgentChecks(browser, tag);
   await a2aChecks(browser, tag);
   await roomsChecks(browser, tag);

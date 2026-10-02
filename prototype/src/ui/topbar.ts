@@ -20,7 +20,7 @@ export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds:
   el.innerHTML = `
     <button class="icon-btn menu-btn" title="Teams">${svg('menu', 18)}</button>
     <div class="brand">
-      <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9db7ff"/><stop offset="1" stop-color="#5c7cfa"/></linearGradient></defs><path d="M12 3.2 21 19.6H3Z" fill="none" stroke="url(#bg)" stroke-width="2.3" stroke-linejoin="round"/><path d="M12 10.5 15.6 17H8.4Z" fill="url(#bg)" opacity=".35"/></svg>
+      <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:color-mix(in srgb, var(--accent) 65%, var(--fg))"/><stop offset="1" style="stop-color:var(--accent)"/></linearGradient></defs><path d="M12 3.2 21 19.6H3Z" fill="none" stroke="url(#bg)" stroke-width="2.3" stroke-linejoin="round"/><path d="M12 10.5 15.6 17H8.4Z" fill="url(#bg)" opacity=".35"/></svg>
       <span>Agent OS</span>
     </div>
     <span class="src-pill ${store.source}"><i></i>${store.source === 'live' ? 'LIVE' : 'MOCK'}</span>

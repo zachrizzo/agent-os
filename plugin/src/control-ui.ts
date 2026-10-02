@@ -2,6 +2,7 @@ import { defineControlUiPlugin } from "openclaw/plugin-sdk/control-ui";
 import { createFeatureClient } from "openclaw/plugin-sdk/feature-contract";
 import { contract } from "./contract.js";
 import { createVoiceControl, isVoiceSession, stopVoiceAndReturn } from "./voice.js";
+import { bridgeTheme } from "./theme-bridge.js";
 import "./control-ui.css";
 
 // v0.1: frames the built Agent OS app served by this plugin at /agent-os/ (same origin, sandboxed). Card B replaces this with a native page.
@@ -54,6 +55,7 @@ export default defineControlUiPlugin({
           frame.setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
           frame.title = "Agent OS";
           frame.className = "agent-os-frame";
+          bridgeTheme(frame, context.signal); // light/dark + Control UI colours, live
           let loaded = false;
           frame.addEventListener("load", () => { loaded = true; });
           const timer = setTimeout(() => {

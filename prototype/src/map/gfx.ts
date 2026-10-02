@@ -1,15 +1,8 @@
 // Colour + sprite helpers for the canvas map. Everything is cached so the frame loop allocates little.
-import type { EventKind } from '../../shared/types';
+import { P, onTheme } from '../theme';
 
-export const KIND_COLOR: Record<EventKind, string> = {
-  handoff: '#b18cff', report: '#5aa9ff', approval: '#f5c542', finding: '#34d399',
-  message: '#dbe4f3', event: '#ff6fa8', steer: '#ff9a4d', check: '#2fd8f0',
-};
-export const AMBER = '#f5a524';
-export const ERROR = '#ff5c5c';
-export const IDLE = '#7d8799';
-export const COS_COLOR = '#ffe7a8';
-export const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+// Colours come from the theme palette (src/theme.ts: P), which follows the Control UI's light/dark mode.
+export { P as Pal } from '../theme';
 
 const rgbCache = new Map<string, [number, number, number]>();
 let probe: CanvasRenderingContext2D | null = null;
@@ -18,8 +11,8 @@ export function rgbOf(c: string): [number, number, number] {
   let v = rgbCache.get(c);
   if (v) return v;
   probe ??= document.createElement('canvas').getContext('2d')!;
-  probe.fillStyle = '#000';
-  probe.fillStyle = c;
+  probe.fillStyle = 'black';
+  probe.fillStyle = c; // an unparsable colour keeps the black reset above
   const s = String(probe.fillStyle);
   if (s.startsWith('#')) v = [parseInt(s.slice(1, 3), 16), parseInt(s.slice(3, 5), 16), parseInt(s.slice(5, 7), 16)];
   else { const m = s.match(/[\d.]+/g) ?? ['128', '128', '128']; v = [+m[0], +m[1], +m[2]]; }
@@ -48,6 +41,7 @@ export function mix(c: string, d: string, t: number): string {
 }
 
 const sprites = new Map<string, HTMLCanvasElement>();
+onTheme(() => sprites.clear()); // sprites bake in P.hot
 export const SPRITE = 64;
 /** Soft radial glow sprite, white-hot core fading to the colour then transparent. */
 export function glow(c: string, hot = 0.0): HTMLCanvasElement {
@@ -59,7 +53,7 @@ export function glow(c: string, hot = 0.0): HTMLCanvasElement {
   const g = cv.getContext('2d')!;
   const h = SPRITE / 2;
   const gr = g.createRadialGradient(h, h, 0, h, h, h);
-  const core = hot > 0 ? mix(c, '#ffffff', hot) : c;
+  const core = hot > 0 ? mix(c, P.hot, hot) : c;
   gr.addColorStop(0, rgba(core, 0.85));
   gr.addColorStop(0.12, rgba(c, 0.55));
   gr.addColorStop(0.35, rgba(c, 0.16));
@@ -83,7 +77,7 @@ export function starTile(dpr: number): HTMLCanvasElement {
   for (let i = 0; i < 150; i++) {
     const x = r() * css, y = r() * css, z = r();
     const big = z > 0.94;
-    g.fillStyle = r() < 0.25 ? `rgba(150,180,255,${0.12 + z * 0.35})` : `rgba(220,228,245,${0.08 + z * 0.32})`;
+    g.fillStyle = rgba(P.star, (r() < 0.25 ? 0.12 + z * 0.35 : 0.08 + z * 0.32) * P.starK);
     g.beginPath();
     g.arc(x, y, big ? 1.1 : 0.45 + z * 0.45, 0, Math.PI * 2);
     g.fill();

@@ -1,6 +1,7 @@
 // Deterministic fleet layout: CoS team at the origin, other teams on an orbit sized to fit them,
 // agents seeded from an id hash and relaxed by a tiny per-team force sim. Positions are kept in
 // team-local space so team moves/zooms ease smoothly and deltas never make dots jump.
+import { Pal } from './gfx';
 import { COS_ID, type Agent, type Team } from '../../shared/types';
 
 export interface P { x: number; y: number }
@@ -52,7 +53,7 @@ export class Layout {
   sync(teams: Team[], agents: Agent[], now: number, initial: boolean): boolean {
     let structural = false;
     const teamList = [...teams];
-    for (const a of agents) if (!teamList.some((t) => t.id === a.team)) teamList.push({ id: a.team, name: a.team, hue: '#8b95a8' });
+    for (const a of agents) if (!teamList.some((t) => t.id === a.team)) teamList.push({ id: a.team, name: a.team, hue: Pal.idle });
     teamList.forEach((t, i) => {
       let lt = this.teams.get(t.id);
       if (!lt) {

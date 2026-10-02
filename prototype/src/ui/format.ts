@@ -2,12 +2,11 @@ import type { EventKind } from '../../shared/types';
 import type { FleetEvent } from '../contract';
 import type { ShellState, Filter } from '../store';
 
+/** Event-kind colour tokens (defined per light/dark mode in style.css). */
 export const KIND_COLOR: Record<EventKind, string> = {
-  handoff: '#a78bfa', report: '#60a5fa', approval: '#f5b544', finding: '#34d399',
-  message: '#9aa4b2', event: '#f472b6', steer: '#fb923c', check: '#22d3ee',
+  handoff: 'var(--k-handoff)', report: 'var(--k-report)', approval: 'var(--k-approval)', finding: 'var(--k-finding)',
+  message: 'var(--k-message)', event: 'var(--k-event)', steer: 'var(--k-steer)', check: 'var(--k-check)',
 };
-
-export const STATUS_COLOR = { active: '#34d399', idle: '#5b6472', needs: '#f5b544', error: '#f87171' } as const;
 
 export function esc(s: string) {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -30,12 +29,6 @@ export function fmtHM(ts: number) {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-export function rgba(hex: string, a: number) {
-  const h = hex.replace('#', '');
-  const n = parseInt(h.length === 3 ? h.replace(/./g, (c) => c + c) : h.slice(0, 6), 16);
-  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
-}
-
 /** Short display name for an agent id, falling back to a trimmed session key. */
 export function nameOf(s: ShellState, id: string) {
   if (id === 'zach') return 'You';
@@ -47,7 +40,7 @@ export function nameOf(s: ShellState, id: string) {
 
 export function hueOf(s: ShellState, agentId: string) {
   const a = s.agentsAll.get(agentId === 'zach' ? '' : agentId);
-  return (a && s.teamsById.get(a.team)?.hue) || '#7a8494';
+  return (a && s.teamsById.get(a.team)?.hue) || 'var(--idle)';
 }
 
 const ERR_RE = /\b(error|fail(ed|ure)?|exception|regression|crash|timeout)\b/i;

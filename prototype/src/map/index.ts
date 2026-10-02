@@ -3,7 +3,8 @@
 import type { CreateMap, MapApi, Selection, State } from '../contract';
 import { COS_ID, type Agent, type FleetEvent } from '../../shared/types';
 import { Layout, hash, pointInPoly, type LTeam, type P } from './layout';
-import { AMBER, COS_COLOR, ERROR, FONT, IDLE, KIND_COLOR, clip, esc, glow, mix, rgba, starTile } from './gfx';
+import { Pal, clip, esc, glow, mix, rgba, starTile } from './gfx';
+import { onTheme } from '../theme';
 
 const MAX_PARTICLES = 60;
 const MAX_PINGS = 90;
@@ -36,15 +37,15 @@ export const createMap: CreateMap = (el, store) => {
   // ---------- DOM ----------
   const root = document.createElement('div');
   root.className = 'aos-map';
-  root.style.cssText = 'position:relative;width:100%;height:100%;overflow:hidden;background:#090c13;user-select:none;';
+  
   const canvas = document.createElement('canvas');
   canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;outline:none;';
   canvas.setAttribute('role', 'img');
   canvas.setAttribute('aria-label', 'Live fleet map');
   const mini = document.createElement('canvas');
-  mini.style.cssText = 'position:absolute;left:16px;bottom:16px;width:176px;height:112px;border-radius:10px;border:1px solid rgba(160,175,210,.16);background:rgba(8,11,18,.82);box-shadow:0 8px 24px rgba(0,0,0,.35);cursor:crosshair;touch-action:none;';
+  mini.className = 'aos-mini';
   const tip = document.createElement('div');
-  tip.style.cssText = `position:absolute;z-index:5;pointer-events:none;display:none;max-width:300px;padding:9px 11px;border-radius:9px;background:rgba(13,17,26,.96);border:1px solid rgba(160,175,210,.16);box-shadow:0 10px 30px rgba(0,0,0,.45);color:#e7ebf3;font:12px/1.4 ${FONT};`;
+  tip.className = 'aos-tip';
   root.append(canvas, mini, tip);
   el.appendChild(root);
   const ctx = canvas.getContext('2d', { alpha: false })!;
@@ -56,6 +57,7 @@ export const createMap: CreateMap = (el, store) => {
   let w = 1, h = 1, dpr = 1;
   let stars: CanvasPattern | null = null;
   let starDpr = 0;
+  let starMode = Pal.mode;
   const cam: Cam = { x: 0, y: 0, k: 0.8 };
   const target: Cam = { x: 0, y: 0, k: 0.8 };
   let autoFit = true;
@@ -182,7 +184,7 @@ export const createMap: CreateMap = (el, store) => {
       const to = e.to === 'zach' ? COS_ID : e.to;
       const fa = layout.nodes.get(e.from), fb = layout.nodes.get(to);
       if (!fa || !fb || hidden(fa.team) || hidden(fb.team)) return;
-      const color = KIND_COLOR[e.kind] ?? '#dbe4f3';
+      const color = Pal.kind[e.kind] ?? Pal.kind.message;
       if (red || particles.length >= MAX_PARTICLES || fresh.length - i > MAX_PARTICLES) {
         // Aggregate: flash the endpoints + brighten the carrying link instead of another particle.
         const k = pairKey(e.from, to);
@@ -378,12 +380,12 @@ export const createMap: CreateMap = (el, store) => {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
-    ctx.fillStyle = '#090c13';
+    ctx.fillStyle = Pal.bg;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     const bg = ctx.createRadialGradient(canvas.width / 2, canvas.height * 0.48, 0, canvas.width / 2, canvas.height * 0.48, Math.max(canvas.width, canvas.height) * 0.65);
-    bg.addColorStop(0, 'rgba(34,44,74,0.55)');
-    bg.addColorStop(0.55, 'rgba(18,24,40,0.35)');
-    bg.addColorStop(1, 'rgba(9,12,19,0)');
+    bg.addColorStop(0, Pal.glowA);
+    bg.addColorStop(0.55, Pal.glowB);
+    bg.addColorStop(1, rgba(Pal.bg, 0)); // same hue at alpha 0: a transparent-black end would grey the fade
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     if (stars) {
@@ -420,7 +422,7 @@ export const createMap: CreateMap = (el, store) => {
       const s = L.lead ? leadSeg(L.ta) : arcSeg(L.ta, L.tb);
       if (!s) continue;
       const A = layout.teams.get(L.ta)!, B = L.tb ? layout.teams.get(L.tb) : undefined;
-      const ca = A.team.hue, cb = L.lead ? COS_COLOR : B?.team.hue ?? '#8b95a8';
+      const ca = A.team.hue, cb = L.lead ? Pal.cos : B?.team.hue ?? Pal.idle;
       const sg = surge.get(L.key) ?? 0;
       const focusHit = !ft || L.ta === ft || L.tb === ft;
       const la = (agentMode ? (focusHit ? 0.55 : 0.12) : focusHit ? 1 : 0.4) * (L.lead ? 0.85 : 1);
@@ -432,8 +434,8 @@ export const createMap: CreateMap = (el, store) => {
       ctx.lineWidth = (wpx + 4) * px;
       ctx.beginPath(); ctx.moveTo(s.a.x, s.a.y); ctx.quadraticCurveTo(s.c.x, s.c.y, s.b.x, s.b.y); ctx.stroke();
       const g2 = ctx.createLinearGradient(s.a.x, s.a.y, s.b.x, s.b.y);
-      g2.addColorStop(0, rgba(mix(ca, '#ffffff', 0.25), 0.85 * la));
-      g2.addColorStop(1, rgba(mix(cb, '#ffffff', 0.25), 0.85 * la));
+      g2.addColorStop(0, rgba(mix(ca, Pal.hot, 0.25), 0.85 * la));
+      g2.addColorStop(1, rgba(mix(cb, Pal.hot, 0.25), 0.85 * la));
       ctx.strokeStyle = g2;
       ctx.lineWidth = Math.max(1.6, wpx * 0.8) * px;
       ctx.setLineDash([0.01, (L.lead ? 7 : 9) * px]);
@@ -468,7 +470,7 @@ export const createMap: CreateMap = (el, store) => {
       ctx.lineWidth = 9 * px; ctx.stroke();
       ctx.strokeStyle = rgba(hue, 0.16 * ta);
       ctx.lineWidth = 3.5 * px; ctx.stroke();
-      ctx.strokeStyle = rgba(mix(hue, '#ffffff', 0.15), (hot ? 0.95 : 0.7) * ta);
+      ctx.strokeStyle = rgba(mix(hue, Pal.hot, 0.15), (hot ? 0.95 : 0.7) * ta);
       ctx.lineWidth = (hot ? 1.8 : 1.25) * px; ctx.stroke();
     }
 
@@ -476,7 +478,7 @@ export const createMap: CreateMap = (el, store) => {
     if (agentMode && sa) {
       const sp = pos(sa);
       if (sp) {
-        ctx.strokeStyle = 'rgba(235,240,255,0.55)';
+        ctx.strokeStyle = Pal.linkHi;
         ctx.lineWidth = 1.4 * px;
         ctx.beginPath();
         for (const id of related) {
@@ -498,7 +500,7 @@ export const createMap: CreateMap = (el, store) => {
       if (!a) m.set(key, (a = []));
       a.push(x, y, r);
     };
-    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalCompositeOperation = Pal.blend;
     for (const t of teams) {
       const hue = t.team.hue;
       const ta = teamAlpha(t);
@@ -514,7 +516,7 @@ export const createMap: CreateMap = (el, store) => {
         const base = isCos ? 7.5 : isLead ? 4.6 : 3.4;
         const r = base * rs * (0.5 + 0.5 * fade) * px;
         const st2 = a.status;
-        const col = isCos ? COS_COLOR : st2 === 'needs' ? AMBER : st2 === 'error' ? ERROR : st2 === 'active' ? hue : mix(IDLE, hue, 0.18);
+        const col = isCos ? Pal.cos : st2 === 'needs' ? Pal.amber : st2 === 'error' ? Pal.red : st2 === 'active' ? hue : mix(Pal.idle, hue, 0.18);
         const bright = st2 !== 'idle' || isCos;
         if (bright) {
           const gs = (isCos ? 64 : isLead ? 34 : 26) * rs * px;
@@ -522,12 +524,12 @@ export const createMap: CreateMap = (el, store) => {
           ctx.drawImage(glow(col), x - gs / 2, y - gs / 2, gs, gs);
         } else al *= 0.75;
         const q = Math.round(al * 10) / 10;
-        addTo(cores, `${bright ? mix(col, '#ffffff', isCos ? 0.5 : 0.22) : col}|${q}`, x, y, r);
+        addTo(cores, `${bright ? mix(col, Pal.hot, isCos ? 0.5 : 0.22) : col}|${q}`, x, y, r);
         // rings
         if (st2 === 'needs') {
-          addTo(rings, `${AMBER}|${Math.round(q * 9) / 10}|1.6`, x, y, r + 3.2 * px);
-          if (!red) { const ph = (time * 0.7 + hash(a.id)) % 1; addTo(rings, `${AMBER}|${Math.round((1 - ph) * q * 6) / 10}|1.2`, x, y, r + (3 + ph * 9) * px); }
-        } else if (st2 === 'error') addTo(rings, `${ERROR}|${q}|1.4`, x, y, r + 3 * px);
+          addTo(rings, `${Pal.amber}|${Math.round(q * 9) / 10}|1.6`, x, y, r + 3.2 * px);
+          if (!red) { const ph = (time * 0.7 + hash(a.id)) % 1; addTo(rings, `${Pal.amber}|${Math.round((1 - ph) * q * 6) / 10}|1.2`, x, y, r + (3 + ph * 9) * px); }
+        } else if (st2 === 'error') addTo(rings, `${Pal.red}|${q}|1.4`, x, y, r + 3 * px);
         else if (st2 === 'active' || isCos) {
           if (red) addTo(rings, `${col}|${Math.round(q * 5) / 10}|1`, x, y, r + 3 * px);
           else { const ph = (time / 1.8 + hash(a.id)) % 1; addTo(rings, `${col}|${Math.round((1 - ph) * q * 6) / 10}|1.1`, x, y, r + (2 + ph * 8) * px); }
@@ -562,8 +564,8 @@ export const createMap: CreateMap = (el, store) => {
       ctx.strokeStyle = color; ctx.lineWidth = lw * px;
       ctx.beginPath(); ctx.arc(p.x, p.y, (base * rs + extra) * px, 0, Math.PI * 2); ctx.stroke();
     };
-    if (sa) ringAt(sa, 'rgba(255,255,255,0.95)', 6, 1.8);
-    if (hover && hover !== sa) ringAt(hover, 'rgba(255,255,255,0.6)', 5, 1.2);
+    if (sa) ringAt(sa, Pal.ring, 6, 1.8);
+    if (hover && hover !== sa) ringAt(hover, Pal.ringHover, 5, 1.2);
 
     // pings (arrivals / reduced-motion flashes)
     pings = pings.filter((p) => now - p.t0 < p.dur);
@@ -579,7 +581,7 @@ export const createMap: CreateMap = (el, store) => {
     }
 
     // particles
-    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalCompositeOperation = Pal.blend;
     const keep: Particle[] = [];
     for (const p of particles) {
       const u = (now - p.t0) / p.dur;
@@ -624,8 +626,8 @@ export const createMap: CreateMap = (el, store) => {
       const ta = agentMode && t.id !== ft ? 0.45 : 1;
       const top = toS(t.top);
       const y = top.y - 12;
-      const nameFont = `600 ${big ? 17 : 14.5}px ${FONT}`;
-      const subFont = `400 ${big ? 12.5 : 11.5}px ${FONT}`;
+      const nameFont = `600 ${big ? 17 : 14.5}px ${Pal.font}`;
+      const subFont = `400 ${big ? 12.5 : 11.5}px ${Pal.font}`;
       const name = t.team.name;
       const subA = `${c.n} agent${c.n === 1 ? '' : 's'}  ·  `, subB = `${c.active} active`, subC = c.needs ? `  ·  ${c.needs} needs you` : '';
       ctx.font = nameFont; const nw = ctx.measureText(name).width;
@@ -645,18 +647,18 @@ export const createMap: CreateMap = (el, store) => {
       ctx.beginPath(); ctx.arc(ix, iy, 3.2, 0, Math.PI * 2); ctx.fill();
       ctx.textAlign = 'left';
       ctx.font = nameFont;
-      shadowText(name, x0 + icon, y - lh, '#eef2f8');
+      shadowText(name, x0 + icon, y - lh, Pal.fg);
       ctx.font = subFont;
-      shadowText(subA, x0 + icon, y, 'rgba(160,170,190,0.9)');
-      shadowText(subB, x0 + icon + sw, y, mix(t.team.hue, '#ffffff', 0.15));
-      if (subC) shadowText(subC, x0 + icon + sw + sbw, y, AMBER);
+      shadowText(subA, x0 + icon, y, Pal.muted);
+      shadowText(subB, x0 + icon + sw, y, mix(t.team.hue, Pal.hot, 0.15));
+      if (subC) shadowText(subC, x0 + icon + sw + sbw, y, Pal.amber);
       ctx.globalAlpha = 1;
       labelRects.push({ tid: t.id, x0: x0 - 4, y0: iy - 10, x1: x0 + totalW + 4, y1: y + 5 });
     }
 
     // link rate labels (top 5)
     const labeled = links.filter((l) => l.rate >= 1 && !hidden(l.ta) && !(l.tb && hidden(l.tb))).sort((a, b) => b.rate - a.rate).slice(0, 5);
-    ctx.font = `500 11px ${FONT}`;
+    ctx.font = `500 11px ${Pal.font}`;
     ctx.textAlign = 'center';
     for (const L of labeled) {
       if (agentMode && L.ta !== ft && L.tb !== ft) continue;
@@ -666,10 +668,10 @@ export const createMap: CreateMap = (el, store) => {
       const txt = `${Math.round(L.rate)} msg/min`;
       const tw = ctx.measureText(txt).width;
       if (labelRects.some((r) => m.x + tw / 2 + 7 > r.x0 && m.x - tw / 2 - 7 < r.x1 && m.y + 2 > r.y0 && m.y - 16 < r.y1)) continue;
-      ctx.fillStyle = 'rgba(9,12,19,0.72)';
+      ctx.fillStyle = Pal.chipBg;
       roundRect(m.x - tw / 2 - 7, m.y - 16, tw + 14, 18, 9);
       ctx.fill();
-      ctx.fillStyle = 'rgba(176,205,255,0.92)';
+      ctx.fillStyle = Pal.chipText;
       ctx.fillText(txt, m.x, m.y - 3);
     }
 
@@ -691,11 +693,11 @@ export const createMap: CreateMap = (el, store) => {
         ctx.textAlign = 'center';
         const dimmed = agentMode && !related.has(a.id);
         ctx.globalAlpha = dimmed ? 0.3 : 1;
-        ctx.font = isCos ? `600 12.5px ${FONT}` : `500 11px ${FONT}`;
-        shadowText(isCos ? 'Chief of Staff' : a.name, p.x, p.y + dy, isCos ? '#ffefc6' : 'rgba(228,233,243,0.92)');
+        ctx.font = isCos ? `600 12.5px ${Pal.font}` : `500 11px ${Pal.font}`;
+        shadowText(isCos ? 'Chief of Staff' : a.name, p.x, p.y + dy, isCos ? mix(Pal.cos, Pal.fg, 0.35) : Pal.fg);
         if ((showNow || isHover) && a.now && !isCos) {
-          ctx.font = `400 10px ${FONT}`;
-          shadowText(clip(a.now, 30), p.x, p.y + dy + 12.5, a.status === 'needs' ? AMBER : 'rgba(150,162,184,0.88)');
+          ctx.font = `400 10px ${Pal.font}`;
+          shadowText(clip(a.now, 30), p.x, p.y + dy + 12.5, a.status === 'needs' ? Pal.amber : Pal.muted);
         }
         ctx.globalAlpha = 1;
       }
@@ -717,24 +719,24 @@ export const createMap: CreateMap = (el, store) => {
     const l1 = a.id === COS_ID ? 'Chief of Staff' : a.name;
     const l2 = `${team?.name ?? a.team} · ${a.status}`;
     const l3 = clip(a.now || '—', 44);
-    ctx.font = `600 13px ${FONT}`; const w1 = ctx.measureText(l1).width;
-    ctx.font = `400 11px ${FONT}`; const w2 = Math.max(ctx.measureText(l2).width, ctx.measureText(l3).width);
+    ctx.font = `600 13px ${Pal.font}`; const w1 = ctx.measureText(l1).width;
+    ctx.font = `400 11px ${Pal.font}`; const w2 = Math.max(ctx.measureText(l2).width, ctx.measureText(l3).width);
     const bw = Math.max(w1, w2) + 22, bh = 58;
     const bx = Math.min(x, w - bw - 8), by = Math.max(8, y - bh / 2);
-    ctx.fillStyle = 'rgba(13,17,26,0.94)';
+    ctx.fillStyle = rgba(Pal.tipBg, 0.96);
     roundRect(bx, by, bw, bh, 8); ctx.fill();
-    ctx.strokeStyle = team ? rgba(team.hue, 0.55) : 'rgba(255,255,255,0.2)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.strokeStyle = team ? rgba(team.hue, 0.55) : Pal.tipBorder; ctx.lineWidth = 1; ctx.stroke();
     ctx.textAlign = 'left';
-    ctx.font = `600 13px ${FONT}`; ctx.fillStyle = '#f2f5fa'; ctx.fillText(l1, bx + 11, by + 19);
-    ctx.font = `400 11px ${FONT}`;
-    ctx.fillStyle = a.status === 'needs' ? AMBER : a.status === 'error' ? ERROR : 'rgba(160,170,190,0.95)'; ctx.fillText(l2, bx + 11, by + 35);
-    ctx.fillStyle = 'rgba(205,213,228,0.95)'; ctx.fillText(l3, bx + 11, by + 50);
+    ctx.font = `600 13px ${Pal.font}`; ctx.fillStyle = Pal.fg; ctx.fillText(l1, bx + 11, by + 19);
+    ctx.font = `400 11px ${Pal.font}`;
+    ctx.fillStyle = a.status === 'needs' ? Pal.amber : a.status === 'error' ? Pal.red : Pal.muted; ctx.fillText(l2, bx + 11, by + 35);
+    ctx.fillStyle = Pal.fg2; ctx.fillText(l3, bx + 11, by + 50);
   }
 
   function shadowText(s: string, x: number, y: number, color: string) {
     ctx.lineWidth = 3;
     ctx.lineJoin = 'round';
-    ctx.strokeStyle = 'rgba(9,12,19,0.85)';
+    ctx.strokeStyle = Pal.halo;
     ctx.strokeText(s, x, y);
     ctx.fillStyle = color;
     ctx.fillText(s, x, y);
@@ -787,7 +789,7 @@ export const createMap: CreateMap = (el, store) => {
         if (n.dying) continue;
         const [x, y] = M(t.cx + n.lx * t.s, t.cy + n.ly * t.s);
         const on = n.agent.status !== 'idle';
-        mctx.fillStyle = n.agent.status === 'needs' ? AMBER : on ? t.team.hue : 'rgba(140,150,170,0.55)';
+        mctx.fillStyle = n.agent.status === 'needs' ? Pal.amber : on ? t.team.hue : Pal.miniIdle;
         mctx.fillRect(x - (on ? 1 : 0.6), y - (on ? 1 : 0.6), on ? 2 : 1.2, on ? 2 : 1.2);
       }
     }
@@ -795,7 +797,7 @@ export const createMap: CreateMap = (el, store) => {
     const [vx0, vy0] = M(cam.x - w / 2 / cam.k, cam.y - h / 2 / cam.k);
     const [vx1, vy1] = M(cam.x + w / 2 / cam.k, cam.y + h / 2 / cam.k);
     mctx.setLineDash([3, 2]);
-    mctx.strokeStyle = 'rgba(235,240,255,0.75)';
+    mctx.strokeStyle = Pal.miniView;
     mctx.lineWidth = 1;
     mctx.strokeRect(Math.max(1, vx0), Math.max(1, vy0), Math.min(mw - 2, vx1) - Math.max(1, vx0), Math.min(mh - 2, vy1) - Math.max(1, vy0));
     mctx.setLineDash([]);
@@ -831,13 +833,13 @@ export const createMap: CreateMap = (el, store) => {
     const a = id ? st.agentsById.get(id) ?? layout.nodes.get(id)?.agent : undefined;
     if (!a) { tip.style.display = 'none'; return; }
     const team = layout.teams.get(a.team)?.team;
-    const sc = a.status === 'needs' ? AMBER : a.status === 'error' ? ERROR : a.status === 'active' ? team?.hue ?? '#34d399' : '#8b95a8';
+    const sc = a.status === 'needs' ? 'var(--amber)' : a.status === 'error' ? 'var(--red)' : a.status === 'active' ? team?.hue ?? 'var(--green)' : 'var(--idle)';
     tip.innerHTML =
       `<div style="display:flex;align-items:center;gap:7px;margin-bottom:3px"><span style="width:8px;height:8px;border-radius:50%;background:${sc};box-shadow:0 0 8px ${sc}"></span>` +
       `<b style="font-weight:600;font-size:12.5px">${esc(a.id === COS_ID ? 'Chief of Staff' : a.name)}</b>` +
-      `<span style="margin-left:auto;padding:1px 7px;border-radius:9px;font-size:10.5px;color:${sc};border:1px solid ${rgba(sc, 0.45)};text-transform:uppercase;letter-spacing:.04em">${esc(a.status === 'needs' ? 'needs you' : a.status)}</span></div>` +
-      `<div style="color:#98a3b8;font-size:11px;margin-bottom:5px"><span style="color:${team?.hue ?? '#98a3b8'}">●</span> ${esc(team?.name ?? a.team)} · ${esc(a.role)}${a.model ? ` · ${esc(a.model)}` : ''}</div>` +
-      `<div style="color:#dfe5ef">${esc(a.now || '—')}</div>`;
+      `<span class="tip-st" style="--c:${sc}">${esc(a.status === 'needs' ? 'needs you' : a.status)}</span></div>` +
+      `<div class="tip-sub"><span style="color:${team?.hue ?? 'var(--muted)'}">●</span> ${esc(team?.name ?? a.team)} · ${esc(a.role)}${a.model ? ` · ${esc(a.model)}` : ''}</div>` +
+      `<div class="tip-now">${esc(a.now || '—')}</div>`;
     tip.style.display = 'block';
     const tw = tip.offsetWidth, th = tip.offsetHeight;
     tip.style.left = `${Math.min(w - tw - 8, sx + 14)}px`;
@@ -936,11 +938,12 @@ export const createMap: CreateMap = (el, store) => {
     dpr = Math.min(3, window.devicePixelRatio || 1);
     canvas.width = Math.round(w * dpr);
     canvas.height = Math.round(h * dpr);
-    if (starDpr !== dpr) { stars = ctx.createPattern(starTile(dpr), 'repeat'); starDpr = dpr; }
+    if (starDpr !== dpr || starMode !== Pal.mode) { stars = ctx.createPattern(starTile(dpr), 'repeat'); starDpr = dpr; starMode = Pal.mode; }
   }
   const ro = new ResizeObserver(() => resize());
   ro.observe(root);
   resize();
+  const offTheme = onTheme(() => resize()); // light/dark switch: rebuild the star tile in the new palette (the frame loop picks up the rest)
 
   // ---------- wire up ----------
   ingest(st, []);
@@ -960,6 +963,7 @@ export const createMap: CreateMap = (el, store) => {
       alive = false;
       cancelAnimationFrame(raf);
       unsub();
+      offTheme();
       ro.disconnect();
       root.remove();
     },

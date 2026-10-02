@@ -1,5 +1,5 @@
-// First shoots the Agent OS map live-only (default) and with History on, then the "Message agent" composer (agent view, team view, session drawer after a send), then drives the mock-host harness in WebKit: Agent OS tab -> click "Talk to Voice" -> Voice pane live ->
-// header "Stop voice · Agent OS" -> back on the tab. Screenshots go to the directory in argv[2].
+// Runs twice (dark, then light): shoots the Agent OS map live-only (default) and with History on, then the "Message agent" composer (agent view, team view, session drawer after a send), then drives the mock-host harness in WebKit: Agent OS tab -> click "Talk to Voice" -> Voice pane live ->
+// header "Stop voice · Agent OS" -> back on the tab; finally a live theme toggle in the host (no reload). Screenshots go to argv[2], named <engine>-<scheme>-<step>.png. Usage: node harness/shoot.mjs <outdir> [baseUrl] [chromium].
 import { createRequire } from "node:module";
 import path from "node:path";
 const require = createRequire("/Users/zachrizzo/.openclaw/tools/node-v24.21.0/lib/node_modules/openclaw/");
@@ -11,11 +11,14 @@ const base = await ensureServer(process.argv[3] ?? "http://127.0.0.1:5299/");
 const engine = process.argv[4] === "chromium" ? chromium : webkit;
 const tag = process.argv[4] === "chromium" ? "chromium" : "webkit";
 const browser = await engine.launch();
-const page = await browser.newPage({ viewport: { width: 1280, height: 760 } });
+// One full click-through per colour scheme. The standalone Agent OS page follows prefers-color-scheme (emulated); the host-embedded
+// part uses the mock Control UI host's own theme switch (?theme=), which is what the plugin's theme bridge listens to.
+async function run(scheme) {
+const page = await browser.newPage({ viewport: { width: 1280, height: 760 }, colorScheme: scheme });
 const logs = [];
 page.on("console", (m) => logs.push(m.text()));
 page.on("pageerror", (e) => logs.push("PAGEERROR " + e.message));
-const shot = (name) => page.screenshot({ path: path.join(out, `${tag}-${name}.png`) });
+const shot = (name) => page.screenshot({ path: path.join(out, `${tag}-${scheme}-${name}.png`) });
 
 // Live-only fleet: default view hides finished/aborted sessions; the History button carries the hidden count.
 await page.setViewportSize({ width: 1440, height: 860 });
@@ -100,7 +103,7 @@ await shot("1d-room-multi-agent-thread-caps");
 await page.click(".rooms-btn");
 await page.setViewportSize({ width: 1280, height: 760 });
 
-await page.goto(base);
+await page.goto(base + `?theme=${scheme}`);
 await page.waitForSelector(".agent-os-voice__btn");
 await page.waitForTimeout(1500); // let the dashboard frame load
 await shot("1-agent-os-tab");
@@ -119,11 +122,39 @@ await shot("3-back-on-tab");
 console.log("talk stopped, back on tab:", await page.locator(".chat-send-btn--voice-live").count() === 0);
 
 // Failure path: composer without a mic button.
-await page.goto(base + "?nomic=1");
+await page.goto(base + `?nomic=1&theme=${scheme}`);
 await page.waitForSelector(".agent-os-voice__btn");
 await page.click(".agent-os-voice__btn");
 await page.waitForTimeout(500);
 await shot("4-no-mic-landed-in-voice");
-console.log("logs:", JSON.stringify(logs));
+console.log(scheme, "shots done; logs:", JSON.stringify(logs));
+await page.close();
+}
+await run("dark");
+await run("light");
+
+// Live theme toggle inside the host: map -> drawer -> back, flipping the host's theme with no reload (screenshots before/after).
+{
+  const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
+  await page.goto(base + "?theme=dark");
+  await page.waitForSelector(".agent-os-voice__btn");
+  await page.waitForTimeout(4000);
+  const shot = (name) => page.screenshot({ path: path.join(out, `${tag}-toggle-${name}.png`) });
+  const frame = page.frames().find((f) => f.url().includes("/agent-os/"));
+  await frame.evaluate(() => { window.__noReload = 1; });
+  await shot("1-dark");
+  await page.click("#theme-toggle");
+  await page.waitForTimeout(1200);
+  await shot("2-light-same-page");
+  await frame.locator("#activity .ev").first().click();
+  await frame.waitForSelector("#drawer.open .thread");
+  await page.waitForTimeout(600);
+  await shot("3-light-drawer");
+  await page.click("#theme-toggle");
+  await page.waitForTimeout(1200);
+  await shot("4-dark-drawer-after-toggle-back");
+  console.log("no reload across toggles:", await frame.evaluate(() => window.__noReload === 1));
+  await page.close();
+}
 await browser.close();
 process.exit(0); // the harness server started by ensureServer would otherwise keep node alive
