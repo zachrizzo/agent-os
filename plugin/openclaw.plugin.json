@@ -11,13 +11,13 @@
   "activation": {
     "onStartup": true
   },
+  "controlUi": {
+    "entry": "dist/control-ui/460c1c10d93d9910b50b586dc2d6de5179c28f4fc1c617c6e049e3272ff2fe5f/index.js",
+    "styles": [
+      "dist/control-ui/460c1c10d93d9910b50b586dc2d6de5179c28f4fc1c617c6e049e3272ff2fe5f/index.css"
+    ]
+  },
   "contracts": {
     "tools": []
-  },
-  "controlUi": {
-    "entry": "dist/control-ui/3df9837ec46c9fca1796e92c501a23d10d72a3613b969025c181badba75922d5/index.js",
-    "styles": [
-      "dist/control-ui/3df9837ec46c9fca1796e92c501a23d10d72a3613b969025c181badba75922d5/index.css"
-    ]
   }
 }
