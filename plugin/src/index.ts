@@ -45,7 +45,10 @@ export default defineFeaturePlugin({
             r.pipe(res);
           });
           up.on("error", () => { if (!res.headersSent) res.writeHead(502, { ...cors, "content-type": "application/json" }); res.end('{"error":"agent-os data server unavailable"}'); });
-          req.on("close", () => up.destroy());
+          // Cap streams so Gateway plugin reloads can drain; EventSource reconnects on its own.
+          const cap = setTimeout(() => { up.destroy(); res.end(); }, 20_000);
+          req.on("close", () => { clearTimeout(cap); up.destroy(); });
+          res.on("close", () => clearTimeout(cap));
           up.end();
           return true;
         }
