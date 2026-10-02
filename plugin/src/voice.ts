@@ -2,25 +2,50 @@ import type { ControlUiHost } from "openclaw/plugin-sdk/control-ui";
 
 // Talk only starts from the pinned Voice session and is owned by its mounted chat pane: the Control UI
 // ends Talk when that pane unmounts, and the plugin host exposes no Talk API. So "voice from the tab"
-// is: open the Voice session, press its composer mic once. Selectors are the Control UI 2026.9.7
-// composer buttons ("Start voice input" / "Stop voice input"); if they change, the fallback message
-// tells the user to press the mic themselves.
+// is: open the Voice session, press its composer mic once.
+//
+// Composer semantics (Control UI 2026.9.7, read from the bundle): the Talk button is a tap/hold control.
+// A plain click (no pointerdown) is the tap path, which starts Talk, but only when (a) the composer draft
+// is empty (otherwise a tap SENDS the draft), and (b) the UI's own talk.catalog check has finished ready
+// (otherwise a tap just opens the mic picker). Hold, which we never synthesize, starts dictation. A second
+// "voice" button (class chat-mobile-dictation-action, label "Dictation") is dictation-only, so it is excluded.
 export const VOICE_SESSION_KEY = "agent:voice:main";
 const START = "button.chat-send-btn--voice";
 const LIVE = "button.chat-send-btn--voice-live";
+const DICTATION_ONLY = ".chat-mobile-dictation-action";
 
 export type VoiceResult = { ok: boolean; detail: string };
 
-function deepQuery(selector: string, root: ParentNode = document): HTMLButtonElement | null {
-  const hit = root.querySelector<HTMLButtonElement>(selector);
-  if (hit) return hit;
-  for (const el of root.querySelectorAll("*")) {
-    if (el.shadowRoot) {
-      const found = deepQuery(selector, el.shadowRoot);
-      if (found) return found;
+function deepQueryAll<T extends Element>(selector: string, root: ParentNode = document, out: T[] = []): T[] {
+  out.push(...root.querySelectorAll<T>(selector));
+  for (const el of root.querySelectorAll("*")) if (el.shadowRoot) deepQueryAll(selector, el.shadowRoot, out);
+  return out;
+}
+
+const deepQuery = <T extends Element = HTMLButtonElement>(selector: string): T | null => deepQueryAll<T>(selector)[0] ?? null;
+
+// The Talk "Start voice input" button: not the live/stop button, not the dictation-only twin, not the camera toggle.
+function findStart(): HTMLButtonElement | null {
+  return deepQueryAll<HTMLButtonElement>(START).find((b) =>
+    !b.classList.contains("chat-send-btn--voice-live") && !b.hasAttribute("aria-pressed") && !b.closest(DICTATION_ONLY)) ?? null;
+}
+
+// Readiness rows in the mic picker ("realtime" / "dictation"); `data-status` is checking | unknown | ready | unavailable.
+const capabilities = () => deepQueryAll<HTMLElement>("[data-chat-talk-capability]").filter((el) => el.getClientRects().length > 0);
+const isPending = (el: HTMLElement) => el.dataset.status === "checking" || el.dataset.status === "unknown";
+
+// Text typed into the composer that owns `button`. A tap with a draft sends it instead of starting Talk.
+function composerDraft(button: HTMLElement): string {
+  let node: Node | null = button;
+  while (node) {
+    const parent: Node | null = node.parentNode ?? (node instanceof ShadowRoot ? node.host : null);
+    if (parent instanceof Element || parent instanceof ShadowRoot) {
+      const box = parent.querySelector("textarea");
+      if (box) return box.value.trim();
     }
+    node = parent;
   }
-  return null;
+  return "";
 }
 
 function waitFor<T>(probe: () => T | null | false | undefined, ms: number, signal: AbortSignal): Promise<T | null> {
@@ -52,10 +77,26 @@ export async function startVoice(host: ControlUiHost): Promise<VoiceResult> {
   if (!(await waitFor(() => onVoice(host), 5000, signal))) return { ok: false, detail: "Couldn't open the Voice session." };
   await new Promise((r) => setTimeout(r, 150)); // let a previous chat pane unmount
   if (deepQuery(LIVE)) return { ok: true, detail: "Voice is already live." };
-  const start = await waitFor(() => { const b = deepQuery(START); return b && !b.disabled ? b : null; }, 8000, signal);
+  const start = await waitFor(() => { const b = findStart(); return b && !b.disabled ? b : null; }, 8000, signal);
   if (!start) return { ok: false, detail: "The Voice mic isn't available yet. Press it in the Voice session." };
-  start.click();
-  const live = await waitFor(() => deepQuery(LIVE), 12000, signal);
+  if (composerDraft(start)) return { ok: false, detail: "The Voice composer has a draft, so a tap would send it. Clear it, then press the mic." };
+  // The composer asked talk.catalog when it mounted, so by the time this answers the UI's own readiness is settled.
+  // A tap before then, or while realtime is unavailable, only opens the mic picker.
+  const catalog = await host.request<{ realtime?: { ready?: boolean } }>("talk.catalog", {}).catch(() => null);
+  if (catalog && catalog.realtime?.ready !== true) return { ok: false, detail: "Realtime voice isn't ready on the Gateway. Check the Talk provider in Settings." };
+  await new Promise((r) => setTimeout(r, 250));
+  if (signal.aborted) return { ok: false, detail: "Cancelled." };
+  (findStart() ?? start).click();
+  let live = await waitFor(() => deepQuery(LIVE), 1500, signal);
+  // The talk.catalog answers can arrive out of order; if the tap only opened the picker while it still read
+  // "checking", wait for it to settle and tap once more (the first tap started nothing, so this can't double-toggle).
+  if (!live && capabilities().some(isPending)) {
+    await waitFor(() => !capabilities().some(isPending), 5000, signal);
+    const unavailable = capabilities().find((c) => c.dataset.status === "unavailable");
+    if (unavailable) return { ok: false, detail: unavailable.textContent?.trim().replace(/\s+/g, " ") || "Realtime voice isn't available." };
+    (findStart() ?? start).click();
+  }
+  live ??= await waitFor(() => deepQuery(LIVE), 12000, signal);
   return live
     ? { ok: true, detail: "Voice is live." }
     : { ok: false, detail: "Talk didn't start. Allow the microphone, then press the mic in the Voice session." };
@@ -94,6 +135,15 @@ function micIcon(): SVGSVGElement {
   return svg;
 }
 
+function toast(message: string) {
+  const el = document.createElement("div");
+  el.className = "agent-os-toast";
+  el.setAttribute("role", "status");
+  el.textContent = message;
+  document.body.append(el);
+  setTimeout(() => el.remove(), 9000);
+}
+
 export function createVoiceControl(host: ControlUiHost, signal: AbortSignal): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "agent-os-voice";
@@ -114,8 +164,12 @@ export function createVoiceControl(host: ControlUiHost, signal: AbortSignal): HT
     status.removeAttribute("data-error");
     try {
       const result = await startVoice(host);
-      // Opening Voice navigates away and disposes this page, so only early failures (no Gateway, session didn't open) show here.
-      if (signal.aborted) return;
+      // Opening Voice disposes this page; the tab status is only visible for early failures (no Gateway, session didn't open).
+      // After that the user is looking at the Voice session, so a failure needs a toast that outlives the page.
+      if (signal.aborted) {
+        if (!result.ok) toast(result.detail);
+        return;
+      }
       status.textContent = result.detail;
       if (!result.ok) status.dataset.error = "true";
     } finally {

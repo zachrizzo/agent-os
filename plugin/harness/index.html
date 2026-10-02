@@ -19,15 +19,27 @@
   .chat header .title { font-weight:600; margin-right:auto; }
   .chat header button { padding:4px 10px; border:1px solid var(--border); border-radius:6px; background:none; color:var(--text); font:inherit; cursor:pointer; }
   .chat .transcript { flex:1; padding:12px; color:var(--muted); }
-  .chat footer { border-top:1px solid var(--border); padding:10px 12px; display:flex; gap:8px; align-items:center; }
-  .chat footer .input { flex:1; padding:8px 10px; border:1px solid var(--border); border-radius:8px; color:var(--muted); }
-  .chat-send-btn { width:34px; height:34px; border-radius:50%; border:1px solid var(--border); background:#1b212b; color:var(--text); cursor:pointer; }
+  .chat footer { border-top:1px solid var(--border); padding:10px 12px; }
+  .agent-chat__input--chat { display:flex; gap:8px; align-items:center; }
+  .agent-chat__input--chat textarea { flex:1; min-width:0; resize:none; padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:transparent; color:var(--text); font:inherit; }
+  .agent-chat__composer-actions { display:flex; gap:6px; align-items:center; position:relative; }
+  .chat-talk-control { display:inline-flex; align-items:center; gap:6px; }
+  .chat-send-btn { min-width:34px; height:34px; border-radius:17px; border:1px solid var(--border); background:#1b212b; color:var(--text); cursor:pointer; font:inherit; }
   .chat-send-btn--voice-live { background:var(--accent); border-color:var(--accent); color:#fff; }
   .live-note { color:#7ee2a8; font-size:12px; }
+  .picker { position:absolute; bottom:40px; right:0; width:240px; padding:8px; border:1px solid var(--border); border-radius:8px; background:#161b23; font-size:12px; }
+  /* From the Control UI 2026.9.7 stylesheet: base hides the mobile variants; narrow width swaps them in and hides the Talk button. */
+  .chat-mobile-dictation-action,.chat-mobile-talk-action,.chat-mobile-primary-action{display:none}
+  .chat-desktop-primary-action{display:contents}
+  @media (width<=560px){
+    .agent-chat__input--chat .agent-chat__composer-actions>.chat-talk-control:not(.chat-talk-control--active){display:none}
+    .agent-chat__input--chat :is(.chat-mobile-dictation-action,.chat-mobile-primary-action){display:inline-flex}
+    .agent-chat__input--chat .chat-desktop-primary-action:not(.chat-mobile-primary-action){display:none}
+  }
 </style>
 </head>
 <body>
-<div id="banner">MOCK Control UI host (dev harness). The Agent OS tab code below is the real built plugin; the Voice chat pane only reproduces the Control UI 2026.9.7 composer mic buttons. No audio, no Gateway Talk.</div>
+<div id="banner">MOCK Control UI host (dev harness). The Agent OS tab code below is the real built plugin; the Voice chat pane reproduces the Control UI 2026.9.7 composer (tap/hold mic, dictation-only twin, talk.catalog gating, draft-sends-on-tap). No audio, no Gateway Talk.</div>
 <nav id="nav"></nav>
 <main id="view"></main>
 <script type="module">
@@ -48,6 +60,7 @@ const actions = [];
 let selectedKey = "agent:main:main";
 let current = null; // { dispose }
 let talkLive = false;
+const stats = window.__stats = { talkStarts: 0, dictationStarts: 0, sends: 0, pickerOpens: 0, activeAtTalk: null };
 const log = (...a) => console.log("[harness]", ...a);
 
 function unmount() {
@@ -97,22 +110,61 @@ function showChat(sessionKey) {
   transcript.className = "transcript";
   transcript.textContent = sessionKey === "agent:voice:main" ? "Voice session — Talk starts from the mic below." : "Main chat.";
   const footer = document.createElement("footer");
-  const input = document.createElement("div");
-  input.className = "input";
-  input.textContent = "Message…";
-  const slot = document.createElement("span");
-  footer.append(input, slot);
+  const composer = document.createElement("div");
+  composer.className = "agent-chat__input agent-chat__input--chat";
+  const textarea = document.createElement("textarea");
+  textarea.rows = 1;
+  textarea.placeholder = "Message…";
+  textarea.value = params.get("draft") ?? "";
+  const composerActions = document.createElement("div");
+  composerActions.className = "agent-chat__composer-actions";
+  composer.append(textarea, composerActions);
+  footer.append(composer);
+  // Mirrors the real composer: talk.catalog is requested at mount; until it answers ready a tap only opens the mic picker.
+  let status = "checking";
+  window.__catalogDoneAt = performance.now() + Number(params.get("catalogMs") ?? 700);
+  setTimeout(() => { status = params.get("status") === "unavailable" ? "unavailable" : "ready"; drawMic(); }, Number(params.get("catalogMs") ?? 700));
+  let pickerOpen = false;
   const drawMic = () => {
-    slot.replaceChildren();
+    composerActions.replaceChildren();
     if (params.has("nomic")) return;
     if (talkLive) {
-      slot.className = "chat-talk-control chat-talk-control--active";
-      slot.innerHTML = '<button class="chat-send-btn chat-send-btn--voice-live" aria-label="Stop voice input">■</button> <span class="live-note">Listening…</span>';
-      slot.querySelector("button").onclick = () => { talkLive = false; log("Talk stopped"); drawMic(); };
-    } else {
-      slot.className = "chat-talk-control";
-      slot.innerHTML = '<button class="chat-send-btn chat-send-btn--voice" type="button" aria-label="Start voice input">🎙</button>';
-      slot.querySelector("button").onclick = () => { setTimeout(() => { talkLive = true; log("Talk started"); drawMic(); }, 500); };
+      const live = document.createElement("span");
+      live.className = "chat-talk-control chat-talk-control--active";
+      live.innerHTML = '<button class="chat-send-btn chat-send-btn--voice-live" aria-label="Stop voice input">■</button> <span class="live-note">Listening…</span>';
+      live.querySelector("button").onclick = () => { talkLive = false; log("Talk stopped"); drawMic(); };
+      composerActions.append(live);
+      return;
+    }
+    const tap = () => {
+      if (textarea.value.trim()) { stats.sends++; textarea.value = ""; log("SEND (tap with draft)"); return; }
+      if (status !== "ready") { pickerOpen = true; stats.pickerOpens++; log("picker opened (status " + status + ")"); drawMic(); return; }
+      stats.talkStarts++;
+      stats.activeAtTalk = navigator.userActivation?.isActive ?? null;
+      setTimeout(() => { talkLive = true; log("Talk started"); drawMic(); }, 500);
+    };
+    // Real handler: pointerdown arms a hold timer (-> dictation); a plain click with no preceding pointerdown is the tap path.
+    let holdTimer = null, held = false, suppressClick = false;
+    const talk = document.createElement("span");
+    talk.className = "chat-talk-control";
+    talk.innerHTML = '<button class="chat-send-btn chat-send-btn--voice chat-send-btn--hold-enabled" type="button" aria-label="Start voice input">🎙 Talk</button>';
+    const tb = talk.querySelector("button");
+    tb.addEventListener("pointerdown", () => { held = false; suppressClick = true; holdTimer = setTimeout(() => { held = true; stats.dictationStarts++; log("DICTATION started (hold)"); }, 400); });
+    tb.addEventListener("pointerup", () => { clearTimeout(holdTimer); if (!held) { suppressClick = false; tap(); suppressClick = true; } setTimeout(() => { suppressClick = false; }, 0); });
+    tb.addEventListener("click", (e) => { if (suppressClick) { e.preventDefault(); return; } tap(); });
+    const dict = document.createElement("span");
+    dict.className = "chat-mobile-dictation-action";
+    dict.innerHTML = '<span class="chat-talk-control"><button class="chat-send-btn chat-send-btn--voice" type="button" aria-label="Dictation">Dictate</button></span>';
+    dict.querySelector("button").onclick = () => { stats.dictationStarts++; log("DICTATION started (direct)"); };
+    const primary = document.createElement("span");
+    primary.className = "chat-mobile-primary-action chat-desktop-primary-action";
+    primary.innerHTML = '<button class="chat-send-btn chat-send-btn--send" type="button" aria-label="Send" disabled>↑</button>';
+    composerActions.append(talk, dict, primary);
+    if (pickerOpen) {
+      const p = document.createElement("div");
+      p.className = "picker";
+      p.innerHTML = '<div data-chat-talk-capability="realtime" data-status="' + status + '">Realtime voice: ' + status + '</div>';
+      composerActions.append(p);
     }
   };
   // Composer mounts a beat after the pane, like the real one.
@@ -127,7 +179,16 @@ const host = {
   apiVersion: 1, pluginId: "agent-os", signal: hostAbort.signal, basePath: "", locale: "en", redact: (t) => t,
   connection: { connected: true, canRead: true, canWrite: true, canGrant: false, canAdmin: true, assistantAgentId: "main" },
   components: {},
-  request: async (method) => (method === "plugins.sessionAction" ? { ok: true, result: { up: true, url: "/agent-os/" } } : {}),
+  request: async (method) => {
+    if (method === "plugins.sessionAction") return { ok: true, result: { up: true, url: "/agent-os/" } };
+    if (method === "talk.catalog") {
+      // Same Gateway connection as the composer's own mount-time request, so ours answers after it (unless ?fastCatalog).
+      const wait = params.has("fastCatalog") ? 0 : Math.max(0, (window.__catalogDoneAt ?? 0) - performance.now()) + 20;
+      await new Promise((r) => setTimeout(r, wait));
+      return { realtime: { ready: params.get("status") !== "unavailable" }, transcription: { ready: false } };
+    }
+    return {};
+  },
   onEvent: () => () => {},
   subscribe: () => () => {},
   sessions: {
