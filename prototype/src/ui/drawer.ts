@@ -85,13 +85,22 @@ export function mountDrawer(el: HTMLElement, store: ShellStore) {
         <div class="m-head"><span class="m-who">${esc(name)}</span><span class="m-role">${esc(role)}</span><time>${fmtTime(ts)}</time></div>
         <div class="m-text">${esc(text)}</div></div>`;
     };
+    // Agent-to-agent traffic (sessions_send): one compact "from → to: text" row; the routing wrapper sits behind a details toggle.
+    const a2aRow = (it: HistoryItem) => {
+      const from = it.a2a!.from;
+      const tool = it.a2a!.tool && it.a2a!.tool !== 'sessions_send' ? `<span class="kchip a2a-tool">${esc(it.a2a!.tool.replace(/_/g, ' '))}</span>` : '';
+      return `<div class="a2a" style="--hue:${hueOf(s, from)}">
+        <div class="a2a-line"><button class="who-btn a2a-from" data-agent="${esc(from)}">${esc(nameOf(s, from))}</button><span class="arr">→</span><span class="a2a-to">${esc(nameOf(s, key))}</span>${tool}<time>${fmtTime(it.ts)}</time></div>
+        <div class="a2a-text">${esc(it.text)}</div>
+        <details class="a2a-routing"><summary>routing</summary><pre>${esc(it.a2a!.routing)}</pre></details></div>`;
+    };
     try {
       const url = new URL(`api/history?source=${store.source}&key=${encodeURIComponent(key)}`, document.baseURI);
       const r = await fetch(url);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const { items } = (await r.json()) as { items: HistoryItem[] };
       if (my !== req) return;
-      const rows = items.map((it) => bubble(it.role, it.text, it.ts, it.sender));
+      const rows = items.map((it) => it.a2a ? a2aRow(it) : bubble(it.role, it.text, it.ts, it.sender));
       if (justSent && !items.slice(-6).some((it) => it.role === 'user' && it.text.includes(justSent.slice(0, 80)))) rows.push(bubble('user', justSent, Date.now()));
       thread.innerHTML = rows.length ? rows.join('') : '<div class="empty-mini">No transcript available for this session.</div>';
       thread.closest('.d-body')?.scrollTo({ top: 1e9, behavior: justSent ? 'smooth' : 'auto' });

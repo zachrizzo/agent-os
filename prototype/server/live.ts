@@ -6,13 +6,20 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { COS_ID, TEAM_PALETTE, type Agent, type AgentStatus, type Delta, type EventKind, type FleetEvent, type HistoryItem, type Meters, type Snapshot, type Team } from '../shared/types.ts';
+import { parseInterSession, shortSession } from '../shared/a2a.ts';
 import { classifySession, isRunning } from '../shared/liveness.ts';
+import { isExcludedAgent } from '../shared/rooms.ts';
 import { ringPush } from './mock.ts';
 import { redact } from './redact.ts';
+import { createRoomsService, isRoomKey, roomSessionKey, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
 
 const READ_METHODS = new Set(['sessions.list', 'agents.list', 'chat.history', 'usage.cost']);
 const SEND_METHOD = 'sessions.send';
+const CREATE_METHOD = 'sessions.create'; // only for dedicated room sessions (agent:<id>:room-<roomId>), see call()
+const ROOM_TURN_TIMEOUT_MS = Number(process.env.AGENT_OS_ROOM_TURN_TIMEOUT_MS ?? 120_000) || 120_000;
+const ROOM_POLL_MS = 1200;
+const agentOfKey = (key: unknown) => String(key ?? '').match(/^agent:([^:]+):/)?.[1] ?? '';
 const MAX_MESSAGE_CHARS = 4000;
 const POLL_MS = 2500;
 const MAX_POLL_MS = 30_000;
@@ -29,7 +36,9 @@ let chain: Promise<unknown> = Promise.resolve();
 let slowSince = 0; // set when any call exceeds SLOW_CALL_MS; read+cleared by the poll loop
 
 function call(method: string, params: Record<string, unknown> = {}, timeoutMs = 10_000): Promise<any> {
-  if (!READ_METHODS.has(method) && method !== SEND_METHOD) return Promise.reject(new Error(`method not allowed: ${method}`));
+  if (!READ_METHODS.has(method) && method !== SEND_METHOD && method !== CREATE_METHOD) return Promise.reject(new Error(`method not allowed: ${method}`));
+  if (method === CREATE_METHOD && !isRoomKey(String(params.key))) return Promise.reject(new Error('sessions.create is only allowed for room sessions'));
+  if (method === SEND_METHOD && isExcludedAgent(agentOfKey(params.key))) return Promise.reject(new Error('unknown session')); // the PHI agent is never messaged
   const run = () => new Promise((resolve, reject) => {
     const t0 = Date.now();
     execFile(OPENCLAW, ['gateway', 'call', method, '--json', '--params', JSON.stringify(params), '--timeout', String(timeoutMs)],
@@ -89,6 +98,12 @@ function shortKey(key: string): string {
   if (key === COS_ID) return 'Chief of Staff';
   const { agentId, kind } = parseKey(key);
   return kind === 'main' ? agentId : `${agentId} ${kind}`;
+}
+
+/** Activity text for a sessions_send: the sender's actual words, not the routing wrapper. */
+function interGist(preview: string, toName: string): string {
+  const p = parseInterSession(preview);
+  return p?.body ? clip(p.body, 140) : `Message to ${toName}`;
 }
 
 function needsAsk(s: any, running: boolean): string | undefined {
@@ -274,7 +289,7 @@ export function createLiveSource(): Source {
         if (kind === 'subagent' && created >= cutoff) events.push(ev(created, to, a.id, 'handoff', `Spawned ${name}${label && label !== name ? `: ${label}` : ''}`));
         const inter = preview.match(INTER_RE);
         const at = Number(s.lastActivityAt ?? updatedAt);
-        if (inter && visibleKeys.has(inter[1])) events.push(ev(at, inter[1], a.id, 'message', `Message to ${name}`));
+        if (inter && visibleKeys.has(inter[1])) events.push(ev(at, inter[1], a.id, 'message', interGist(preview, name)));
         else if (preview && !isCos && !preview.startsWith('[') && !isSentEcho(s.key, preview)) events.push(ev(at, a.id, to, /FORGE-REPORT/.test(preview) || s.status === 'done' ? 'report' : 'message', g));
         if (ask) events.push(ev(at, a.id, 'zach', 'approval', ask, true));
       } else if (!prev) {
@@ -286,7 +301,7 @@ export function createLiveSource(): Source {
         if (preview && preview !== prevPreview) {
           const inter = preview.match(INTER_RE);
           if (inter) {
-            events.push(ev(t, inter[1], a.id, 'message', `Message to ${name}`));
+            events.push(ev(t, inter[1], a.id, 'message', interGist(preview, name)));
           } else if (!isCos && !preview.startsWith('[') && !isSentEcho(s.key, preview)) {
             const kindE: EventKind = /FORGE-REPORT/.test(preview) || s.status === 'done' ? 'report' : 'message';
             const asksCos = to === COS_ID && ASK_RE.test(preview);
@@ -338,7 +353,52 @@ export function createLiveSource(): Source {
     }
   })();
 
+  // ---------- group rooms ----------
+  const createdRoomSessions = new Set<string>();
+  const roomGateway: RoomGateway = {
+    async listAgents(): Promise<RoomAgent[]> {
+      const r = await call('agents.list');
+      return (r.agents ?? []).filter((a: any) => a?.id).map((a: any) => ({ id: String(a.id), name: String(a.identity?.name ?? a.name ?? a.id), ...(a.identity?.emoji ? { emoji: String(a.identity.emoji) } : {}) }));
+    },
+    async ensureSession(agentId, roomId, label) {
+      const key = roomSessionKey(agentId, roomId);
+      if (createdRoomSessions.has(key)) return;
+      try { await call(CREATE_METHOD, { key, label: label.slice(0, 80) }, 20_000); } catch (e) {
+        // Already exists (restart / second run) is fine; anything else surfaces on the first send.
+        try { await call('chat.history', { sessionKey: key, limit: 1 }, 10_000); } catch { throw e; }
+      }
+      createdRoomSessions.add(key);
+    },
+    async turn(agentId, roomId, prompt, signal) {
+      const key = roomSessionKey(agentId, roomId);
+      const seqOf = (m: any) => Number(m?.__openclaw?.seq ?? 0);
+      const peek = async () => { const h = await call('chat.history', { sessionKey: key, limit: 60 }, 15_000); return { msgs: (h.messages ?? []) as any[], active: Boolean(h.sessionInfo?.hasActiveRun) }; };
+      const base = Math.max(0, ...(await peek()).msgs.map(seqOf));
+      await call(SEND_METHOD, { key, message: prompt, idempotencyKey: randomUUID() }, 20_000);
+      const deadline = Date.now() + ROOM_TURN_TIMEOUT_MS;
+      let sawUser = false;
+      let quiet = 0;
+      while (Date.now() < deadline) {
+        if (signal.aborted) throw new Error('cancelled');
+        await new Promise((r) => setTimeout(r, ROOM_POLL_MS));
+        const { msgs, active } = await peek();
+        const fresh = msgs.filter((m) => seqOf(m) > base);
+        sawUser ||= fresh.some((m) => m.role === 'user');
+        const text = (m: any) => (typeof m.content === 'string' ? m.content : Array.isArray(m.content) ? m.content.filter((c: any) => c?.type === 'text').map((c: any) => c.text).join('\n') : '');
+        const replies = fresh.filter((m) => m.role === 'assistant' && text(m).trim());
+        if (sawUser && !active) {
+          if (replies.length) return redact(text(replies[replies.length - 1]).trim());
+          if (++quiet >= 3) throw new Error('the run ended without a reply (model unavailable?)');
+        } else quiet = 0;
+      }
+      throw new Error('timed out waiting for a reply');
+    },
+  };
+  const roomsFile = process.env.AGENT_OS_ROOMS_FILE ?? `${process.env.HOME ?? ''}/.openclaw/agent-os/rooms.json`;
+  const rooms = createRoomsService({ gateway: roomGateway, file: roomsFile });
+
   return {
+    rooms,
     snapshot(): Snapshot {
       return { source: 'live', ts: Date.now(), teams: [...teams.values()], agents: [...agents.values()], events: ring.slice(-200), meters: meters(), windowHours: WINDOW_HOURS, ...(lastError ? { error: lastError } : {}) };
     },
@@ -347,12 +407,17 @@ export function createLiveSource(): Source {
       if (!agents.has(key)) return [];
       const res = await call('chat.history', { sessionKey: key, limit: 40 }, 15_000);
       const msgs: any[] = (res.messages ?? []).slice(-40);
-      return msgs.map((m) => {
-        const body = typeof m.content === 'string' ? m.content : Array.isArray(m.content)
+      return msgs.map((m): HistoryItem => {
+        const raw = typeof m.content === 'string' ? m.content : Array.isArray(m.content)
           ? m.content.map((c: any) => (c?.type === 'text' ? c.text : c?.type === 'toolCall' || c?.type === 'tool_use' ? `⚙ ${c.name ?? 'tool'}` : '')).filter(Boolean).join(' ')
           : '';
+        const role = String(m.role ?? '?');
+        const ts = Number(m.timestamp ?? 0);
+        // Agent-to-agent traffic: show "sender → this session: body" and keep the wrapper out of the way. Display only; the transcript is untouched.
+        const inter = role === 'user' ? parseInterSession(raw) : null;
+        if (inter) return { role, ts, sender: clip(shortSession(inter.from), 60), text: clip(inter.body, 600), a2a: { from: inter.from, ...(inter.tool ? { tool: inter.tool } : {}), routing: clip(inter.routing, 400) } };
         const sender = m.senderLabel ?? (m.senderSession?.sessionKey ? shortKey(m.senderSession.sessionKey) : undefined);
-        return { role: String(m.role ?? '?'), ts: Number(m.timestamp ?? 0), ...(sender ? { sender: clip(sender, 60) } : {}), text: clip(body, 600) };
+        return { role, ts, ...(sender ? { sender: clip(sender, 60) } : {}), text: clip(raw, 600) };
       }).filter((m) => m.text);
     },
     async send(key, text) {
@@ -366,7 +431,7 @@ export function createLiveSource(): Source {
       ringPush(ring, [e]);
       broadcast({ ts: e.ts, upserts: [], removed: [], events: [e], meters: meters() });
     },
-    close() { stopped = true; },
+    close() { stopped = true; rooms.close(); },
     ready,
   } as Source & { ready: Promise<void> };
 }

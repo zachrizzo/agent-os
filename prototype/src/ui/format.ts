@@ -90,6 +90,19 @@ export function openNeeds(s: ShellState, events: FleetEvent[]) {
   return out;
 }
 
+/** Stable accent for an agent id (rooms: avatar + name colour). */
+const AVATAR_HUES = ['#f5a524', '#3ad1f0', '#a35cff', '#34d399', '#ff5c8a', '#3b9cff', '#22d3c5', '#e879f9', '#facc15', '#fb7185'];
+export function avatarHue(id: string) {
+  let h = 0;
+  for (const c of id) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return AVATAR_HUES[h % AVATAR_HUES.length];
+}
+/** Round avatar: the agent's emoji if it has one, else its initial. */
+export function avatarHtml(id: string, name: string, emoji?: string, cls = '') {
+  const label = emoji || (name.trim()[0] ?? '?').toUpperCase();
+  return `<span class="avatar ${cls}" style="--hue:${avatarHue(id)}" title="${esc(name)}">${esc(label)}</span>`;
+}
+
 export function svg(name: keyof typeof ICONS, size = 16) {
   return `<svg class="ic" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 }
@@ -111,5 +124,6 @@ export const ICONS = {
   dots: '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
   back: '<path d="m15 18-6-6 6-6"/>',
   send: '<path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7Z"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/>',
   wifiOff: '<path d="M2 8.8a15 15 0 0 1 4.2-2.7M10.7 5.1A15 15 0 0 1 22 8.8M5 12.9a10 10 0 0 1 5.2-2.8M19 12.9a10 10 0 0 0-2-1.5M8.5 16.4a5 5 0 0 1 7 0M12 20h.01M2 2l20 20"/>',
 } as const;

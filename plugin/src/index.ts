@@ -6,7 +6,7 @@ import { defineFeaturePlugin } from "openclaw/plugin-sdk/feature-plugin";
 import { contract } from "./contract.js";
 
 // Serves the built Agent OS app at /agent-os/ on the Gateway origin and proxies its /agent-os/api/* calls to
-// the local data server (:5198): GETs for reads, plus the single write POST /api/send ("Message agent").
+// the local data server (:5198): GETs for reads, plus the guarded writes POST /api/send ("Message agent") and POST /api/rooms[/:id[/send|/stop]] (group rooms).
 // The Control UI tab frames it sandboxed (opaque origin), so responses carry permissive CORS.
 const ROUTE = "/agent-os";
 const API = { host: "127.0.0.1", port: 5198 };
@@ -16,6 +16,7 @@ const TYPES: Record<string, string> = {
   ".woff2": "font/woff2", ".woff": "font/woff", ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json",
 };
 const SEND_PATH = "/api/send";
+const ROOMS_WRITE = /^\/api\/rooms(\/r[0-9a-f]{8}(\/(send|stop))?)?$/; // the only other write route; the data server applies the same header/body guard
 const SEND_BODY_MAX = 16_384;
 const cors = { "Access-Control-Allow-Origin": "*", "Cross-Origin-Resource-Policy": "cross-origin", "X-Content-Type-Options": "nosniff" };
 
@@ -35,7 +36,7 @@ function sendOriginOk(req: IncomingMessage): boolean {
   try { return new URL(origin).host === req.headers.host; } catch { return false; }
 }
 
-function sendMessage(req: IncomingMessage, res: ServerResponse, url: URL): boolean {
+function proxyWrite(req: IncomingMessage, res: ServerResponse, url: URL, rel: string): boolean {
   const head = { ...cors, "cache-control": "no-store", "content-type": "application/json" };
   if (!sendOriginOk(req)) { res.writeHead(403, head); res.end('{"error":"forbidden origin"}'); return true; }
   if (req.method === "OPTIONS") {
@@ -50,7 +51,7 @@ function sendMessage(req: IncomingMessage, res: ServerResponse, url: URL): boole
   req.on("end", () => {
     if (over) { res.writeHead(413, head); res.end('{"error":"body too large"}'); return; }
     const body = Buffer.concat(chunks);
-    const up = request({ ...API, path: SEND_PATH + url.search, method: "POST", headers: { "content-type": "application/json", "x-agent-os-send": "1", "content-length": body.length } }, (r) => {
+    const up = request({ ...API, path: rel + url.search, method: "POST", headers: { "content-type": "application/json", "x-agent-os-send": "1", "content-length": body.length } }, (r) => {
       res.writeHead(r.statusCode ?? 502, { ...head, "content-type": r.headers["content-type"] ?? "application/json" });
       r.pipe(res);
     });
@@ -72,7 +73,7 @@ export default defineFeaturePlugin({
       handler: async (req, res) => {
         const url = new URL(req.url ?? "/", "http://gateway");
         let rel = url.pathname.slice(ROUTE.length) || "/";
-        if (rel === SEND_PATH && (req.method === "POST" || req.method === "OPTIONS")) return sendMessage(req, res, url);
+        if ((rel === SEND_PATH || ROOMS_WRITE.test(rel)) && (req.method === "POST" || req.method === "OPTIONS")) return proxyWrite(req, res, url, rel);
         if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405, cors); res.end(); return true; }
         if (rel.startsWith("/api/")) {
           const up = request({ ...API, path: rel + url.search, method: "GET", headers: { accept: req.headers.accept ?? "*/*" } }, (r) => {

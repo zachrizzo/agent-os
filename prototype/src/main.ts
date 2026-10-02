@@ -13,6 +13,7 @@ import { mountCenter, mountPlaceholder } from './ui/center';
 import { mountDrawer } from './ui/drawer';
 import { mountRail } from './ui/rail';
 import { mountReplay } from './ui/replay';
+import { mountRooms } from './ui/rooms';
 import { mountTopbar } from './ui/topbar';
 
 // The map renderer lives in src/map/index.ts (owned separately). A glob import keeps the shell
@@ -34,10 +35,14 @@ async function boot() {
   });
   const activity = mountActivity($('activity'), store, (e) => drawer.open(e));
   const renderRail = mountRail($('rail'), store, (sel) => { center.focus(sel); app.classList.remove('rail-open'); });
+  let roomCount = 0;
+  const rooms = mountRooms($('rooms'), store, (n) => { roomCount = n; renderTop.setRooms(n, rooms.isOpen()); });
   const renderTop = mountTopbar($('topbar'), store, {
     onNeeds: () => activity.showNeeds(),
     onMenu: () => app.classList.toggle('rail-open'),
+    onRooms: () => { rooms.toggle(); renderTop.setRooms(roomCount, rooms.isOpen()); },
   });
+  window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && rooms.isOpen() && !drawer.isOpen()) { rooms.hide(); renderTop.setRooms(roomCount, false); } });
   const renderReplay = mountReplay($('replay'), store);
 
   store.subscribe(() => {
@@ -70,6 +75,7 @@ async function boot() {
   new ResizeObserver(() => map.resize()).observe(center.host);
 
   store.connect();
+  void rooms.prime();
   // Paint loading/skeleton state immediately.
   store.setQuery('');
   renderTop(store.get()); renderRail(store.get()); center.update(store.get()); activity.update(store.get()); renderReplay(store.get());

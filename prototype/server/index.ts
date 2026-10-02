@@ -4,11 +4,16 @@
 //   GET /api/stream?source=live|mock      (SSE: "snapshot" once, then "delta")
 //   GET /api/history?source=..&key=<sessionKey>
 //   POST /api/send?source=..   {key, message}  ("Message agent": one Gateway sessions.send; needs header x-agent-os-send: 1)
+//   GET  /api/rooms            rooms + the live agent list (PHI excluded)      GET /api/rooms/:id   one room with its thread and run state
+//   POST /api/rooms {name, members, maxRounds?, maxTurns?}   create             POST /api/rooms/:id {name?, addMembers?, removeMembers?, archived?, maxRounds?, maxTurns?}
+//   POST /api/rooms/:id/send {message}   one bounded run (mention gating, maxRounds, maxTurns)      POST /api/rooms/:id/stop
+//   Room writes use the same guard as /api/send (JSON + x-agent-os-send: 1, same body cap).
 // Every payload passes through redactDeep() before it is written.
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createLiveSource } from './live.ts';
 import { createMockSource } from './mock.ts';
 import { redactDeep } from './redact.ts';
+import { RoomError, ROOM_ID_RE } from './rooms.ts';
 import type { Source } from './source.ts';
 
 const HOST = '127.0.0.1';
@@ -32,15 +37,25 @@ const sse = (res: ServerResponse, event: string, data: unknown) => res.write(`ev
 
 // Anything a web page can fire without a preflight is refused: JSON content type + a custom header, and no CORS
 // headers here, so another origin cannot pass the preflight. Body is capped.
-async function send(req: IncomingMessage, res: ServerResponse, src: string | null) {
-  if (req.headers['x-agent-os-send'] !== '1' || !String(req.headers['content-type'] ?? '').startsWith('application/json')) return json(res, 403, { error: 'forbidden' });
+/** Shared write guard: custom header + JSON content type, capped body. Replies and returns null when refused. */
+async function guardedJson(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | null> {
+  if (req.headers['x-agent-os-send'] !== '1' || !String(req.headers['content-type'] ?? '').startsWith('application/json')) { json(res, 403, { error: 'forbidden' }); return null; }
   let raw = '';
   for await (const chunk of req) {
     raw += chunk;
-    if (raw.length > 16_384) return json(res, 413, { error: 'body too large' });
+    if (raw.length > 16_384) { json(res, 413, { error: 'body too large' }); return null; }
   }
-  let body: { key?: unknown; message?: unknown };
-  try { body = JSON.parse(raw); } catch { return json(res, 400, { error: 'bad JSON' }); }
+  try {
+    const body = JSON.parse(raw || '{}');
+    if (body && typeof body === 'object' && !Array.isArray(body)) return body as Record<string, unknown>;
+  } catch { /* fall through */ }
+  json(res, 400, { error: 'bad JSON' });
+  return null;
+}
+
+async function send(req: IncomingMessage, res: ServerResponse, src: string | null) {
+  const body = await guardedJson(req, res);
+  if (!body) return;
   if (typeof body.key !== 'string' || typeof body.message !== 'string') return json(res, 400, { error: 'key and message are required strings' });
   try {
     const s = source(src);
@@ -52,11 +67,39 @@ async function send(req: IncomingMessage, res: ServerResponse, src: string | nul
   }
 }
 
+// /api/rooms[/:id[/send|/stop]]: reads are GET, writes share the /api/send guard.
+const ROOMS_PATH = /^\/api\/rooms(?:\/([^/]+)(?:\/(send|stop))?)?$/;
+async function roomsApi(req: IncomingMessage, res: ServerResponse, url: URL, src: string | null) {
+  const m = ROOMS_PATH.exec(url.pathname)!;
+  const [, id, action] = m;
+  if (id && !ROOM_ID_RE.test(id)) return json(res, 404, { error: 'unknown room' });
+  try {
+    const s = source(src);
+    await s.ready;
+    const rooms = s.rooms;
+    if (req.method === 'GET') {
+      if (action) return json(res, 405, { error: 'method not allowed' });
+      return json(res, 200, id ? await rooms.get(id) : await rooms.list());
+    }
+    if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+    const body = await guardedJson(req, res);
+    if (!body) return;
+    if (!id) return json(res, 200, await rooms.create(body as never));
+    if (action === 'send') return json(res, 200, await rooms.send(id, body.message));
+    if (action === 'stop') return json(res, 200, await rooms.stop(id));
+    return json(res, 200, await rooms.update(id, body as never));
+  } catch (e) {
+    if (e instanceof RoomError) return json(res, e.status, { error: e.message });
+    json(res, 502, { error: (e as Error).message });
+  }
+}
+
 const server = createServer(async (req, res) => {
   if (!ALLOWED_HOSTS.test(req.headers.host ?? '')) return json(res, 403, { error: 'forbidden host' });
   const url = new URL(req.url ?? '/', `http://${HOST}`);
   const src = url.searchParams.get('source');
   if (req.method === 'POST' && url.pathname === '/api/send') return send(req, res, src);
+  if (ROOMS_PATH.test(url.pathname)) return roomsApi(req, res, url, src);
   if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
   try {
     if (url.pathname === '/api/config') return json(res, 200, { defaultSource: DEFAULT_SOURCE, sources: ['live', 'mock'] });

@@ -113,6 +113,133 @@ async function messageAgentChecks(browser, tag) {
   await page.close();
 }
 
+// Compact agent-to-agent rows: a sessions_send shows as "from -> to: text"; the routing wrapper is collapsed, never the headline.
+async function a2aChecks(browser, tag) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const bad = [];
+  await page.goto(base + "agent-os/?source=mock");
+  await page.waitForSelector(".hist-btn");
+  await page.waitForFunction(() => document.querySelector(".meter[data-k=agents] b")?.textContent !== "–", null, { timeout: 15000 });
+  await page.locator("#rail .row.agent").first().click();
+  await page.waitForSelector(".c-compose:visible");
+  await page.click(".cmp-thread");
+  await page.waitForSelector("#drawer.open .thread .a2a");
+  const row = page.locator("#drawer .thread .a2a").first();
+  const line = (await row.locator(".a2a-line").innerText()).replace(/\s+/g, " ");
+  if (!/\S+ → \S+/.test(line)) bad.push(["row reads from -> to", line]);
+  if (!(await row.locator(".a2a-text").innerText()).startsWith("Brief:")) bad.push(["row shows the sender's text", await row.locator(".a2a-text").innerText()]);
+  const visible = await page.locator("#drawer .thread").innerText();
+  if (/routed by OpenClaw|Inter-session message|isUser=false/.test(visible)) bad.push(["wrapper hidden by default", visible.slice(0, 120)]);
+  if (await page.locator("#drawer .a2a-routing[open]").count()) bad.push(["routing collapsed by default", "open"]);
+  await row.locator(".a2a-routing summary").click();
+  if (!(await row.locator(".a2a-routing pre").innerText()).includes("sourceTool=sessions_send")) bad.push(["routing detail available on expand", "missing"]);
+  if (await page.locator("#drawer .thread .msg.r-user .m-text", { hasText: "Inter-session" }).count()) bad.push(["no full-bubble wrapper", "found"]);
+  if (errors.length) bad.push(["pageerrors", errors.join("; ")]);
+  if (bad.length) failed++;
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · compact agent-to-agent row in the drawer thread {${line}}${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  await page.close();
+}
+
+// Group rooms: create (live agent list, phi absent), one thread with per-agent avatar+name and "You", mention gating,
+// member add/remove, rename, archive, round/turn caps, persistence across reload, write guards.
+async function roomsChecks(browser, tag) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const bad = [];
+  const expect = (name, ok, detail = "") => { if (!ok) bad.push([name, detail]); };
+  const name = `Launch review ${tag} ${Date.now() % 100000}`;
+  await page.goto(base + "agent-os/?source=mock");
+  await page.waitForSelector(".rooms-btn");
+  await page.click(".rooms-btn");
+  await page.waitForSelector("#rooms:not([hidden])");
+  await page.click("#rooms [data-act=new]");
+  await page.waitForSelector(".rm-picker .rm-pick");
+  const picks = await page.locator(".rm-pick span:last-child").allInnerTexts();
+  expect("agent picker lists the live agents", picks.length === 6, picks.join("|"));
+  expect("phi is never listed", !picks.some((t) => /phi/i.test(t)), picks.join("|"));
+  await page.fill(".rm-name-in", name);
+  expect("create disabled without members", await page.locator("[data-act=create]").isDisabled());
+  for (const id of ["forge", "spark", "research"]) await page.locator(`input[data-pick=${id}]`).check();
+  await page.click("[data-act=create]");
+  await page.waitForSelector(".rm-bar h3");
+  expect("room opens after create", (await page.locator(".rm-bar h3").innerText()).includes(name));
+  expect("three members shown", (await page.locator(".rm-members .rm-chip").count()) === 3);
+
+  // no mention -> everyone answers, in one thread, with name + avatar; Zach is "You"
+  const send = async (text) => { await page.locator(".rm-compose textarea").fill(text); await page.keyboard.press("Enter"); };
+  await send("Status check please");
+  await page.waitForFunction(() => document.querySelectorAll(".rm-msg").length >= 4, null, { timeout: 12000 }).catch(async () => bad.push(["everyone answers with no @mention", String(await page.locator(".rm-msg").count())]));
+  const names = await page.locator(".rm-msg .rm-meta b").allInnerTexts();
+  expect("thread order You, Forge, Spark, Research", names.join(",") === "You,Forge,Spark,Research", names.join(","));
+  expect("each message has an avatar", (await page.locator(".rm-msg .avatar").count()) === 4);
+  await page.waitForFunction(() => !document.querySelector(".rm-typing"), null, { timeout: 8000 });
+
+  // mention gating
+  await send("@spark only you, please");
+  await page.waitForFunction(() => document.querySelectorAll(".rm-msg").length >= 6, null, { timeout: 12000 });
+  await page.waitForFunction(() => !document.querySelector(".rm-typing"), null, { timeout: 8000 });
+  const after = await page.locator(".rm-msg .rm-meta b").allInnerTexts();
+  expect("@spark: only Spark answers", after.slice(4).join(",") === "You,Spark" && after.length === 6, after.join(","));
+
+  // members: add Ops, remove Research
+  await page.click("[data-act=add-toggle]");
+  await page.locator("input[data-addpick=ops]").check();
+  await page.waitForFunction(() => document.querySelectorAll(".rm-members .rm-chip").length === 4);
+  await page.click("[data-act=add-close]");
+  await page.locator(".rm-chip", { hasText: "Research" }).locator("button").click();
+  await page.waitForFunction(() => document.querySelectorAll(".rm-members .rm-chip").length === 3);
+  const chips = (await page.locator(".rm-members .rm-chip").allInnerTexts()).join("|");
+  expect("members now Forge, Spark, Ops", /Forge/.test(chips) && /Spark/.test(chips) && /Ops/.test(chips) && !/Research/.test(chips), chips);
+
+  // caps
+  await page.selectOption("[data-set=maxRounds]", "3");
+  await page.locator("[data-set=maxTurns]").fill("4");
+  await page.locator("[data-set=maxTurns]").dispatchEvent("change");
+  await page.waitForTimeout(500);
+  await send("pingpong forever");
+  await page.waitForFunction(() => document.querySelector(".rm-sys"), null, { timeout: 15000 });
+  const sys = await page.locator(".rm-sys").allInnerTexts();
+  expect("turn cap stops the loop", sys.some((t) => /turn cap reached \(4 turns/.test(t)), sys.join("|"));
+  const agentTurns = await page.locator(".rm-msg:not(.me)").count();
+  expect("loop produced a bounded number of replies", agentTurns <= 3 + 1 + 4 + 1, String(agentTurns));
+  await page.waitForFunction(() => !document.querySelector(".rm-typing"), null, { timeout: 8000 });
+
+  // rename + archive + persistence
+  await page.click("[data-act=rename]");
+  await page.fill(".rm-rename", name + " v2");
+  await page.click("[data-act=rename-ok]");
+  await page.waitForFunction((n) => document.querySelector(".rm-bar h3")?.textContent.includes(n), name + " v2");
+  await page.reload();
+  await page.waitForSelector(".rooms-btn");
+  await page.click(".rooms-btn");
+  await page.waitForSelector(`.rm-row`);
+  expect("rooms persist across a reload", (await page.locator(".rm-row", { hasText: name + " v2" }).count()) === 1);
+  await page.locator(".rm-row", { hasText: name + " v2" }).click();
+  await page.waitForSelector(".rm-msg");
+  expect("thread persists across a reload", (await page.locator(".rm-msg").count()) >= 8);
+  await page.click("[data-act=archive]");
+  await page.waitForFunction((n) => ![...document.querySelectorAll(".rm-rows:not(.archived) .rm-row")].some((r) => r.textContent.includes(n)), name + " v2");
+  await page.click("[data-act=toggle-archived]");
+  expect("archived room moves behind the toggle", (await page.locator(".rm-rows.archived .rm-row", { hasText: name + " v2" }).count()) === 1);
+  await page.locator(".rm-rows.archived .rm-row").first().click();
+  await page.waitForSelector(".rm-compose textarea[disabled]");
+
+  // API guards
+  const g = await page.evaluate(async () => {
+    const u = (p) => new URL("api/" + p + "?source=mock", document.baseURI);
+    const post = (p, body, hdr = true) => fetch(u(p), { method: "POST", headers: { "content-type": "application/json", ...(hdr ? { "x-agent-os-send": "1" } : {}) }, body: JSON.stringify(body) }).then((r) => r.status);
+    return [await post("rooms", { name: "x", members: ["forge"] }, false), await post("rooms", { name: "x", members: ["phi"] }), await post("rooms/r00000000/send", { message: "hi" }), await post("rooms", { name: "x", members: ["nope"] })];
+  });
+  expect("guards: no header 403, phi 400, unknown room 404, unknown agent 400", JSON.stringify(g) === "[403,400,404,400]", JSON.stringify(g));
+  if (errors.length) bad.push(["pageerrors", errors.join("; ")]);
+  if (bad.length) failed++;
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · group rooms (create, gating, members, caps, rename/archive, persistence, guards)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  await page.close();
+}
+
 // Rail footer "N agents erroring" counts live sessions only, with History on too.
 async function erroringCountChecks(browser, tag) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
@@ -136,6 +263,8 @@ for (const [tag, engine] of [["webkit", webkit], ["chromium", chromium]]) {
   const browser = await engine.launch();
   await liveOnlyChecks(browser, tag);
   await messageAgentChecks(browser, tag);
+  await a2aChecks(browser, tag);
+  await roomsChecks(browser, tag);
   await erroringCountChecks(browser, tag);
   for (const sc of scenarios) {
     const page = await browser.newPage({ viewport: sc.viewport ?? { width: 1280, height: 760 } });
