@@ -110,12 +110,31 @@ Tests: `cd prototype && npm test` (`shared/activity.test.ts` runs every rule ove
 
 ## Installing this build
 
-The Agent OS tab (plugin) and its data server (`prototype/server`, the process on 127.0.0.1:5198) are separate. Rooms and the compact rows need both.
+The Agent OS tab (plugin) and its data server (`prototype/server`, the process on 127.0.0.1:5198) are separate. Rooms, the compact rows and Markdown rendering need both (the renderer is bundled into the plugin's `app/`, so the plugin install alone ships it; the data server carries the mock/scripted cues and room logic).
+
+The data server runs under launchd as `com.zach.agent-os-api` (`~/Library/LaunchAgents/com.zach.agent-os-api.plist`, `KeepAlive`, logs in `~/.openclaw/logs/agent-os-api.log`). The plist's `WorkingDirectory` and its `--import …/node_modules/tsx/dist/loader.mjs` path both point at one worktree's `prototype/`, so installing a build means repointing **both** to this worktree and reloading the job. Do not start it with `nohup`: launchd owns it, and Gateway message RPCs are refused inside an agent `exec` subprocess, so it must start from launchd or a normal terminal.
 
 ```sh
-cd <worktree>/plugin && npm run build && npm run validate && openclaw plugins install . --force   # plugin: route proxy + app bundle, applies via the running Gateway, no restart
-# data server: stop the old one, start this worktree's from a normal terminal (agent exec subprocesses are refused by Gateway message RPCs)
-cd <worktree>/prototype && nohup npx tsx server/index.ts >/tmp/agent-os-api.log 2>&1 &
+WT=<this worktree>                 # e.g. ~/.openclaw/worktrees/d1ce9eeff932b0b2/agent-os-council
+PLIST=~/Library/LaunchAgents/com.zach.agent-os-api.plist
+OLD=$(/usr/libexec/PlistBuddy -c 'Print :WorkingDirectory' "$PLIST" | sed 's#/prototype$##')   # the worktree it runs from now; note it for rollback
+
+# 1. plugin: route proxy + app bundle, applies via the running Gateway, no restart
+(cd "$WT/plugin" && npm run build && npm run validate && openclaw plugins install . --force)
+
+# 2. data server: repoint WorkingDirectory + tsx loader to $WT, then bootout/bootstrap
+cp "$PLIST" "$PLIST.bak"
+sed -i '' "s#$OLD#$WT#g" "$PLIST"                 # rewrites both the WorkingDirectory and the loader.mjs path
+plutil -lint "$PLIST" && grep -c "$WT" "$PLIST"   # lint passes, 2 matches
+launchctl bootout gui/$(id -u)/com.zach.agent-os-api
+launchctl bootstrap gui/$(id -u) "$PLIST"
+curl -s http://127.0.0.1:5198/api/snapshot?source=live | head -c 120    # serving again
 ```
 
-Roll back by reinstalling the previous plugin (`cd ~/.openclaw/worktrees/d1ce9eeff932b0b2/agent-os-spark-voice/plugin && openclaw plugins install . --force`) and starting the previous data server again. `~/.openclaw/agent-os/rooms.json` can stay or be trashed; room sessions remain in the Gateway as ordinary `agent:<id>:room-…` sessions.
+Roll back: reinstall the previous plugin (`cd $OLD/plugin && openclaw plugins install . --force`), restore the plist (`cp "$PLIST.bak" "$PLIST"`), then `launchctl bootout gui/$(id -u)/com.zach.agent-os-api && launchctl bootstrap gui/$(id -u) "$PLIST"`. `~/.openclaw/agent-os/rooms.json` can stay or be trashed; room sessions remain in the Gateway as ordinary `agent:<id>:room-…` sessions.
+
+## Markdown in messages
+
+Agent text is rendered as Markdown (`prototype/shared/markdown.ts`): **marked 18.0.14** parses, **DOMPurify 3.4.16** sanitizes (both pinned exactly in `prototype/package.json`, bundled by Vite, no CDN; jsdom 30.1.1 is a dev dependency for the unit tests only). Where: room thread messages (Zach, captain, members, Round-table), Council-thinking notes, the session drawer thread and A2A rows, and Activity previews (inline only: bold, italic, code, links, one line). Supported: headings, bold/italic/strike, inline code, fenced code (monospace, horizontal scroll, Copy button), bullet/numbered lists, blockquotes, GFM tables, line breaks, task-list checkboxes (read-only). Links open in a new tab with `rel="noopener noreferrer"`; `@member` mentions keep the `.rm-at` chip; `path/to/file.ts:42` (plain or in backticks) is marked and copies on click; bare URLs autolink.
+
+Safety: raw HTML in the source is escaped to text before sanitizing (never passed through), images are replaced by their alt text, and DOMPurify allows only a short tag list, `href/title/class/align` attributes and `http(s):`, `mailto:`, `#` and root-relative URLs (no `javascript:`, `data:`, `vbscript:`, no `style`, no event handlers). Tests: `cd prototype && npm test` (`shared/markdown.test.ts`: rendering plus XSS: script, onerror, javascript:/data: links, raw HTML, iframe, svg/math/form, malicious table cell and code fence); `node harness/check.mjs` has a Markdown scenario in both engines. Cue `richmd` in a mock room message to get Markdown-heavy council answers.

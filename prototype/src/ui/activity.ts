@@ -3,6 +3,7 @@
 // Rendering is coalesced to at most ~10 fps and the DOM is capped at MAX_ROWS keyed rows.
 import type { FleetEvent } from '../contract';
 import type { Filter, ShellState, ShellStore } from '../store';
+import { renderInline } from '../../shared/markdown';
 import { KIND_COLOR, KIND_LABEL, esc, fmtTime, hueOf, matchesFilter, matchesQuery, nameOf, openNeeds, svg } from './format';
 
 const MAX_ROWS = 300;
@@ -49,6 +50,7 @@ export function mountActivity(el: HTMLElement, store: ShellStore, openEvent: (e:
     const t = e.target as HTMLElement;
     const more = t.closest<HTMLElement>('.g-more');
     if (more) { const g = more.dataset.g!; if (expanded.has(g)) expanded.delete(g); else expanded.add(g); schedule(true); return; }
+    if (t.closest('.esum a, .ntitle a')) return; // a link in a preview opens in its own tab, not the drawer
     const row = t.closest<HTMLElement>('[data-ev]');
     if (row) { const ev = byId.get(row.dataset.ev!); if (ev) openEvent(ev); }
   });
@@ -66,7 +68,7 @@ export function mountActivity(el: HTMLElement, store: ShellStore, openEvent: (e:
     const task = e.label && e.label !== e.text ? `<div class="etask">${esc(e.label)}</div>` : '';
     return `<span class="edot" style="--hue:${hueOf(s, e.from === 'zach' ? e.to : e.from)}"></span>
       <div class="eline"><span class="who">${esc(nameOf(s, e.from))}</span>${to}</div>
-      <div class="etext"><span class="kchip" style="--k:${kc}">${KIND_LABEL[e.kind]}</span><span class="esum">${esc(e.text)}</span></div>${task}
+      <div class="etext"><span class="kchip" style="--k:${kc}">${KIND_LABEL[e.kind]}</span><span class="esum">${renderInline(e.text)}</span></div>${task}
       <time>${fmtTime(e.ts)}</time>`;
   }
   /** The row element for an event; rebuilt when the names or team colour it shows change (agents load after events). */
@@ -103,7 +105,7 @@ export function mountActivity(el: HTMLElement, store: ShellStore, openEvent: (e:
     needsList.innerHTML = needs.slice(0, 5).map((e) => {
       byId.set(e.id, e);
       return `<div class="need" data-ev="${e.id}"><span class="ndot"></span>
-        <div class="grow"><div class="ntitle">${esc(e.text)}</div><div class="nsub"><span class="who">${esc(nameOf(s, e.from))}</span>${e.to ? ` → <span class="who">${esc(nameOf(s, e.to))}</span>` : ''} · ${KIND_LABEL[e.kind]}</div></div>
+        <div class="grow"><div class="ntitle">${renderInline(e.text)}</div><div class="nsub"><span class="who">${esc(nameOf(s, e.from))}</span>${e.to ? ` → <span class="who">${esc(nameOf(s, e.to))}</span>` : ''} · ${KIND_LABEL[e.kind]}</div></div>
         <time>${fmtTime(e.ts)}</time><span class="go">${svg('arrowRight', 14)}</span></div>`;
     }).join('');
 

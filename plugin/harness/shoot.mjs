@@ -83,6 +83,9 @@ await page.click(".cmp-thread");
 await page.waitForSelector("#drawer.open .thread .a2a");
 await page.waitForTimeout(500);
 await shot("0f-compact-a2a-drawer");
+await page.locator("#drawer .m-text.md h2").first().scrollIntoViewIfNeeded();
+await page.waitForTimeout(300);
+await shot("0g-md-drawer");
 await page.keyboard.press("Escape");
 await page.click(".rooms-btn");
 await page.waitForSelector("#rooms:not([hidden])");
@@ -145,6 +148,20 @@ await page.waitForFunction(() => !document.querySelector(".rm-compose .rm-typing
 await page.locator(".rm-council > summary").click(); // fold the panel so the bypass reads clearly
 await page.waitForTimeout(300);
 await shot("2e-mention-bypass");
+// Markdown: a Markdown-heavy council answer in the thread, the panel notes, the drawer thread and the Activity feed (inline previews).
+await page.locator(".rm-compose textarea").fill("richmd: how do we roll this out?");
+await page.keyboard.press("Enter");
+await page.waitForSelector(".rm-status .rm-typing");
+await page.waitForFunction(() => !document.querySelector(".rm-compose .rm-typing") && [...document.querySelectorAll(".rm-text.md h2")].length, null, { timeout: 25000 });
+await page.waitForTimeout(400);
+await page.locator(".rm-msg.captain .rm-text.md h2").last().scrollIntoViewIfNeeded();
+await page.locator(".rm-msg.captain").last().scrollIntoViewIfNeeded();
+await shot("3a-md-room-thread");
+await page.locator(".rm-council > summary").last().click();
+await page.waitForSelector(".rm-council[open] .rm-note-text.md strong");
+await page.locator(".rm-council[open]").last().scrollIntoViewIfNeeded();
+await page.waitForTimeout(300);
+await shot("3b-md-council-panel");
 await page.click(".rooms-btn");
 await page.setViewportSize({ width: 1280, height: 760 });
 

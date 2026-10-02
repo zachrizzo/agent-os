@@ -21,6 +21,7 @@ export function scriptedReply(prompt: string): string {
 
 /** Council turns. Cues in Zach's message: "badplan" (captain returns non-JSON), "conflict" (the second member contradicts the first). */
 function councilReply(role: string, prompt: string, name: string, id: string, ids: string[], text: string): string {
+  if (/richmd/i.test(prompt) && role !== 'CAPTAIN-PLAN') return richReply(role, ids);
   const topic = text.replace(/\s+/g, ' ').slice(0, 48);
   if (role === 'CAPTAIN-PLAN') {
     if (/badplan/i.test(text)) return 'Sure. I think everyone should look at this from their own angle, no JSON from me.';
@@ -36,4 +37,38 @@ function councilReply(role: string, prompt: string, name: string, id: string, id
   }
   const flagged = /Critiques:\n/.test(prompt);
   return `Proceed. Members agree on the approach${flagged ? '.\n\nDisagreements resolved: the critique about rollback is valid, so I added it as a pre-condition.\n\nYour call: ship fast with a manual rollback, or wait a day for automation.' : '; nothing conflicting came up.'}`;
+}
+
+/** Cue "richmd" in Zach's message: Markdown-heavy replies (and a few hostile bits that must stay inert) for the renderer checks and screenshots. */
+export const RICH_MD = [
+  '## Recommendation',
+  'Ship **Thursday**, behind the flag. Run `npm test` first and read the *rollback* notes in [the runbook](https://example.com/runbook).',
+  '',
+  '- Owner: @FIRST (see `plugin/src/index.ts:42`)',
+  '- Watch the error rate for **30 minutes**',
+  '- Keep a manual rollback ready',
+  '',
+  '1. Merge the flag',
+  '2. Enable for 5%',
+  '3. Ramp to 100%',
+  '',
+  '> Rollback is cheap only while the migration is additive.',
+  '',
+  '| Risk | Likelihood | Mitigation |',
+  '|---|---|---|',
+  '| Lock contention | Medium | Batch in chunks of 500 |',
+  '| Bad backfill | Low | Dry run on a copy |',
+  '',
+  '```sh',
+  'git switch -c rollout/thursday && npm run migrate -- --dry-run   # a long line that has to scroll sideways instead of wrapping into the next block of text',
+  '```',
+  '',
+  'Hostile bits stay inert: <script>alert(1)</script> <img src=x onerror=alert(1)> [click](javascript:alert(1))',
+].join('\n');
+
+function richReply(role: string, ids: string[]): string {
+  const first = ids[0] ?? 'agent';
+  if (role === 'CRITIQUE') return '- **Pushback:** nobody covered `rollback`.\n- Needs an owner before Thursday.';
+  if (role === 'SPECIALIST') return `**View:** proceed, one caveat.\n\n- see \`src/ui/rooms.ts:86\`\n- ping @${first}`;
+  return RICH_MD.replace('@FIRST', `@${first}`);
 }

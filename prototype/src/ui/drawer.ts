@@ -2,12 +2,14 @@
 import type { HistoryItem } from '../../shared/types';
 import type { FleetEvent } from '../contract';
 import type { ShellStore } from '../store';
+import { installMarkdownHandlers, renderInline, renderMarkdown } from '../../shared/markdown';
 import { mountComposer } from './composer';
 import { KIND_COLOR, KIND_LABEL, esc, fmtTime, hueOf, nameOf, svg } from './format';
 
 export function mountDrawer(el: HTMLElement, store: ShellStore) {
   let current: string | null = null; // session key shown
   let req = 0;
+  installMarkdownHandlers(el);
 
   el.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
@@ -50,7 +52,7 @@ export function mountDrawer(el: HTMLElement, store: ShellStore) {
       </header>
       <div class="d-route">${route}</div>
       <div class="d-body">
-        ${ev ? `<blockquote class="d-text">${esc(ev.text)}${ev.label && ev.label !== ev.text ? `<small class="d-label">${esc(ev.label)}</small>` : ''}</blockquote>` : ''}
+        ${ev ? `<blockquote class="d-text">${renderInline(ev.text)}${ev.label && ev.label !== ev.text ? `<small class="d-label">${esc(ev.label)}</small>` : ''}</blockquote>` : ''}
         <dl class="d-meta">
           <div><dt>Session</dt><dd class="mono">${esc(key)}</dd></div>
           ${a ? `<div><dt>Now</dt><dd>${esc(a.now)}</dd></div><div><dt>Model</dt><dd class="mono">${esc(a.model ?? '—')}</dd></div><div><dt>Spend</dt><dd>$${a.costUsd.toFixed(2)} · ${Math.round(a.tokens / 1000)}k tok</dd></div>` : ''}
@@ -83,7 +85,7 @@ export function mountDrawer(el: HTMLElement, store: ShellStore) {
       const name = mine ? nameOf(s, key) : sender ? nameOf(s, sender) : role === 'user' ? 'You' : role;
       return `<div class="msg ${mine ? 'me' : 'them'} r-${esc(role)}" style="--hue:${mine ? hue : sender ? hueOf(s, sender) : 'var(--idle)'}">
         <div class="m-head"><span class="m-who">${esc(name)}</span><span class="m-role">${esc(role)}</span><time>${fmtTime(ts)}</time></div>
-        <div class="m-text">${esc(text)}</div></div>`;
+        <div class="m-text md">${renderMarkdown(text)}</div></div>`;
     };
     // Agent-to-agent traffic (sessions_send): one compact "from → to: text" row; the routing wrapper sits behind a details toggle.
     const a2aRow = (it: HistoryItem) => {
@@ -91,7 +93,7 @@ export function mountDrawer(el: HTMLElement, store: ShellStore) {
       const tool = it.a2a!.tool && it.a2a!.tool !== 'sessions_send' ? `<span class="kchip a2a-tool">${esc(it.a2a!.tool.replace(/_/g, ' '))}</span>` : '';
       return `<div class="a2a" style="--hue:${hueOf(s, from)}">
         <div class="a2a-line"><button class="who-btn a2a-from" data-agent="${esc(from)}">${esc(nameOf(s, from))}</button><span class="arr">→</span><span class="a2a-to">${esc(nameOf(s, key))}</span>${tool}<time>${fmtTime(it.ts)}</time></div>
-        <div class="a2a-text">${esc(it.text)}</div>
+        <div class="a2a-text md">${renderMarkdown(it.text)}</div>
         <details class="a2a-routing"><summary>routing</summary><pre>${esc(it.a2a!.routing)}</pre></details></div>`;
     };
     try {

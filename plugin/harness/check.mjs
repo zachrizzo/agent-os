@@ -551,6 +551,94 @@ async function activityChecks(browser, tag) {
   await page.close();
 }
 
+// Markdown rendering + XSS (prototype/shared/markdown.ts): the mock council answers "richmd" with headings, lists, a table, a long code fence,
+// an @mention, a path:line and hostile HTML. Checks the room thread, the council panel, the session drawer (bubbles + A2A row) and Activity previews.
+async function markdownChecks(browser, tag) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  let dialogs = 0;
+  page.on("dialog", (d) => { dialogs++; d.dismiss(); });
+  const popups = [];
+  page.on("popup", (p) => popups.push(p.url()));
+  const bad = [];
+  const expect = (name, ok, detail = "") => { if (!ok) bad.push([name, detail]); };
+  const name = `Markdown ${tag} ${Date.now() % 100000}`;
+  await page.goto(base + "agent-os/?source=mock");
+  await page.waitForSelector(".rooms-btn");
+  await page.click(".rooms-btn");
+  await page.click("#rooms [data-act=new]");
+  await page.fill(".rm-name-in", name);
+  for (const id of ["spark", "forge", "research"]) await page.locator(`input[data-pick=${id}]`).check();
+  await page.click("[data-act=create]");
+  await page.waitForSelector(".rm-bar h3");
+  await page.locator(".rm-compose textarea").fill("richmd: how should we roll this out? **bold from Zach** and `code`");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector(".rm-status .rm-typing", { timeout: 8000 });
+  await page.waitForFunction(() => !document.querySelector(".rm-compose .rm-typing") && document.querySelector(".rm-msg.captain:not(.pending) .rm-text.md h2"), null, { timeout: 25000 });
+  const cap = page.locator(".rm-msg.captain .rm-text.md");
+  expect("captain reply: heading, bold, inline code", (await cap.locator("h2").innerText()) === "Recommendation" && (await cap.locator("strong").first().innerText()) === "Thursday" && (await cap.locator("p code").first().innerText()) === "npm test");
+  expect("captain reply: no raw markdown markers left", !/\*\*|```|^## |^- /m.test(await cap.innerText()), (await cap.innerText()).slice(0, 80));
+  expect("captain reply: bullets, numbered list, blockquote, table", (await cap.locator("ul li").count()) === 3 && (await cap.locator("ol li").count()) === 3 && (await cap.locator("blockquote").count()) === 1 && (await cap.locator("table tr").count()) === 3);
+  const code = cap.locator(".md-code pre");
+  const cs = await code.evaluate((el) => ({ ff: getComputedStyle(el).fontFamily, ox: getComputedStyle(el).overflowX, sw: el.scrollWidth, cw: el.clientWidth }));
+  expect("code fence is monospace and scrolls horizontally", /mono|menlo|monospace/i.test(cs.ff) && cs.ox === "auto" && cs.sw > cs.cw, JSON.stringify(cs));
+  expect("code fence has a copy button", (await cap.locator(".md-code .md-copy").count()) === 1);
+  expect("@mention keeps its chip", (await cap.locator(".rm-at").first().innerText()) === "@spark");
+  expect("path:line is marked", (await cap.locator(".md-path").first().innerText()) === "plugin/src/index.ts:42");
+  const link = cap.locator("a", { hasText: "the runbook" });
+  expect("link opens in a new tab, noopener noreferrer", (await link.getAttribute("target")) === "_blank" && (await link.getAttribute("rel")) === "noopener noreferrer" && (await link.getAttribute("href")) === "https://example.com/runbook");
+  const danger = await page.evaluate(() => ({
+    bad: document.querySelectorAll("#rooms script, #rooms iframe, #rooms img, #rooms style, #rooms [onerror], #rooms [onclick], #rooms [onload]").length,
+    js: [...document.querySelectorAll("#rooms a")].filter((a) => /^\s*(javascript|data|vbscript):/i.test(a.getAttribute("href") ?? "")).length,
+  }));
+  expect("hostile HTML/links in the reply are inert", danger.bad === 0 && danger.js === 0, JSON.stringify(danger));
+  expect("hostile source shows as plain text", (await cap.innerText()).includes("<script>alert(1)</script>"));
+  const font = await cap.evaluate((el) => ({ w: el.getBoundingClientRect().width, max: parseFloat(getComputedStyle(el).fontSize) * 72 }));
+  expect("long text keeps a readable max width", font.w <= font.max + 4, JSON.stringify(font));
+  await cap.locator(".md-code").hover();
+  await cap.locator(".md-copy").click();
+  expect("copy button gives feedback", (await cap.locator(".md-copy").innerText()) === "Copied");
+
+  // council panel notes
+  await page.locator(".rm-council > summary").click();
+  await page.waitForSelector(".rm-council[open] .rm-note");
+  expect("council notes render markdown", (await page.locator(".rm-note-text.md strong").count()) >= 2 && (await page.locator(".rm-note.answer .rm-note-text.md").first().innerText()).indexOf("**") === -1);
+  expect("council notes: @mention chip stays", (await page.locator(".rm-note-text .rm-at").count()) >= 1);
+  // Zach's own message is rendered too
+  expect("Zach's message renders bold and code", (await page.locator(".rm-msg.me .rm-text.md strong").first().innerText()) === "bold from Zach");
+  expect("page-wide: no dialogs, popups, or pageerrors from hostile text", dialogs === 0 && popups.length === 0 && errors.length === 0, `${dialogs} ${popups} ${errors}`);
+  await page.click("[data-act=archive]"); // leave the mock data server's active rooms as we found them
+  await page.click(".rooms-btn");
+
+  // session drawer: assistant bubble and the A2A row
+  await page.waitForFunction(() => document.querySelector(".meter[data-k=agents] b")?.textContent !== "–", null, { timeout: 15000 });
+  await page.locator("#rail .row.agent").first().click();
+  await page.waitForSelector(".c-compose:visible");
+  await page.click(".cmp-thread");
+  await page.waitForSelector("#drawer.open .thread .a2a");
+  const th = page.locator("#drawer .thread");
+  expect("drawer bubble renders headings, table, code block", (await th.locator(".m-text.md h2").count()) >= 1 && (await th.locator(".m-text.md table").count()) >= 1 && (await th.locator(".m-text.md .md-code pre").count()) >= 1);
+  expect("drawer bubble: no raw markers", !/\*\*|```/.test(await th.locator(".m-text.md").first().innerText()));
+  expect("A2A row renders markdown when expanded", (await th.locator(".a2a-text.md strong").first().innerText()) === "Brief:" && (await th.locator(".a2a-text.md li").count()) === 2);
+  expect("drawer: hostile content inert", (await page.locator("#drawer script, #drawer iframe, #drawer img, #drawer [onerror]").count()) === 0);
+  await page.keyboard.press("Escape");
+
+  // Activity previews: inline only, single line
+  await page.waitForSelector("#activity .stream .esum strong, #activity .stream .esum code", { timeout: 15000 });
+  const act = await page.evaluate(() => {
+    const els = [...document.querySelectorAll("#activity .stream .esum")];
+    const rich = els.filter((e) => e.querySelector("strong, code, a"));
+    return { rich: rich.length, raw: els.filter((e) => /\*\*|`/.test(e.textContent ?? "")).length, block: document.querySelectorAll("#activity .esum h1, #activity .esum h2, #activity .esum ul, #activity .esum p, #activity .esum pre, #activity .esum table").length, oneLine: rich.every((e) => e.getBoundingClientRect().height < 24) };
+  });
+  expect("Activity previews render bold/code/links inline", act.rich > 0 && act.raw === 0, JSON.stringify(act));
+  expect("Activity previews stay single-line and inline-only", act.block === 0 && act.oneLine, JSON.stringify(act));
+  if (errors.length) bad.push(["pageerrors", errors.join("; ")]);
+  if (bad.length) failed++;
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · Markdown rendering + XSS (room thread, council notes, drawer, A2A, Activity)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  await page.close();
+}
+
 let failed = 0;
 for (const [tag, engine] of [["webkit", webkit], ["chromium", chromium]]) {
   const browser = await engine.launch();
@@ -563,6 +651,7 @@ for (const [tag, engine] of [["webkit", webkit], ["chromium", chromium]]) {
   await councilChecks(browser, tag);
   await erroringCountChecks(browser, tag);
   await activityChecks(browser, tag);
+  await markdownChecks(browser, tag);
   for (const sc of scenarios) {
     const page = await browser.newPage({ viewport: sc.viewport ?? { width: 1280, height: 760 } });
     const errors = [];

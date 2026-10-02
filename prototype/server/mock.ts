@@ -1,7 +1,7 @@
 // Synthetic fleet: ~60 agents in 7 teams (CoS at the root), ~10 events/s, spawn/finish churn, rotating "needs you".
 import { COS_ID, TEAM_PALETTE, type Agent, type Delta, type EventKind, type FleetEvent, type HistoryItem, type Snapshot, type Team } from '../shared/types.ts';
 import { parseInterSession, shortSession } from '../shared/a2a.ts';
-import { scriptedReply } from '../shared/scripted.ts';
+import { RICH_MD, scriptedReply } from '../shared/scripted.ts';
 import { createRoomsService, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
 
@@ -43,11 +43,11 @@ const NOW_GENERIC = ['Reviewing context', 'Drafting response', 'Validating outpu
 const LEAD_NOW = ['Balancing workload', 'Reviewing worker reports', 'Planning next batch', 'Unblocking a worker'];
 const MSG: Record<EventKind, string[]> = {
   handoff: ['New intake routed with full context', 'Picked up card 51f52066', 'Escalated with transcript', 'Take the flaky test, repro first'],
-  done: ['Patch ready · 18 checks passed', 'Run finished in 3m12s', 'Summary attached · 4 findings', 'Verdict: APPROVED', 'Coverage verified · no exceptions'],
-  blocked: ['Typecheck fails on parser.ts:88', 'Waiting on CI, retrying in 5m', 'Verdict: CHANGES_REQUESTED', 'Regression in eval set B'],
+  done: ['Patch ready · **18 checks** passed', 'Run finished in 3m12s', 'Summary attached · 4 findings', 'Verdict: APPROVED', 'Coverage verified · no exceptions'],
+  blocked: ['Typecheck fails on `parser.ts:88`, see [CI log](https://example.com/ci/88)', 'Waiting on CI, retrying in 5m', 'Verdict: CHANGES_REQUESTED', 'Regression in eval set B'],
   needs: ['Which approach do you prefer?', 'Decision needed: ship or hold'],
   approval: ['Production gate awaiting approval', 'Response ready for your review', 'External source access requested'],
-  message: ['Can you take the next ticket?', 'Context synced', 'On it', 'Need the repro steps', 'Narrow scope to billing only', 'Prefer the cached result'],
+  message: ['Can you take the next ticket?', 'Context synced', 'On it', 'Need the repro steps', 'Narrow scope to **billing** only', 'Prefer the cached result'],
 };
 const ASKS: Array<[string, string]> = [
   ['forge', 'Approve production deploy of e5330081?'],
@@ -248,9 +248,10 @@ export function createMockSource(): Source {
       if (!a) return [];
       const t = Date.now();
       return [
-        briefItem(t - 180_000, a.parent ?? COS_ID, `Brief: ${pick(MSG.handoff)}`),
+        briefItem(t - 180_000, a.parent ?? COS_ID, `**Brief:** ${pick(MSG.handoff)}\n\n- start in \`src/parser.ts:88\`\n- report back with the *repro*`),
         { role: 'assistant', ts: t - 120_000, text: `${a.now}…` },
         { role: 'assistant', ts: t - 60_000, text: `⚙ exec · ${pick(MSG.done)}` },
+        { role: 'assistant', ts: t - 30_000, text: RICH_MD.replace('@FIRST', '@forge') },
         { role: 'assistant', ts: t - 5_000, text: a.ask ?? pick(MSG.done) },
         ...(sentLog.get(key) ?? []),
       ];

@@ -1,5 +1,6 @@
 // Group rooms: create a room, pick agents from the live list, chat with all of them in one thread.
 // Everything is server-side (persisted rooms, bounded runs); this view only renders it and polls while a run is in flight.
+import { installMarkdownHandlers, renderInline, renderMarkdown } from '../../shared/markdown';
 import { MAX_MEMBERS, YOU, type Council, type CouncilAgentStatus, type CouncilNote } from '../../shared/rooms';
 import { createRoomsApi, type RoomAgent, type RoomSummary, type RoomView } from '../rooms-api';
 import type { ShellStore } from '../store';
@@ -63,7 +64,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     const live = rooms.filter((r) => !r.archived);
     const arch = rooms.filter((r) => r.archived);
     const row = (r: RoomSummary) => {
-      const last = r.last ? `<span class="rm-last"><b>${esc(r.last.from === YOU ? 'You' : agentOf(r.last.from).name)}:</b> ${esc(r.last.text)}</span>` : '<span class="rm-last muted">No messages yet</span>';
+      const last = r.last ? `<span class="rm-last"><b>${esc(r.last.from === YOU ? 'You' : agentOf(r.last.from).name)}:</b> ${renderInline(r.last.text.replace(/^\s{0,3}(?:#{1,6}|[-*>]|\d+\.)\s+/gm, ''))}</span>` : '<span class="rm-last muted">No messages yet</span>';
       return `<button class="rm-row${mode.t === 'room' && mode.id === r.id ? ' on' : ''}" data-room="${r.id}">
         <span class="rm-stack">${r.members.slice(0, 4).map((m) => avatarHtml(m, agentOf(m).name, agentOf(m).emoji, 'sm')).join('')}</span>
         <span class="rm-name">${esc(r.name)}${r.running ? '<i class="rm-run" title="agents are answering"></i>' : ''}</span>${last}</button>`;
@@ -83,18 +84,18 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
   const PHASE_LABEL: Record<Council['phase'], string> = { planning: 'Captain is planning', working: 'Members are working in parallel', critiquing: 'Members are critiquing each other', synthesizing: 'Captain is writing the answer', done: 'Done', stopped: 'Stopped' };
   const NOTE_KIND: Record<CouncilNote['kind'], string> = { plan: 'plan', answer: 'answer', critique: 'critique', system: 'note' };
   const NOTE_CLAMP = 260;
-  const mentionize = (text: string, room: RoomView['room']) => esc(text).replace(/(^|[^\w@])@([A-Za-z0-9][\w-]*)/g, (all, pre, id) => (room.members.some((x) => x.toLowerCase() === String(id).toLowerCase()) ? `${pre}<span class="rm-at">@${id}</span>` : all));
+  const mentionize = (text: string, room: RoomView['room']) => renderMarkdown(text, { mentions: room.members });
   const fmtDur = (ms: number) => (ms < 1000 ? '<1s' : ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
 
   function noteRow(n: CouncilNote, room: RoomView['room']): string {
     const w = who(n.agent);
     const long = n.text.length > NOTE_CLAMP;
     const body = n.pass ? '<span class="rm-pass">PASS · no objection</span>' : long
-      ? `<details class="rm-note-more" data-nid="${esc(n.id)}" ${noteOpen.has(n.id) ? 'open' : ''}><summary>${mentionize(n.text.slice(0, NOTE_CLAMP).trimEnd(), room)}…<span class="rm-more">more</span></summary><div class="rm-note-full">${mentionize(n.text, room)}</div></details>`
+      ? `<details class="rm-note-more" data-nid="${esc(n.id)}" ${noteOpen.has(n.id) ? 'open' : ''}><summary><span class="rm-note-prev">${renderInline(n.text.slice(0, NOTE_CLAMP).trimEnd())}…</span><span class="rm-more">more</span></summary><div class="rm-note-full">${mentionize(n.text, room)}</div></details>`
       : mentionize(n.text, room);
     return `<div class="rm-note ${n.kind}${n.pass ? ' pass' : ''}" style="--hue:${avatarHue(n.agent)}">
       <div class="rm-note-line"><b>${esc(w.name)}</b><span class="rm-kind">${NOTE_KIND[n.kind]}</span><time>${fmtHM(n.ts)}</time></div>
-      <div class="rm-note-text">${body}</div></div>`;
+      <div class="rm-note-text md">${body}</div></div>`;
   }
 
   /** The collapsible "Council thinking" panel under the captain's reply: per-agent status chips + compact note rows. */
@@ -122,7 +123,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     const final = c.finalId ? room.messages.find((m) => m.id === c.finalId) : undefined;
     const w = who(c.captain);
     const reply = final
-      ? `<div class="rm-msg captain">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b><span class="rm-rnd">captain · council answer</span><time>${fmtHM(final.ts)}</time></div><div class="rm-text">${mentionize(final.text, room)}</div></div></div>`
+      ? `<div class="rm-msg captain">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b><span class="rm-rnd">captain · council answer</span><time>${fmtHM(final.ts)}</time></div><div class="rm-text md">${mentionize(final.text, room)}</div></div></div>`
       : c.phase === 'stopped' ? ''
       : `<div class="rm-msg captain pending">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b><span class="rm-rnd">captain</span></div><div class="rm-text muted"><span class="rm-typing"><i></i>${esc(PHASE_LABEL[c.phase])}…</span></div></div></div>`;
     return `${reply}<div class="rm-council-wrap">${councilPanel(c, room)}</div>`;
@@ -153,7 +154,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
       if (m.from === 'system') return `<div class="rm-sys">${esc(m.text)}</div>`;
       const w = who(m.from);
       const text = mentionize(m.text, room);
-      const mine = `<div class="rm-msg${m.from === YOU ? ' me' : ''}">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b>${m.round && m.round > 1 ? `<span class="rm-rnd">round ${m.round}</span>` : ''}<time>${fmtHM(m.ts)}</time></div><div class="rm-text">${text}</div></div></div>`;
+      const mine = `<div class="rm-msg${m.from === YOU ? ' me' : ''}">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b>${m.round && m.round > 1 ? `<span class="rm-rnd">round ${m.round}</span>` : ''}<time>${fmtHM(m.ts)}</time></div><div class="rm-text md">${text}</div></div></div>`;
       const c = councils.get(m.id);
       return c ? mine + councilBlock(c, view!) : mine;
     }).join('');
@@ -227,6 +228,8 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     busy = false;
     await refresh();
   }
+
+  installMarkdownHandlers(el);
 
   // <details> toggles do not bubble: remember what the user opened/closed so the next poll repaint keeps it.
   el.addEventListener('toggle', (e) => {
