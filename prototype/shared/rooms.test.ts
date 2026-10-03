@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  addsNothingNew, discussionBlock, isExcludedAgent, isPass, memberPrompt, migrateRoom, normalizeSettings, parseFinal, parseMentions, runDiscussion, selectResponders,
+  discussionBlock, isExcludedAgent, isPass, memberPrompt, migrateRoom, normalizeSettings, parseMentions, runDiscussion, selectResponders,
   type Room, type RoomMember, type RoomMessage, type RoomRunState, type RoomTransport,
 } from './rooms.ts';
 import { scriptedReply } from './scripted.ts';
@@ -32,28 +32,19 @@ test('phi is excluded, near-misses are not', () => {
   for (const id of ['phil', 'sophie', 'alpha']) assert.ok(!isExcludedAgent(id), id);
 });
 
-test('pass and FINAL detection', () => {
+test('pass detection', () => {
   for (const r of ['PASS', ' pass. ', 'NO_REPLY', '', null]) assert.ok(isPass(r), String(r));
   assert.ok(!isPass('PASS on that, but here is why'));
-  assert.deepEqual(parseFinal('FINAL: Ship it.'), { final: true, text: 'Ship it.' });
-  assert.deepEqual(parseFinal('final:\nShip it.'), { final: true, text: 'Ship it.' });
-  assert.deepEqual(parseFinal('Not final: ship it.'), { final: false, text: 'Not final: ship it.' });
 });
 
-test('addsNothingNew: acknowledgements and repeats do not count, a new point does', () => {
-  const prior = ['We should ship behind a flag and keep a manual rollback ready for the migration.'];
-  assert.ok(addsNothingNew('Agreed, makes sense.', prior));
-  assert.ok(addsNothingNew('Ship behind a flag, keep a manual rollback ready for the migration.', prior));
-  assert.ok(!addsNothingNew('The backfill needs an owner and a dry run on a copy of production before Thursday.', prior));
-});
-
-test('migrateRoom: retired pipeline fields dropped, a former council answer becomes a final bubble', () => {
+test('migrateRoom: retired pipeline fields dropped, the council and final flags on messages are dropped', () => {
   const old = { id: 'r00000001', name: 'x', members: ['a', 'b'], mode: 'council', maxRounds: 2, maxSteps: 3, councils: [{ id: 'm1' }], maxTurns: 6, captain: 'b', archived: false, createdAt: 1, updatedAt: 1,
     messages: [{ id: 'm1', ts: 1, from: 'you', text: 'q' }, { id: 'm2', ts: 2, from: 'b', text: 'answer', council: 'm1' }] } as unknown as Room;
   const r = migrateRoom(old) as Room & Record<string, unknown>;
   for (const k of ['mode', 'maxRounds', 'maxSteps', 'councils', 'maxTurns']) assert.ok(!(k in r), k);
   assert.equal(r.captain, 'b');
-  assert.deepEqual(r.messages[1], { id: 'm2', ts: 2, from: 'b', text: 'answer', final: true });
+  assert.deepEqual(r.messages[1], { id: 'm2', ts: 2, from: 'b', text: 'answer' });
+  assert.deepEqual(migrateRoom({ ...old, councils: [], messages: [{ id: 'm3', ts: 3, from: 'b', text: 'x', final: true } as never] } as Room).messages, [{ id: 'm3', ts: 3, from: 'b', text: 'x' }]);
 });
 
 // ---- the discussion loop, against a scripted transport
@@ -69,98 +60,102 @@ function setup(text: string, members = M, captain = 'alpha', extra: Partial<Room
   const trigger = hooks.append({ from: 'you', text });
   return { room, hooks, trigger, state };
 }
-const log: Array<{ agent: string; round: number }> = [];
-const scripted: RoomTransport = { async turn(agent, prompt) { log.push({ agent, round: Number(/It is round (\d+)\./.exec(prompt)?.[1] ?? 1) }); return scriptedReply(prompt); } };
-const texts = (room: Room) => room.messages.filter((m) => m.from !== 'system').map((m) => `${m.from}${m.final ? '*' : ''}`);
+const scripted: RoomTransport = { async turn(_agent, prompt) { return scriptedReply(prompt); } };
+const who = (room: Room) => room.messages.filter((m) => m.from !== 'system').map((m) => m.from);
+const run = (s: ReturnType<typeof setup>, t: RoomTransport = scripted, members = M) => runDiscussion(s.room, members, s.trigger, t, s.hooks, new AbortController().signal);
 
-test('open discussion: everyone replies, members build on each other, the lead posts the final answer', async () => {
-  log.length = 0;
-  const { room, hooks, trigger } = setup('Should we ship Thursday?');
-  const reason = await runDiscussion(room, M, trigger, scripted, hooks, new AbortController().signal);
-  assert.equal(reason, 'complete');
-  // round 1: bravo + forge-coder (in parallel), then the lead alpha; round 2: bravo builds on forge-coder; round 3 all pass -> wrap-up
-  assert.deepEqual(texts(room).slice(0, 1), ['you']);
-  assert.deepEqual(new Set(texts(room).slice(1, 3)), new Set(['bravo', 'forge-coder']));
-  assert.equal(texts(room)[3], 'alpha');
-  assert.ok(room.messages.some((m) => m.from === 'bravo' && /Building on/.test(m.text)), 'a member replies to another member in the open');
-  const last = room.messages[room.messages.length - 1];
-  assert.equal(last.from, 'alpha');
-  assert.ok(last.final, 'the lead closes with the final answer');
-  assert.ok(!/^FINAL/i.test(last.text), 'the FINAL marker is not shown');
-  assert.equal(room.messages.filter((m) => m.final).length, 1);
-  assert.ok(log.some((l) => l.round === 3), 'a second full round happened before the wrap-up');
+test('open discussion: everyone replies, members build on each other, and it ends when a whole round is PASS: no final answer, no wrap-up', async () => {
+  const s = setup('Should we ship Thursday?');
+  const prompts: string[] = [];
+  const reason = await run(s, { async turn(a, p) { prompts.push(p); return scriptedReply(p); } });
+  assert.equal(reason, 'passed');
+  // round 1: bravo + forge-coder (in parallel), then the lead alpha; round 2: bravo builds on forge-coder; round 3: all pass
+  assert.equal(who(s.room)[0], 'you');
+  assert.deepEqual(new Set(who(s.room).slice(1, 3)), new Set(['bravo', 'forge-coder']));
+  assert.equal(who(s.room)[3], 'alpha');
+  assert.ok(s.room.messages.some((m) => m.from === 'bravo' && /Building on/.test(m.text)), 'a member replies to another member in the open');
+  assert.equal(who(s.room).length, 5, 'nothing is posted after the last real reply');
+  assert.ok(!s.room.messages.some((m) => 'final' in m), 'no final bubble');
+  assert.ok(!prompts.some((p) => /FINAL|WRAP-UP/i.test(p)), 'no prompt asks for a final answer');
+  assert.equal(Math.max(...prompts.map((p) => Number(/It is round (\d+)\./.exec(p)?.[1] ?? 1))), 3);
 });
 
-test('every member sees the whole discussion so far in later rounds', async () => {
+test('every member sees the whole discussion so far, and is told to PASS when it has nothing to add; the lead moderates instead of concluding', async () => {
   const prompts: string[] = [];
-  const t: RoomTransport = { async turn(a, p) { prompts.push(p); return scriptedReply(p); } };
-  const { room, hooks, trigger } = setup('Should we ship Thursday?');
-  await runDiscussion(room, M, trigger, t, hooks, new AbortController().signal);
+  const t: RoomTransport = { async turn(_a, p) { prompts.push(p); return scriptedReply(p); } };
+  await run(setup('Should we ship Thursday?'), t);
   const round2 = prompts.find((p) => /It is round 2\./.test(p) && /You are Forge Coder/.test(p))!;
   assert.match(round2, /Alpha: Alpha here/);
   assert.match(round2, /Bravo: Bravo here/);
   assert.match(round2, /Reply if you can add something/);
-  assert.ok(!/FINAL:/.test(prompts.find((p) => /It is round 1\./.test(p) && /You are Alpha/.test(p))!), 'no FINAL instruction in round 1');
-  assert.ok(!/FINAL:/.test(prompts.find((p) => /You are Forge Coder/.test(p))!), 'members never get the FINAL instruction');
+  assert.match(round2, /reply exactly PASS/);
+  assert.match(round2, /ends when everyone passes/);
+  const lead = prompts.find((p) => /It is round 2\./.test(p) && /You are Alpha/.test(p))!;
+  assert.match(lead, /You are the lead: you moderate this discussion/);
+  assert.match(lead, /You do not conclude the discussion/);
+  assert.ok(!/You are the lead/.test(round2), 'members do not get the lead instructions');
 });
 
-test('the lead may end it early with FINAL in round 2, never in round 1', async () => {
-  const early = setup('earlyfinal: ship?');
-  assert.equal(await runDiscussion(early.room, M, early.trigger, scripted, early.hooks, new AbortController().signal), 'complete');
-  assert.ok(early.room.messages.at(-1)!.final);
-  assert.equal(early.room.messages.at(-1)!.round, 2);
-  const t: RoomTransport = { async turn(a) { return a === 'alpha' ? 'FINAL: done already' : 'my take'; } };
-  const r1 = setup('ship?');
-  await runDiscussion(r1.room, M, r1.trigger, t, r1.hooks, new AbortController().signal, { maxRounds: 1 });
-  const lead = r1.room.messages.filter((m) => m.from === 'alpha');
-  assert.equal(lead[0].final, undefined, 'a round-1 FINAL is just a message');
-  assert.equal(lead[0].text, 'done already');
+test('a quiet round of short acknowledgements is NOT cut off: only PASS ends it', async () => {
+  let round2 = 0;
+  const t: RoomTransport = { async turn(a, p) { const r = Number(/It is round (\d+)\./.exec(p)?.[1] ?? 1); if (r === 2) round2++; return r <= 3 ? (a === 'alpha' ? 'PASS' : 'Agreed.') : 'PASS'; } };
+  const s = setup('ship?');
+  assert.equal(await run(s, t), 'passed');
+  assert.ok(round2 >= 2, 'round 2 still ran: "Agreed." is a reply');
+  assert.ok(s.room.messages.filter((m) => m.text === 'Agreed.').length >= 6, 'rounds 1-3 each had two agreeing replies');
 });
 
-test('everyone passing ends the discussion with a lead wrap-up', async () => {
-  const t: RoomTransport = { async turn(a, p) { return /WRAP-UP/.test(p) ? 'FINAL: nothing to add; go.' : /round 1/.test(p) ? 'My take: the migration is additive so rollback is cheap, but the backfill still needs an owner.' : 'PASS'; } };
-  const { room, hooks, trigger } = setup('ship?');
-  await runDiscussion(room, M, trigger, t, hooks, new AbortController().signal);
-  assert.equal(room.messages.at(-1)!.final, true);
-  assert.equal(room.messages.at(-1)!.round, 2); // round 1 replies, round 2 all pass, then the wrap-up
+test('there is no round cap: a long discussion keeps going until a round of PASS', async () => {
+  let rounds = 0;
+  const t: RoomTransport = { async turn(a, p) { const r = Number(/It is round (\d+)\./.exec(p)?.[1] ?? 1); rounds = Math.max(rounds, r); return r < 60 ? `${a} point number ${r}` : 'PASS'; } };
+  const s = setup('long one');
+  assert.equal(await run(s, t), 'passed');
+  assert.equal(rounds, 60);
+  assert.ok(!s.room.messages.some((m) => m.from === 'system'), 'no cap note');
 });
 
-test('a runaway conversation hits the silent backstop and the lead still wraps up, with no note about it', async () => {
-  const { room, hooks, trigger } = setup('pingpong please');
-  let turns = 0;
-  const t: RoomTransport = { async turn(a, p) { turns++; return /WRAP-UP/.test(p) ? 'FINAL: wrapped.' : scriptedReply(p); } };
-  assert.equal(await runDiscussion(room, M, trigger, t, hooks, new AbortController().signal, { maxRounds: 4 }), 'complete');
-  assert.equal(room.messages.at(-1)!.final, true);
-  assert.ok(!room.messages.some((m) => m.from === 'system'), 'nothing about the cap is shown');
-  assert.ok(turns <= 4 * M.length + 1);
+test('the lead may steer by @mention and a steering lead keeps the discussion going; a lead that summarises on request is a normal message', async () => {
+  const t: RoomTransport = { async turn(a, p) {
+    const r = Number(/It is round (\d+)\./.exec(p)?.[1] ?? 1);
+    if (a === 'alpha') return r === 1 ? 'My take is to ship.' : r === 2 ? '@bravo can you size the rollback?' : r === 3 ? 'Summary for Zach: ship Thursday behind the flag, bravo owns rollback.' : 'PASS';
+    return r === 1 ? 'Take.' : r === 3 ? 'Rollback is a day of work.' : 'PASS';
+  } };
+  const s = setup('ship? summary please');
+  assert.equal(await run(s, t), 'passed');
+  const sum = s.room.messages.find((m) => /Summary for Zach/.test(m.text))!;
+  assert.equal(sum.from, 'alpha');
+  assert.ok(!('final' in sum));
 });
 
-test('an @mention to Zach\'s message is a direct question: only they reply, handoffs pull others in, no lead wrap-up', async () => {
-  const { room, hooks, trigger } = setup('@bravo status?');
-  assert.equal(await runDiscussion(room, M, trigger, scripted, hooks, new AbortController().signal), 'complete');
-  assert.deepEqual(texts(room), ['you', 'bravo']);
+test("an @mention in Zach's message is a direct question: only they reply, handoffs pull others in", async () => {
+  const s = setup('@bravo status?');
+  assert.equal(await run(s), 'complete');
+  assert.deepEqual(who(s.room), ['you', 'bravo']);
   const hand: RoomTransport = { async turn(a, p) { return a === 'bravo' && /round 1/.test(p) ? '@forge-coder can you check?' : a === 'forge-coder' ? 'Checked: fine.' : 'PASS'; } };
   const h = setup('@bravo status?');
-  await runDiscussion(h.room, M, h.trigger, hand, h.hooks, new AbortController().signal);
-  assert.deepEqual(texts(h.room), ['you', 'bravo', 'forge-coder']);
+  await run(h, hand);
+  assert.deepEqual(who(h.room), ['you', 'bravo', 'forge-coder']);
 });
 
-test('a failing agent becomes a system note and the discussion goes on; Stop cancels', async () => {
+test('a failing agent becomes a system note and counts as a pass; Stop cancels', async () => {
   const t: RoomTransport = { async turn(a, p) { if (a === 'bravo') throw new Error('boom'); return scriptedReply(p); } };
-  const { room, hooks, trigger } = setup('ship?');
-  assert.equal(await runDiscussion(room, M, trigger, t, hooks, new AbortController().signal), 'complete');
-  assert.ok(room.messages.some((m) => m.from === 'system' && /Bravo did not answer: boom/.test(m.text)));
-  assert.ok(room.messages.at(-1)!.final);
-  const ac = new AbortController();
   const s = setup('ship?');
-  const slow: RoomTransport = { turn: (a, p, sig) => new Promise((res, rej) => { sig.addEventListener('abort', () => rej(new Error('cancelled'))); setTimeout(() => ac.abort(), 5); }) };
-  assert.equal(await runDiscussion(s.room, M, s.trigger, slow, s.hooks, ac.signal), 'cancelled');
+  assert.equal(await run(s, t), 'passed');
+  assert.ok(s.room.messages.some((m) => m.from === 'system' && /Bravo did not answer: boom/.test(m.text)));
+  const down: RoomTransport = { async turn() { throw new Error('down'); } };
+  assert.equal(await run(setup('ship?'), down), 'passed', 'everyone failing ends the run instead of looping');
+  const ac = new AbortController();
+  const aborted: string[] = [];
+  const p = setup('pingpong forever');
+  const slow: RoomTransport = { turn: (_a, _p, sig) => new Promise<string>((_res, rej) => { sig.addEventListener('abort', () => rej(new Error('cancelled'))); setTimeout(() => ac.abort(), 5); }), abort: (id) => { aborted.push(id); } };
+  assert.equal(await runDiscussion(p.room, M, p.trigger, slow, p.hooks, ac.signal), 'cancelled');
+  assert.deepEqual(aborted.sort(), ['bravo', 'forge-coder']);
 });
 
 test('a one-member room just answers once; the prompt carries the whole thread', async () => {
   const one = setup('hello?', [M[0]]);
-  assert.equal(await runDiscussion(one.room, [M[0]], one.trigger, scripted, one.hooks, new AbortController().signal), 'complete');
-  assert.deepEqual(texts(one.room), ['you', 'alpha']);
+  assert.equal(await run(one, scripted, [M[0]]), 'complete');
+  assert.deepEqual(who(one.room), ['you', 'alpha']);
   const { room, trigger } = setup('q', M, 'alpha');
   room.messages.push({ id: 'x', ts: 9, from: 'bravo', text: 'first reply' });
   const p = memberPrompt({ room, members: M, agent: M[1], lead: M[0], trigger, round: 2, directed: false });

@@ -7,7 +7,7 @@
 //   POST /api/send?source=..   {key, message}  ("Message agent": one Gateway sessions.send; needs header x-agent-os-send: 1)
 //   GET  /api/rooms            rooms + the live agent list (PHI excluded)      GET /api/rooms/:id   one room with its thread and run state
 //   POST /api/rooms {name, members, captain?}   create             POST /api/rooms/:id {name?, addMembers?, removeMembers?, archived?, captain?}
-//   POST /api/rooms/:id/send {message}   starts an open discussion: every member replies, then rounds of reply-or-PASS; the lead (captain) moderates and posts the final answer
+//   POST /api/rooms/:id/send {message}   starts an open discussion: every member replies, then rounds of reply-or-PASS; the lead (captain) moderates; it ends when a whole round is PASS or on Stop
 //   POST /api/rooms/:id/stop   aborts every in-flight member run (chat.abort, room sessions only)
 //   Room writes use the same guard as /api/send (JSON + x-agent-os-send: 1, same body cap).
 // Every payload passes through redactDeep() before it is written.

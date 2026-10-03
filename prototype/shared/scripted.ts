@@ -6,8 +6,8 @@ export const triggerText = (prompt: string) => /Zach's message:\n([\s\S]*?)\n\nD
 
 /**
  * Deterministic stand-in for an agent turn in an open discussion. Round 1: everyone gives a take. Round 2: the first non-lead member builds on another member,
- * everyone else passes. Round 3: everyone passes, so the discussion goes quiet and the lead wraps up with FINAL:.
- * Cues in Zach's message: "pingpong" (everyone @mentions the next member every round), "quiet" (bravo passes from round 2), "earlyfinal" (the lead posts FINAL in round 2),
+ * everyone else passes. Round 3: everyone passes, so the discussion ends.
+ * Cues in Zach's message: "pingpong" (everyone @mentions the next member every round, forever: use Stop), "quiet" (bravo passes from round 2),
  * "richmd" (Markdown-heavy replies).
  */
 export function scriptedReply(prompt: string): string {
@@ -22,10 +22,9 @@ export function scriptedReply(prompt: string): string {
   const rich = /richmd/i.test(text);
   const isLead = !!leadId && id === leadId;
   const others = ids.filter((x) => x !== id);
-  if (/WRAP-UP/.test(prompt)) return `FINAL: ${rich ? RICH_MD.replace('@FIRST', `@${others[0] ?? id}`) : `Proceed behind a flag. The members agree on the approach, and ${others[0] ?? 'the room'} added a rollback owner before we ship.`}`;
   if (/pingpong/i.test(text)) return `@${others[(ids.indexOf(id) + 1) % Math.max(1, others.length)] ?? others[0]} pingpong`;
   if (round === 1) return rich ? RICH_MD.replace('@FIRST', `@${others[0] ?? id}`) : `${name} here. On "${topic}": noted, nothing blocking from my side.`;
-  if (isLead) return /earlyfinal/i.test(text) ? 'FINAL: Ship it behind the flag; everyone is aligned.' : PASS_TOKEN;
+  if (isLead) return PASS_TOKEN;
   if (/quiet/i.test(text) && id === 'bravo') return PASS_TOKEN;
   const nonLead = ids.filter((x) => x !== leadId);
   if (round === 2 && id === nonLead[0]) return `Building on @${others.find((x) => x !== leadId) ?? others[0] ?? id}: I would add an owner for the rollback and a dry run on a copy before we flip the flag.`;

@@ -100,7 +100,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     const msgs = room.messages.map((m) => {
       if (m.from === 'system') return `<div class="rm-sys">${esc(m.text)}</div>`;
       const w = who(m.from);
-      return `<div class="rm-msg${m.from === YOU ? ' me' : ''}${m.final ? ' final' : ''}">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b>${m.final ? '<span class="rm-rnd">final answer</span>' : ''}<time>${fmtHM(m.ts)}</time></div><div class="rm-text md">${mentionize(m.text, room)}</div></div></div>`;
+      return `<div class="rm-msg${m.from === YOU ? ' me' : ''}">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b><time>${fmtHM(m.ts)}</time></div><div class="rm-text md">${mentionize(m.text, room)}</div></div></div>`;
     }).join('');
     // Agents with a turn in flight show as typing bubbles at the end of the thread, like a group chat.
     const typing = (run?.status === 'running' ? run.active ?? [] : []).map((id) => {
@@ -130,14 +130,14 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
         </div>
       </header>
       <div class="rm-members">
-        ${view.members.map((a) => `<span class="rm-chip${a.id === room.captain ? ' captain' : ''}" title="${a.id === room.captain ? 'Lead: moderates and posts the final answer' : ''}">${avatarHtml(a.id, a.name, a.emoji, 'sm')}<span>${esc(a.name)}</span>${a.id === room.captain && view!.members.length > 1 ? '<small class="rm-cap">lead</small>' : ''}<button data-remove="${esc(a.id)}" title="Remove ${esc(a.name)}" aria-label="Remove ${esc(a.name)}" ${running ? 'disabled' : ''}>${svg('close', 12)}</button></span>`).join('') || '<span class="muted">No agents in this room.</span>'}
+        ${view.members.map((a) => `<span class="rm-chip${a.id === room.captain ? ' captain' : ''}" title="${a.id === room.captain ? 'Lead: moderates the discussion' : ''}">${avatarHtml(a.id, a.name, a.emoji, 'sm')}<span>${esc(a.name)}</span>${a.id === room.captain && view!.members.length > 1 ? '<small class="rm-cap">lead</small>' : ''}<button data-remove="${esc(a.id)}" title="Remove ${esc(a.name)}" aria-label="Remove ${esc(a.name)}" ${running ? 'disabled' : ''}>${svg('close', 12)}</button></span>`).join('') || '<span class="muted">No agents in this room.</span>'}
         ${room.members.length < MAX_MEMBERS && nonMembers.length ? `<button class="rm-add" data-act="add-toggle" ${running ? 'disabled' : ''}>${svg('plus', 12)}<span>Add agent</span></button>` : ''}
         <span class="grow"></span>
-        <span class="rm-limits" title="The lead moderates the discussion and posts the final answer. An @mention in your message goes straight to that agent.">
+        <span class="rm-limits" title="The lead moderates the discussion. An @mention in your message goes straight to that agent.">
           lead <select data-set="captain" class="wide" aria-label="Discussion lead" ${running ? 'disabled' : ''}>${view.members.map((a) => `<option value="${esc(a.id)}" ${a.id === room.captain ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></span>
       </div>
       ${adding ? `<div class="rm-addbox">${agentPicker(new Set(), room.members, 'data-addpick')}<div class="rm-actions"><button class="rm-ghost sm" data-act="add-close">Done</button></div></div>` : ''}
-      <div class="rm-thread" tabindex="0">${msgs || typing ? msgs + typing : '<div class="rm-blank small"><span>No messages yet. Ask something: every agent replies, they talk it through together, and the lead posts the answer. <span class="rm-at">@name</span> goes straight to just that agent.</span></div>'}</div>
+      <div class="rm-thread" tabindex="0">${msgs || typing ? msgs + typing : '<div class="rm-blank small"><span>No messages yet. Ask something: every agent replies and they talk it through together until nobody has more to add. <span class="rm-at">@name</span> goes straight to just that agent.</span></div>'}</div>
       <footer class="rm-compose">
         <div class="rm-status">${status}</div>
         <div class="rm-mentions">${view.members.map((a) => `<button class="rm-mention" data-mention="${esc(a.id)}">@${esc(a.id)}</button>`).join('')}</div>

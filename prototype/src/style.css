@@ -547,13 +547,11 @@ button.who-btn:hover { background: color-mix(in srgb, var(--fg) 6%, transparent)
 .md input[type=checkbox] { margin: 0 6px 0 0; vertical-align: -1px; }
 .m-text.md, .a2a-text.md { max-width: none; }
 
-/* Open discussion: typing bubbles while an agent is composing, and the lead's final answer */
+/* Open discussion: typing bubbles while an agent is composing, */
 .rm-msg.pending .rm-body { border-style: dashed; opacity: 0.85; }
 .rm-typing i + i { animation-delay: 0.2s; }
 .rm-typing i + i + i { animation-delay: 0.4s; }
 .rm-msg.pending .rm-typing i { width: 6px; height: 6px; }
-.rm-msg.final .rm-body { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
-.rm-msg.final .rm-rnd { color: var(--accent-text); }
 .rm-note-prev { overflow-wrap: anywhere; }
 
 /* ---------- Board (read-only Workboard columns) ---------- */

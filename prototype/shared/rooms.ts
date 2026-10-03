@@ -1,22 +1,18 @@
 // Group rooms: an OPEN DISCUSSION, like a group chat. Pure logic, no I/O: the server injects a transport (real Gateway sessions or a fake) so the loop is unit-testable.
-//   - Zach posts; every member replies in the shared thread (round 1, in parallel, as each one finishes its bubble appears).
+//   - Zach posts; every member replies in the shared thread (round 1, in parallel; each bubble lands as soon as that agent finishes).
 //   - Every next round, every member sees the whole discussion so far and either replies (builds on it, disagrees, @mentions a member) or says PASS.
-//   - The lead (room.captain) speaks last in each round and moderates: it can steer by addressing members, and posts the FINAL answer once the discussion has converged.
-//   - The run ends when the lead posts its final answer, or after a round where nobody adds anything new (the lead then wraps up), or when Zach hits Stop.
-//     A generous silent backstop (MAX_DISCUSSION_ROUNDS) keeps a runaway conversation finite; nothing about it is shown.
-//   - A message that @mentions members is a direct question: only they reply, and replies that @mention others pull those in (no lead wrap-up).
+//   - The lead (room.captain) is a normal member that also moderates: it speaks last in each round and steers by addressing members. It does not conclude the discussion.
+//   - The run ends only when a whole round is PASS (agents decide that themselves), or when Zach hits Stop. There is no round cap and no word-overlap heuristic.
+//   - A message that @mentions members is a direct question: only they reply, and replies that @mention others pull those in.
 
 // Rooms ask for "PASS", not OpenClaw's NO_REPLY: in a direct session the Gateway treats an exact NO_REPLY as a failed turn and re-prompts
 // the agent ("The previous attempt did not produce a user-visible answer"), which would burn a turn and force an answer. NO_REPLY is still accepted as a pass.
 export const PASS_TOKEN = 'PASS';
-export const FINAL_MARK = 'FINAL:';
 export const MAX_MEMBERS = 16;
 export const MAX_ROOMS = 50;
 export const MAX_ROOM_NAME = 60;
 export const MAX_MESSAGE_CHARS = 4000;
 export const MAX_STORED_MESSAGES = 400;
-/** Silent backstop on discussion rounds (never shown). */
-export const MAX_DISCUSSION_ROUNDS = 20;
 const CONTEXT_MESSAGES = 6;
 const CONTEXT_ITEM_CHARS = 600;
 const DISCUSSION_ITEM_CHARS = 1500;
@@ -38,15 +34,13 @@ export interface RoomMessage {
   from: string;
   text: string;
   round?: number;
-  /** The lead's final answer: the discussion converged (or went quiet) and this is the answer for Zach. */
-  final?: boolean;
 }
 export interface RoomSettings { mentionGating: boolean }
 export interface Room extends RoomSettings {
   id: string;
   name: string;
   members: string[]; // agent ids, join order
-  /** The lead who moderates and posts the final answer: always one of `members` (or '' for an empty room). */
+  /** The lead who moderates (a normal member otherwise): always one of `members` (or '' for an empty room). */
   captain: string;
   archived: boolean;
   createdAt: number;
@@ -79,15 +73,15 @@ export function resolveCaptain(saved: unknown, members: string[]): string {
 }
 
 /**
- * Load a stored room from any earlier version. The captain-led pipeline's fields (mode, maxRounds, maxSteps, councils, turn/timeout caps) are dropped, and
- * a former council answer becomes a normal final bubble. Nothing is written until the room's next normal save.
+ * Load a stored room from any earlier version. The captain-led pipeline's fields (mode, maxRounds, maxSteps, councils, turn/timeout caps) and the
+ * per-message council/final flags are dropped: every message is a normal bubble. Nothing is written until the room's next normal save.
  */
 export function migrateRoom(r: Room): Room {
   const { maxTurns: _t, memberTimeoutSec: _m, noLimitMigrated: _n, maxRounds: _r, maxSteps: _s, mode: _mode, councils: _c, ...rest } =
     r as Room & { maxTurns?: number; memberTimeoutSec?: number; noLimitMigrated?: boolean; maxRounds?: number; maxSteps?: number; mode?: string; councils?: unknown };
   const messages = (r.messages ?? []).map((m) => {
-    const { council, ...msg } = m as RoomMessage & { council?: string };
-    return council ? { ...msg, final: true } : msg;
+    const { council: _c, final: _f, ...msg } = m as RoomMessage & { council?: string; final?: boolean };
+    return msg;
   });
   return { ...rest, ...normalizeSettings(r), captain: resolveCaptain(r.captain, r.members), messages };
 }
@@ -117,24 +111,6 @@ export const isPass = (reply: string | null | undefined) => {
   const t = (reply ?? '').trim();
   return !t || /^(PASS|NO_REPLY)[.!]?$/i.test(t);
 };
-
-/** A reply that starts with "FINAL:" is the lead's final answer. Returns the text without the marker. */
-export function parseFinal(reply: string): { final: boolean; text: string } {
-  const m = /^\s*FINAL:\s*/i.exec(reply);
-  return m ? { final: true, text: reply.slice(m[0].length).trim() } : { final: false, text: reply.trim() };
-}
-
-const words = (s: string) => new Set(s.toLowerCase().match(/[a-z0-9']{3,}/g) ?? []);
-/** "Adds nothing new": a bare acknowledgement, or a reply whose words were nearly all already said in the discussion. */
-export function addsNothingNew(reply: string, prior: string[]): boolean {
-  const mine = words(reply);
-  if (mine.size <= 5) return true;
-  const seen = new Set<string>();
-  for (const p of prior) for (const w of words(p)) seen.add(w);
-  let known = 0;
-  for (const w of mine) if (seen.has(w)) known++;
-  return known / mine.size >= 0.85;
-}
 
 const clipText = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
@@ -177,18 +153,11 @@ export function memberPrompt(c: PromptCtx): string {
   const isLead = !c.directed && c.agent.id === c.lead.id && c.members.length > 1;
   const body = c.round === 1
     ? `It is round 1. Give your own take on Zach's message. The others are answering at the same time and have not seen your reply yet.`
-    : `It is round ${c.round}. You have now seen what everyone said. Reply if you can add something: build on a point, disagree with someone, answer a question, or hand something to a member with @id. If you have nothing new to add, reply exactly ${PASS_TOKEN}.`;
+    : `It is round ${c.round}. You have now seen what everyone said. Reply if you can add something: build on a point, disagree with someone, answer a question, or hand something to a member with @id. If you have nothing to add, reply exactly ${PASS_TOKEN}. Do not repeat or just agree with what is already said: the discussion ends when everyone passes in the same round.`;
   const lead = isLead
-    ? c.round === 1
-      ? ` You are the lead: you moderate this discussion. For now just give your take.`
-      : ` You are the lead: you moderate this discussion. Steer it by addressing members with @id when someone should dig in. When the discussion has converged, post the final answer for Zach: start your reply with ${FINAL_MARK} and write the answer in full, folding in the members' points and any disagreement that remains. Do not post ${FINAL_MARK} while members are still mid-exchange.`
+    ? ` You are the lead: you moderate this discussion, as a member who also takes part. Keep it moving: address members with @id when someone should dig in, point out where two members disagree, ask for what is missing. You do not conclude the discussion; when there is nothing left to steer, reply exactly ${PASS_TOKEN}. If Zach asks for a summary, write it as a normal message.`
     : '';
   return [promptHead(c), `${body}${lead}`, TALK].join('\n\n');
-}
-
-/** The discussion went quiet: the lead posts the answer. */
-export function wrapUpPrompt(c: PromptCtx): string {
-  return [promptHead(c), `The discussion has gone quiet. WRAP-UP: post the final answer for Zach now. Start your reply with ${FINAL_MARK}, then write the answer in full, folding in the members' points and noting any disagreement that remains.`].join('\n\n');
 }
 
 export interface RoomTransport {
@@ -201,12 +170,9 @@ export interface RunHooks {
   append(msg: Omit<RoomMessage, 'id' | 'ts'>): RoomMessage;
   state(patch: Partial<RoomRunState>): void;
 }
-export interface DiscussionOpts { maxRounds?: number }
-
-/** One Zach message -> an open discussion. Never throws for an agent failure: it becomes a system note and the turn is spent. */
-export async function runDiscussion(room: Room, members: RoomMember[], trigger: RoomMessage, transport: RoomTransport, hooks: RunHooks, signal: AbortSignal, opts: DiscussionOpts = {}): Promise<RoomRunState['stopReason']> {
+/** One Zach message -> an open discussion. Never throws for an agent failure: it becomes a system note and counts as a pass. */
+export async function runDiscussion(room: Room, members: RoomMember[], trigger: RoomMessage, transport: RoomTransport, hooks: RunHooks, signal: AbortSignal): Promise<RoomRunState['stopReason']> {
   if (!members.length) return 'complete';
-  const maxRounds = opts.maxRounds ?? MAX_DISCUSSION_ROUNDS;
   const lead = members.find((m) => m.id === room.captain) ?? members[0];
   const byId = new Map(members.map((m) => [m.id, m]));
   const order = members.map((m) => m.id);
@@ -230,60 +196,45 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
     } finally { signal.removeEventListener('abort', onAbort); active.delete(agentId); publish(); }
   }
   const ctxFor = (agentId: string, round: number): PromptCtx => ({ room, members, agent: byId.get(agentId)!, lead, trigger, round, directed });
-  const priorTexts = () => room.messages.filter((m) => m.from !== 'system' && m.id !== trigger.id).map((m) => m.text);
-
-  /** The lead's closing answer. */
-  async function wrapUp(round: number): Promise<void> {
-    const reply = await ask(lead.id, wrapUpPrompt(ctxFor(lead.id, round)), round);
-    if (isPass(reply)) { hooks.append({ from: 'system', text: `${lead.name} could not wrap up the discussion.`, round }); return; }
-    hooks.append({ from: lead.id, text: parseFinal(reply!).text, round, final: true });
-  }
 
   try {
     let targets = directed ? mentionedByZach! : order;
-    for (let round = 1; round <= maxRounds; round++) {
+    for (let round = 1; ; round++) {
       hooks.state({ round });
       if (signal.aborted) return 'cancelled';
       const others = targets.filter((id) => !(open && id === lead.id));
       // Everyone but the lead answers at once; each bubble lands as soon as that agent finishes. The lead then answers having read them.
-      const posted: Array<{ id: string; text: string; fresh: boolean }> = [];
-      const prior = priorTexts();
+      const posted: Array<{ id: string; text: string }> = [];
       await Promise.all(others.map(async (id) => {
         const reply = await ask(id, memberPrompt(ctxFor(id, round)), round);
         if (isPass(reply)) return;
-        const text = parseFinal(reply!).text; // only the lead's FINAL means anything; strip a stray marker from a member
+        const text = reply!.trim();
         hooks.append({ from: id, text, round });
-        posted.push({ id, text, fresh: !addsNothingNew(text, prior) });
+        posted.push({ id, text });
       }));
       if (signal.aborted) return 'cancelled';
-
-      let leadSteered = false;
       if (open && targets.includes(lead.id)) {
         const reply = await ask(lead.id, memberPrompt(ctxFor(lead.id, round)), round);
         if (!isPass(reply)) {
-          const f = parseFinal(reply!);
-          if (f.final && round >= 2) { hooks.append({ from: lead.id, text: f.text, round, final: true }); return 'complete'; }
-          hooks.append({ from: lead.id, text: f.text, round });
-          leadSteered = (parseMentions(f.text, members.filter((m) => m.id !== lead.id))?.length ?? 0) > 0;
+          const text = reply!.trim();
+          hooks.append({ from: lead.id, text, round });
+          posted.push({ id: lead.id, text });
         }
       }
       if (signal.aborted) return 'cancelled';
 
+      if (!posted.length) return 'passed'; // a whole round of PASS: the discussion is over
       if (directed) {
         const mentioned = new Set<string>();
         for (const p of posted) for (const m of parseMentions(p.text, members.filter((x) => x.id !== p.id)) ?? []) mentioned.add(m);
+        if (!mentioned.size) return 'complete'; // answered, nobody was handed anything
         const next = new Set([...posted.map((p) => p.id), ...mentioned]);
         targets = order.filter((id) => next.has(id));
-        if (!posted.length) return 'passed';
-        if (!mentioned.size) return 'complete'; // answered, nobody was handed anything
         continue;
       }
       if (!open) return 'complete'; // a one-member room: one reply
-      const quiet = !posted.some((p) => p.fresh) && !leadSteered;
-      if (quiet || round === maxRounds) { await wrapUp(round); return 'complete'; }
       targets = order;
     }
-    return 'complete';
   } catch (e) {
     if (signal.aborted) return 'cancelled';
     throw e;

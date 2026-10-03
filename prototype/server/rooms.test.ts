@@ -9,13 +9,13 @@ import { createRoomsService, type RoomAgent, type RoomGateway } from './rooms.ts
 
 const AGENTS: RoomAgent[] = [{ id: 'rfc-lead', name: 'RFC Lead' }, { id: 'rfc-skeptic', name: 'RFC Skeptic' }, { id: 'rfc-scribe', name: 'RFC Scribe' }, { id: 'phi', name: 'PHI' }];
 function fakeGateway(delays: Record<string, number> = {}) {
-  const log: Array<{ agent: string; round: number; wrap: boolean }> = [];
+  const log: Array<{ agent: string; round: number }> = [];
   const aborted: string[] = [];
   const gw: RoomGateway = {
     async listAgents() { return AGENTS; },
     async ensureSession() {},
     async turn(agent, _room, prompt, signal) {
-      log.push({ agent, round: Number(/It is round (\d+)\./.exec(prompt)?.[1] ?? 1), wrap: /WRAP-UP/.test(prompt) });
+      log.push({ agent, round: Number(/It is round (\d+)\./.exec(prompt)?.[1] ?? 1) });
       await new Promise<void>((res, rej) => { const t = setTimeout(res, delays[agent] ?? 15); signal.addEventListener('abort', () => { clearTimeout(t); rej(new Error('cancelled')); }, { once: true }); });
       return scriptedReply(prompt);
     },
@@ -40,7 +40,7 @@ test('new rooms: the lead is rfc-lead when present, else the first member; no pi
   svc.close();
 });
 
-test('a message starts an open discussion: member bubbles in the thread, a second round, then the lead\'s final answer; persisted', async () => {
+test('a message starts an open discussion: member bubbles in the thread, a second round, and it ends when a whole round is PASS (no final answer); persisted', async () => {
   const dir = tmp();
   const file = join(dir, 'rooms.json');
   const { gw, log } = fakeGateway();
@@ -56,11 +56,9 @@ test('a message starts an open discussion: member bubbles in the thread, a secon
   assert.deepEqual(new Set(thread.slice(1, 3).map((m) => m.from)), new Set(['rfc-skeptic', 'rfc-scribe'])); // round 1: members in parallel
   assert.equal(thread[3].from, 'rfc-lead'); // then the lead's own round-1 take
   assert.ok(thread.some((m) => /Building on/.test(m.text)), 'members talk to each other');
-  const last = v.room.messages.at(-1)!;
-  assert.equal(last.from, 'rfc-lead');
-  assert.equal(last.final, true);
-  assert.equal(v.room.messages.filter((m) => m.final).length, 1);
-  assert.ok(log.filter((l) => l.wrap).length === 1);
+  assert.ok(v.room.messages.every((m) => !('final' in m)), 'no final bubble');
+  assert.equal(Math.max(...log.map((l) => l.round)), 3); // round 3 was all PASS: that ended it
+  assert.equal(v.run?.stopReason, 'passed');
   assert.equal(v.run?.status, 'done');
   assert.deepEqual(v.run?.active, []);
   assert.ok(!('councils' in v.room));
@@ -101,7 +99,6 @@ test('while members are working the run state lists them as typing; Stop aborts 
   assert.deepEqual([...aborted].sort(), ['rfc-scribe', 'rfc-skeptic']);
   const v = await svc.get(room.id);
   assert.equal(v.run?.status, 'stopped');
-  assert.equal(v.room.messages.filter((m) => m.final).length, 0);
   svc.close();
 });
 
@@ -111,7 +108,7 @@ test('phi stays refused', async () => {
   svc.close();
 });
 
-test('old rooms.json (captain-led council, with mode/steps/councils and the retired caps) loads as a plain discussion room; nothing is written on load', async () => {
+test('old rooms.json (captain-led council, with mode/steps/councils and the retired caps) loads as a plain discussion room (no council or final flags); nothing is written on load', async () => {
   const dir = tmp();
   const file = join(dir, 'rooms.json');
   const old = {
@@ -129,7 +126,7 @@ test('old rooms.json (captain-led council, with mode/steps/councils and the reti
   const rfc = (await svc.get('rc1cabea9')).room as unknown as Record<string, unknown> & { messages: Array<Record<string, unknown>> };
   for (const k of ['mode', 'maxRounds', 'maxSteps', 'councils', 'maxTurns', 'memberTimeoutSec', 'noLimitMigrated']) assert.ok(!(k in rfc), k);
   assert.equal(rfc.captain, 'rfc-lead');
-  assert.deepEqual(rfc.messages[1], { id: 'm2', ts: 2, from: 'rfc-lead', text: 'answer', final: true });
+  assert.deepEqual(rfc.messages[1], { id: 'm2', ts: 2, from: 'rfc-lead', text: 'answer' });
   const other = (await svc.get('r11111111')).room;
   assert.equal(other.captain, 'forge');
   assert.equal(other.mentionGating, false);
