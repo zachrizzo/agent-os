@@ -2,6 +2,7 @@
 import { COS_ID, TEAM_PALETTE, type Agent, type Delta, type EventKind, type FleetEvent, type HistoryItem, type Snapshot, type Team } from '../shared/types.ts';
 import { parseInterSession, shortSession } from '../shared/a2a.ts';
 import { RICH_MD, scriptedReply, triggerText } from '../shared/scripted.ts';
+import type { BoardCard } from '../shared/board.ts';
 import { createRoomsService, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
 
@@ -270,6 +271,19 @@ export function createMockSource(): Source {
       sentLog.set(key, [...(sentLog.get(key) ?? []), { role: 'user', ts, text: message }]);
       push({ ts, from: 'zach', to: key, kind: 'message', text: message, session: key });
       a.updatedAt = ts; changed.add(key);
+    },
+    async board(): Promise<BoardCard[]> {
+      const now = Date.now();
+      const h = 3_600_000;
+      const c = (id: string, board: 'spark' | 'forge', title: string, agent: string, status: string, ageH: number, priority = 'normal'): BoardCard =>
+        ({ id, board, title, agent, status, priority, createdAt: now - ageH * h * 1.5, updatedAt: now - ageH * h });
+      return [
+        c('m1', 'spark', 'Room thread scroll jumps to top', 'spark', 'done', 3), c('m2', 'spark', 'Board view: Spark + Forge work', 'spark', 'running', 0.3, 'high'),
+        c('m3', 'spark', 'Room toolbar like a native chat header', 'spark', 'todo', 0.2), c('m4', 'spark', 'Voice tab: stop button after talk', 'spark', 'review', 26),
+        c('m5', 'forge', 'Converge support agent and classifier', 'forge-qa', 'blocked', 50, 'high'), c('m6', 'forge', 'Enforce pipeline steps in code', 'forge-coder', 'running', 2),
+        c('m7', 'forge', 'Council captain-led steering', 'forge-reviewer', 'review', 5), c('m8', 'forge', 'Hide finished sessions on the map', 'forge-coder', 'done', 30),
+        c('m9', 'forge', 'Replay scrubber + resource meters', '', 'backlog', 70), c('m10', 'forge', 'Focus mode + write actions', '', 'backlog', 90, 'low'),
+      ];
     },
     close() { clearInterval(t1); clearInterval(t2); clearInterval(t3); rooms.close(); },
   };

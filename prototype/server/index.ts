@@ -3,6 +3,7 @@
 //   GET /api/snapshot?source=live|mock
 //   GET /api/stream?source=live|mock      (SSE: "snapshot" once, then "delta")
 //   GET /api/history?source=..&key=<sessionKey>
+//   GET /api/board?source=..           read-only Workboard cards (boards spark + forge) for the Board view
 //   POST /api/send?source=..   {key, message}  ("Message agent": one Gateway sessions.send; needs header x-agent-os-send: 1)
 //   GET  /api/rooms            rooms + the live agent list (PHI excluded)      GET /api/rooms/:id   one room with its thread and run state
 //   POST /api/rooms {name, members, captain?}   create             POST /api/rooms/:id {name?, addMembers?, removeMembers?, archived?, captain?}
@@ -108,6 +109,11 @@ const server = createServer(async (req, res) => {
       const s = source(src);
       await s.ready;
       return json(res, 200, s.snapshot());
+    }
+    if (url.pathname === '/api/board') {
+      const s = source(src);
+      await s.ready;
+      return json(res, 200, { ts: Date.now(), cards: await s.board() });
     }
     if (url.pathname === '/api/history') {
       const key = url.searchParams.get('key') ?? '';

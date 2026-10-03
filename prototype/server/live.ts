@@ -9,12 +9,13 @@ import { COS_ID, TEAM_PALETTE, type Agent, type AgentStatus, type Delta, type Ev
 import { parseInterSession, shortSession } from '../shared/a2a.ts';
 import { attentionEvent, deriveSessionEvents, mergeEvents, sessionMetaOf, spawnEvent, openNeedsOf, type RawMessage } from '../shared/activity.ts';
 import { classifySession, isRunning } from '../shared/liveness.ts';
+import { BOARDS, normalizeCard, type BoardCard } from '../shared/board.ts';
 import { isExcludedAgent } from '../shared/rooms.ts';
 import { redact } from './redact.ts';
 import { createRoomsService, isRoomKey, roomSessionKey, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
 
-const READ_METHODS = new Set(['sessions.list', 'agents.list', 'chat.history', 'usage.cost']);
+const READ_METHODS = new Set(['sessions.list', 'agents.list', 'chat.history', 'usage.cost', 'workboard.cards.list']);
 const SEND_METHOD = 'sessions.send';
 const CREATE_METHOD = 'sessions.create'; // only for dedicated room sessions (agent:<id>:room-<roomId>), see call()
 const ABORT_METHOD = 'chat.abort'; // Stop / member timeout: only for dedicated room sessions, see call()
@@ -417,6 +418,10 @@ export function createLiveSource(): Source {
       const e = { ...ev(Date.now(), 'zach', key, 'message', message), session: key };
       mergeEvents(ring, [e], RING_MAX);
       broadcast({ ts: e.ts, upserts: [], removed: [], events: [e], meters: meters() });
+    },
+    async board(): Promise<BoardCard[]> {
+      const lists = await Promise.all(BOARDS.map(async (b) => ((await call('workboard.cards.list', { boardId: b }, 15_000)).cards ?? []).map((c: unknown) => normalizeCard(c, b))));
+      return lists.flat().filter((c): c is BoardCard => !!c);
     },
     close() { stopped = true; rooms.close(); },
     ready,

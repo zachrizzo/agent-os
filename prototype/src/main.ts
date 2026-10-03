@@ -8,6 +8,7 @@ import './style.css';
 
 import type { CreateMap, MapApi } from './contract';
 import { createStore, resolveSource } from './store';
+import { mountBoard } from './ui/board';
 import { mountActivity } from './ui/activity';
 import { mountCenter, mountPlaceholder } from './ui/center';
 import { mountDrawer } from './ui/drawer';
@@ -38,12 +39,18 @@ async function boot() {
   const renderRail = mountRail($('rail'), store, (sel) => { center.focus(sel); app.classList.remove('rail-open'); });
   let roomCount = 0;
   const rooms = mountRooms($('rooms'), store, (n) => { roomCount = n; renderTop.setRooms(n, rooms.isOpen()); });
+  const board = mountBoard($('board'), store);
   const renderTop = mountTopbar($('topbar'), store, {
     onNeeds: () => activity.showNeeds(),
     onMenu: () => app.classList.toggle('rail-open'),
-    onRooms: () => { rooms.toggle(); renderTop.setRooms(roomCount, rooms.isOpen()); },
+    onRooms: () => { board.hide(); renderTop.setBoard(false); rooms.toggle(); renderTop.setRooms(roomCount, rooms.isOpen()); },
+    onBoard: () => { rooms.hide(); renderTop.setRooms(roomCount, false); board.toggle(); renderTop.setBoard(board.isOpen()); },
   });
-  window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && rooms.isOpen() && !drawer.isOpen()) { rooms.hide(); renderTop.setRooms(roomCount, false); } });
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || drawer.isOpen()) return;
+    if (rooms.isOpen()) { rooms.hide(); renderTop.setRooms(roomCount, false); }
+    else if (board.isOpen()) { board.hide(); renderTop.setBoard(false); }
+  });
 
   store.subscribe(() => {
     const s = store.get();
