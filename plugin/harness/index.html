@@ -105,6 +105,7 @@ function showChat(sessionKey) {
   const title = document.createElement("span");
   title.className = "title";
   title.textContent = sessionKey === "agent:voice:main" ? "Voice" : "Chat · main";
+  title.title = sessionKey; // lets harness checks see which session the plugin opened
   header.append(title);
   for (const a of actions) {
     const r = a.resolve?.({ sessionKey }) ?? {};

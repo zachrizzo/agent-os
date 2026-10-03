@@ -50,4 +50,5 @@ test('poll repaint keeps scroll position when scrolled up, and follows new messa
   n = 7; await poll();
   assert.equal(th().scrollTop, 700, 'follows new messages near the bottom');
   rooms.hide();
+  dom.window.close(); // rooms.ts polls with window.setTimeout (a jsdom timer): closing the window lets the test process exit
 });

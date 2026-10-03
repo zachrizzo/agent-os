@@ -7,6 +7,7 @@ import '@fontsource/jetbrains-mono/500.css';
 import './style.css';
 
 import type { CreateMap, MapApi } from './contract';
+import { createHostBridge } from './hostbridge';
 import { createStore, resolveSource } from './store';
 import { mountBoard } from './ui/board';
 import { mountActivity } from './ui/activity';
@@ -38,7 +39,7 @@ async function boot() {
   const activity = mountActivity($('activity'), store, (e) => drawer.open(e));
   const renderRail = mountRail($('rail'), store, (sel) => { center.focus(sel); app.classList.remove('rail-open'); });
   let roomCount = 0;
-  const rooms = mountRooms($('rooms'), store, (n) => { roomCount = n; renderTop.setRooms(n, rooms.isOpen()); });
+  const rooms = mountRooms($('rooms'), store, (n) => { roomCount = n; renderTop.setRooms(n, rooms.isOpen()); }, createHostBridge());
   const board = mountBoard($('board'), store);
   const renderTop = mountTopbar($('topbar'), store, {
     onNeeds: () => activity.showNeeds(),

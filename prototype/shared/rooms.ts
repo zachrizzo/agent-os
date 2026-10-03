@@ -23,12 +23,12 @@ const DISCUSSION_ITEM_CHARS = 1500;
 const DISCUSSION_TOTAL_CHARS = 14000;
 export const YOU = 'you';
 
-/** The PHI agent is never listed, joined or messaged. */
-export const isExcludedAgent = (id: string) => /^phi($|[-_.])/i.test(id.trim());
-
 export const roomSessionKey = (agentId: string, roomId: string) => `agent:${agentId}:room-${roomId}`;
 /** The only session keys rooms create, message, or hand to the host. */
 export const ROOM_KEY_RE = /^agent:([a-z0-9][a-z0-9_-]{0,63}):room-(r[0-9a-f]{8})$/;
+/** The PHI agent is never listed, joined or messaged. */
+export const isExcludedAgent = (id: string) => /^phi($|[-_.])/i.test(id.trim());
+
 
 export interface RoomMember { id: string; name: string }
 export interface RoomMessage {

@@ -592,3 +592,17 @@ button.who-btn:hover { background: color-mix(in srgb, var(--fg) 6%, transparent)
 .bd-empty { padding: 18px 8px; text-align: center; color: var(--muted); font-size: 12px; }
 @media (max-width: 900px) { .bd-cols { grid-template-columns: repeat(2, minmax(0, 1fr)); overflow-y: auto; } .bd-col { min-height: 220px; } }
 @media (max-width: 1000px) { .board-btn span { display: none; } }
+
+/* Room header toolbar (native chat header style: icon buttons on the right, actions under ⋯) */
+.rm-tools { position: relative; display: inline-flex; align-items: center; gap: 4px; }
+.rm-tool { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; color: var(--fg-2); }
+.rm-tool:hover, .rm-tool.on { color: var(--fg); background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.rm-tool:focus-visible, .rm-menu button:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 1px; }
+.rm-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; min-width: 200px; padding: 5px; display: flex; flex-direction: column; border-radius: 10px; border: 1px solid var(--line-2); background: var(--bg-1); box-shadow: 0 10px 30px color-mix(in srgb, #000 28%, transparent); }
+.rm-menu button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border-radius: 7px; text-align: left; color: var(--fg-2); font-size: 12.5px; }
+.rm-menu button:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 7%, transparent); }
+.rm-sep { display: block; height: 1px; margin: 4px 2px; background: var(--line); }
+
+/* Topbar room for the Board button: icon-only Board/Rooms below 1180px, and the meters give way instead of overlapping the buttons. */
+.meters { overflow: hidden; }
+@media (max-width: 1180px) { .board-btn span, .rooms-btn:not(.board-btn) span { display: none; } }

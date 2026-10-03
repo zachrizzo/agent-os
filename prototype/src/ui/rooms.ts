@@ -1,8 +1,9 @@
 // Group rooms: create a room, pick agents from the live list, chat with all of them in one thread.
 // Everything is server-side (persisted rooms, the open discussion run); this view only renders the thread and polls while a discussion is in flight.
 import { installMarkdownHandlers, renderInline, renderMarkdown } from '../../shared/markdown';
-import { MAX_MEMBERS, YOU } from '../../shared/rooms';
+import { MAX_MEMBERS, YOU, roomSessionKey } from '../../shared/rooms';
 import { createRoomsApi, type RoomAgent, type RoomSummary, type RoomView } from '../rooms-api';
+import type { HostBridge } from '../hostbridge';
 import type { ShellStore } from '../store';
 import { avatarHtml, avatarHue, esc, fmtHM, svg } from './format';
 
@@ -11,7 +12,7 @@ const POLL_IDLE_MS = 5000;
 
 type Mode = { t: 'empty' } | { t: 'create' } | { t: 'room'; id: string };
 
-export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: number) => void) {
+export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: number) => void, host?: HostBridge) {
   const api = createRoomsApi(store.source);
   let open = false;
   let mode: Mode = { t: 'empty' };
@@ -21,6 +22,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
   let showArchived = false;
   let renaming = false;
   let adding = false;
+  let menuOpen = false;
   let notice = '';
   let draft = '';
   const picked = new Set<string>();
@@ -116,9 +118,16 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     mainEl.innerHTML = `
       <header class="rm-bar">
         ${renaming ? `<input class="rm-rename" maxlength="60" value="${esc(room.name)}" aria-label="Room name"/><button class="rm-primary sm" data-act="rename-ok">Save</button><button class="rm-ghost sm" data-act="rename-cancel">Cancel</button>`
-          : `<h3>${esc(room.name)}${room.archived ? ' <small class="rm-tag">archived</small>' : ''}</h3><button class="rm-ghost sm" data-act="rename">Rename</button>`}
+          : `<h3>${esc(room.name)}${room.archived ? ' <small class="rm-tag">archived</small>' : ''}</h3>`}
         <span class="grow"></span>
-        <button class="rm-ghost sm" data-act="archive">${room.archived ? 'Restore' : 'Archive'}</button>
+        <div class="rm-tools">
+          <button class="rm-tool${menuOpen ? ' on' : ''}" data-act="more" title="More" aria-label="More" aria-haspopup="menu" aria-expanded="${menuOpen}">${svg('more', 16)}</button>
+          ${menuOpen ? `<div class="rm-menu" role="menu">
+            <button role="menuitem" data-act="rename">Rename room</button>
+            <button role="menuitem" data-act="archive">${room.archived ? 'Restore room' : 'Archive room'}</button>
+            ${host?.has('open-session') && room.captain ? `<i class="rm-sep" role="separator"></i><button role="menuitem" data-act="open-captain" title="Open ${esc(agentOf(room.captain).name)}'s room session in the Control UI chat">${svg('chat', 14)}<span>Open captain's chat</span></button>` : ''}
+          </div>` : ''}
+        </div>
       </header>
       <div class="rm-members">
         ${view.members.map((a) => `<span class="rm-chip${a.id === room.captain ? ' captain' : ''}" title="${a.id === room.captain ? 'Lead: moderates and posts the final answer' : ''}">${avatarHtml(a.id, a.name, a.emoji, 'sm')}<span>${esc(a.name)}</span>${a.id === room.captain && view!.members.length > 1 ? '<small class="rm-cap">lead</small>' : ''}<button data-remove="${esc(a.id)}" title="Remove ${esc(a.name)}" aria-label="Remove ${esc(a.name)}" ${running ? 'disabled' : ''}>${svg('close', 12)}</button></span>`).join('') || '<span class="muted">No agents in this room.</span>'}
@@ -177,6 +186,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
   }
 
   installMarkdownHandlers(el);
+  host?.onChange(() => { if (open && mode.t === 'room') paint(); }); // the plugin answers after boot
 
   el.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
@@ -187,9 +197,19 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     const mention = t.closest<HTMLElement>('[data-mention]');
     if (mention) { draft = `${draft}${draft && !/\s$/.test(draft) ? ' ' : ''}@${mention.dataset.mention} `; focusBox = true; paintMain(); return; }
     const a = t.closest<HTMLElement>('[data-act]')?.dataset.act;
+    if (menuOpen && !t.closest('.rm-tools')) { menuOpen = false; paintMain(); }
     if (!a) return;
+    if (a !== 'more') menuOpen = false;
     const id = mode.t === 'room' ? mode.id : '';
     switch (a) {
+      case 'more': menuOpen = !menuOpen; paintMain(); mainEl.querySelector<HTMLElement>(menuOpen ? '.rm-menu button' : '.rm-tool')?.focus(); break;
+      case 'open-captain': {
+        const room = view?.room;
+        if (!room || !host) break;
+        paintMain();
+        host.run('open-session', roomSessionKey(room.captain, room.id)).catch((err: Error) => { notice = err.message; paintMain(); });
+        break;
+      }
       case 'new': mode = { t: 'create' }; picked.clear(); createName = ''; notice = ''; paint(); break;
       case 'cancel': mode = { t: 'empty' }; notice = ''; paint(); break;
       case 'toggle-archived': showArchived = !showArchived; paintList(); break;
@@ -231,6 +251,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
   });
   el.addEventListener('keydown', (e) => {
     const t = e.target as HTMLElement;
+    if (e.key === 'Escape' && menuOpen) { menuOpen = false; paintMain(); mainEl.querySelector<HTMLElement>('.rm-tool')?.focus(); e.stopPropagation(); return; }
     if (e.key !== 'Escape') e.stopPropagation(); // typing stays out of global shortcuts
     if (t.matches('textarea') && e.key === 'Enter' && !e.shiftKey && !(e as KeyboardEvent).isComposing) { e.preventDefault(); void submit(); }
     if (t.matches('.rm-rename') && e.key === 'Enter') { e.preventDefault(); el.querySelector<HTMLButtonElement>('[data-act=rename-ok]')?.click(); }
