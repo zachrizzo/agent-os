@@ -1,7 +1,7 @@
 // Group rooms: create a room, pick agents from the live list, chat with all of them in one thread.
 // Everything is server-side (persisted rooms, bounded runs); this view only renders it and polls while a run is in flight.
 import { installMarkdownHandlers, renderInline, renderMarkdown } from '../../shared/markdown';
-import { MAX_MEMBERS, YOU, type Council, type CouncilAgentStatus, type CouncilNote } from '../../shared/rooms';
+import { MAX_MEMBERS, YOU, type Council, type CouncilAgentStatus, type CouncilNote, type CouncilStopReason } from '../../shared/rooms';
 import { createRoomsApi, type RoomAgent, type RoomSummary, type RoomView } from '../rooms-api';
 import type { ShellStore } from '../store';
 import { avatarHtml, avatarHue, esc, fmtHM, svg } from './format';
@@ -80,9 +80,10 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     return list.length ? `<div class="rm-picker">${list.map((a) => `<label class="rm-pick${selected.has(a.id) ? ' on' : ''}"><input type="checkbox" ${attr}="${esc(a.id)}" ${selected.has(a.id) ? 'checked' : ''}/>${avatarHtml(a.id, a.name, a.emoji, 'sm')}<span>${esc(a.name)}<small class="mono">@${esc(a.id)}</small></span></label>`).join('')}</div>` : '<div class="rm-none">No other agents available.</div>';
   };
 
-  const STATUS_LABEL: Record<CouncilAgentStatus, string> = { idle: 'waiting', planning: 'planning', working: 'working', critiquing: 'critiquing', synthesizing: 'synthesizing', done: 'done', timeout: 'timed out', error: 'failed', skipped: 'skipped', stopped: 'stopped' };
-  const PHASE_LABEL: Record<Council['phase'], string> = { planning: 'Captain is planning', working: 'Members are working in parallel', critiquing: 'Members are critiquing each other', synthesizing: 'Captain is writing the answer', done: 'Done', stopped: 'Stopped' };
-  const NOTE_KIND: Record<CouncilNote['kind'], string> = { plan: 'plan', answer: 'answer', critique: 'critique', system: 'note' };
+  const STATUS_LABEL: Record<CouncilAgentStatus, string> = { idle: 'waiting', planning: 'planning', working: 'working', steering: 'deciding', critiquing: 'critiquing', synthesizing: 'synthesizing', done: 'done', timeout: 'timed out', error: 'failed', skipped: 'skipped', stopped: 'stopped' };
+  const PHASE_LABEL: Record<Council['phase'], string> = { planning: 'Captain is planning', working: 'Members are working', steering: 'Captain is deciding the next step', critiquing: 'Members are critiquing each other', synthesizing: 'Captain is writing the answer', done: 'Done', stopped: 'Stopped' };
+  const NOTE_KIND: Record<CouncilNote['kind'], string> = { plan: 'plan', decision: 'decision', answer: 'answer', followup: 'follow-up', critique: 'critique', system: 'note' };
+  const STOP_LABEL: Record<CouncilStopReason, string> = { done: 'done: good enough', stepLimit: 'step limit', cap: 'turn cap', noProgress: 'no progress', malformed: 'unusable decision', captainFailed: 'captain failed', cancelled: 'cancelled' };
   const NOTE_CLAMP = 260;
   const mentionize = (text: string, room: RoomView['room']) => renderMarkdown(text, { mentions: room.members });
   const fmtDur = (ms: number) => (ms < 1000 ? '<1s' : ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
@@ -110,8 +111,11 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     }).join('');
     const plan = c.plan?.fallback ? '<span class="rm-cwarn" title="The captain\'s plan could not be parsed, so every member got the whole question">fallback plan</span>' : '';
     const elapsed = fmtDur((c.endedAt ?? Date.now()) - c.startedAt);
+    const nSteps = c.steps?.length ?? 0;
+    const steps = c.maxSteps ? ` · step ${nSteps}/${c.maxSteps}` : '';
+    const stopped = c.stop && c.stop.reason !== 'cancelled' ? `<span class="rm-cstop ${c.stop.reason}" title="${esc(c.stop.detail ?? '')}">stopped: ${esc(STOP_LABEL[c.stop.reason])}</span>` : '';
     return `<details class="rm-council ${c.phase}" data-cid="${esc(c.id)}" data-live="${live ? 1 : 0}" ${open ? 'open' : ''}>
-      <summary><span class="rm-chev">${svg('chevron', 12)}</span><b>Council thinking</b>${live ? '<i class="rm-run"></i>' : ''}<span class="rm-csub">${esc(PHASE_LABEL[c.phase])} · ${ids.length} agents · ${c.turnsUsed}/${c.maxTurns} turns · ${elapsed}</span>${plan}</summary>
+      <summary><span class="rm-chev">${svg('chevron', 12)}</span><b>Council thinking</b>${live ? '<i class="rm-run"></i>' : ''}<span class="rm-csub">${esc(PHASE_LABEL[c.phase])} · ${ids.length} agents · ${c.turnsUsed}/${c.maxTurns} turns${steps} · ${elapsed}</span>${plan}${stopped}</summary>
       <div class="rm-cagents">${chips}</div>
       <div class="rm-notes">${c.notes.map((n) => noteRow(n, room)).join('') || '<div class="rm-none">Waiting for the first notes…</div>'}</div>
     </details>`;
@@ -174,10 +178,11 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
         ${view.members.map((a) => `<span class="rm-chip${a.id === room.captain && room.mode === 'council' ? ' captain' : ''}" title="${a.id === room.captain && room.mode === 'council' ? 'Council captain' : ''}">${avatarHtml(a.id, a.name, a.emoji, 'sm')}<span>${esc(a.name)}</span>${a.id === room.captain && room.mode === 'council' ? '<small class="rm-cap">captain</small>' : ''}<button data-remove="${esc(a.id)}" title="Remove ${esc(a.name)}" aria-label="Remove ${esc(a.name)}" ${running ? 'disabled' : ''}>${svg('close', 12)}</button></span>`).join('') || '<span class="muted">No agents in this room.</span>'}
         ${room.members.length < MAX_MEMBERS && nonMembers.length ? `<button class="rm-add" data-act="add-toggle" ${running ? 'disabled' : ''}>${svg('plus', 12)}<span>Add agent</span></button>` : ''}
         <span class="grow"></span>
-        <span class="rm-limits" title="Council: the captain splits your message, members answer in parallel, one critique round, the captain gives ONE answer. An @mention goes straight to that agent. Round-table: everyone answers in turn. turns caps agent runs per message across all phases; timeout cuts off a slow member.">
+        <span class="rm-limits" title="Council: the captain splits your message, members answer in parallel, then the captain steers (a follow-up to chosen members, a critique round, or stop) for at most the set number of steps, and gives ONE answer. Only the captain routes turns. An @mention goes straight to that agent. Round-table: everyone answers in turn. turns caps agent runs per message across all phases; timeout cuts off a slow member.">
           mode <select data-set="mode" aria-label="Room mode"><option value="council" ${room.mode === 'council' ? 'selected' : ''}>Council</option><option value="roundtable" ${room.mode === 'roundtable' ? 'selected' : ''}>Round-table</option></select>
           ${room.mode === 'council' ? `captain <select data-set="captain" class="wide" aria-label="Council captain" ${running ? 'disabled' : ''}>${view.members.map((a) => `<option value="${esc(a.id)}" ${a.id === room.captain ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>` : `rounds <select data-set="maxRounds">${[1, 2, 3, 4].map((n) => `<option ${n === room.maxRounds ? 'selected' : ''}>${n}</option>`).join('')}</select>`}
-          turns <input type="number" min="1" max="32" value="${room.maxTurns}" data-set="maxTurns"/>
+          ${room.mode === 'council' ? `steps <input type="number" min="1" max="4" value="${room.maxSteps}" data-set="maxSteps" title="How many follow-up decisions the captain may make before it must answer (1-4)"/>` : ''}
+          turns <input type="number" min="1" max="32" value="${room.maxTurns}" data-set="maxTurns" title="Hard cap on agent runs per message, across all phases"/>
           timeout <input type="number" min="1" max="600" value="${room.memberTimeoutSec}" data-set="memberTimeoutSec" title="Seconds before a slow member is cut off"/>s</span>
       </div>
       ${adding ? `<div class="rm-addbox">${agentPicker(new Set(), room.members, 'data-addpick')}<div class="rm-actions"><button class="rm-ghost sm" data-act="add-close">Done</button></div></div>` : ''}

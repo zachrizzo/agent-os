@@ -19,23 +19,40 @@ export function scriptedReply(prompt: string): string {
   return `${me?.[1] ?? 'Agent'} here. On "${text.replace(/\s+/g, ' ').slice(0, 48)}": noted, nothing blocking from my side.`;
 }
 
-/** Council turns. Cues in Zach's message: "badplan" (captain returns non-JSON), "conflict" (the second member contradicts the first). */
+/** Council turns. Cues in Zach's message: "badplan" (captain returns non-JSON), "conflict" (the second member contradicts the first; the captain asks the two to settle it),
+ *  "crit" (the captain calls the critique round), "endless" (a different follow-up every step), "repeat" (the same follow-up every step), "allpass" (follow-ups get PASS),
+ *  "badsteer" (the captain's decision is not JSON), "routeme" (member replies @mention another member). With no cue the captain stops after the first answers. */
 function councilReply(role: string, prompt: string, name: string, id: string, ids: string[], text: string): string {
-  if (/richmd/i.test(prompt) && role !== 'CAPTAIN-PLAN') return richReply(role, ids);
+  if (/richmd/i.test(prompt) && role !== 'CAPTAIN-PLAN' && role !== 'CAPTAIN-STEER' && role !== 'FOLLOW-UP') return richReply(role, ids);
   const topic = text.replace(/\s+/g, ' ').slice(0, 48);
   if (role === 'CAPTAIN-PLAN') {
     if (/badplan/i.test(text)) return 'Sure. I think everyone should look at this from their own angle, no JSON from me.';
     return `\`\`\`json\n${JSON.stringify({ tasks: ids.map((m) => ({ agent: m, question: `From the @${m} angle: ${topic}` })), notes: 'Split by specialty, one sub-question each.' })}\n\`\`\``;
   }
+  const route = /routeme/i.test(text) ? ` @${ids.find((x) => x !== id) ?? id} please weigh in.` : '';
   if (role === 'SPECIALIST') {
     const q = /Your sub-question:\n([\s\S]*?)(?:\n\n|$)/.exec(prompt)?.[1] ?? topic;
-    return `${name}: on "${q.slice(0, 60)}" my view is to proceed, with one caveat from my side.${/conflict/i.test(text) && ids.indexOf(id) === 1 ? ' I disagree with the first member and would not ship it as is.' : ''}`;
+    return `${name}: on "${q.slice(0, 60)}" my view is to proceed, with one caveat from my side.${/conflict/i.test(text) && ids.indexOf(id) === 1 ? ' I disagree with the first member and would not ship it as is.' : ''}${route}`;
+  }
+  if (role === 'CAPTAIN-STEER') {
+    const step = Number(/This is step (\d+) of/.exec(prompt)?.[1] ?? 1);
+    if (/badsteer/i.test(text)) return 'Honestly I think we are fine, let us wrap up.';
+    if (/endless/i.test(text)) return JSON.stringify({ action: 'ask', targets: [ids[0]], question: `Round ${step}: is there anything else we should weigh?`, unresolved: 'still not sure' });
+    if (/repeat/i.test(text)) return JSON.stringify({ action: 'ask', targets: [ids[0]], question: 'Is the rollback plan safe?' });
+    if (/allpass/i.test(text) && step === 1) return JSON.stringify({ action: 'ask', targets: [ids[0], ids[1]], question: 'Anything blocking?' });
+    if (/crit/i.test(text) && step === 1) return '{"action":"critique"}';
+    if (/conflict/i.test(text) && step === 1) return JSON.stringify({ action: 'ask', targets: [ids[0], ids[1]], question: `@${ids[0]} and @${ids[1]} disagree on shipping as is: settle it.`, unresolved: 'whether to ship as is' });
+    return '{"action":"synthesize"}';
+  }
+  if (role === 'FOLLOW-UP') {
+    if (/allpass/i.test(text)) return PASS_TOKEN;
+    return `${name}: on the follow-up I concede the rollback point and hold the rest; ship behind a flag.${route}`;
   }
   if (role === 'CRITIQUE') {
     if (/Contrarian|CONTRARIAN/.test(prompt) || (/conflict/i.test(text) && ids.indexOf(id) === 2)) return `- Pushback: the answers assume the happy path; nobody covered rollback. Needs an owner.`;
     return PASS_TOKEN;
   }
-  const flagged = /Critiques:\n/.test(prompt);
+  const flagged = /Critiques:\n|Follow-ups you asked for:\n/.test(prompt);
   return `Proceed. Members agree on the approach${flagged ? '.\n\nDisagreements resolved: the critique about rollback is valid, so I added it as a pre-condition.\n\nYour call: ship fast with a manual rollback, or wait a day for automation.' : '; nothing conflicting came up.'}`;
 }
 

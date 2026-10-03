@@ -167,11 +167,11 @@ async function councilChecks(browser, tag) {
   await send("slow: is the migration safe? conflict");
   await page.waitForSelector(".rm-council[open]", { timeout: 8000 });
   const seen = new Set();
-  for (let i = 0; i < 40 && !seen.has("critiquing"); i++) {
+  for (let i = 0; i < 60 && !(seen.has("deciding") && seen.has("done")); i++) {
     for (const t of await page.locator(".rm-cst").allInnerTexts()) seen.add(t);
     await page.waitForTimeout(250);
   }
-  expect("live statuses planning, working and critiquing were all shown", ["planning", "working", "critiquing"].every((x) => seen.has(x)), [...seen].join(","));
+  expect("live statuses planning, working and the captain deciding were all shown", ["planning", "working", "deciding"].every((x) => seen.has(x)), [...seen].join(","));
   expect("Stop is offered while the council runs", (await page.locator(".rm-status [data-act=stop]").count()) === 1);
   expect("placeholder captain reply while working", (await page.locator(".rm-msg.captain.pending").count()) === 1 || seen.has("synthesizing"));
   await idle();
@@ -182,7 +182,11 @@ async function councilChecks(browser, tag) {
   await page.locator(".rm-council > summary").click();
   await page.waitForSelector(".rm-council[open] .rm-note");
   const rows = await page.locator(".rm-note").count();
-  expect("panel has compact note rows (plan + answers + critiques)", rows >= 7, String(rows));
+  expect("panel has compact note rows (plan + answers + decision + follow-ups + stop)", rows >= 8, String(rows));
+  const sub = await page.locator(".rm-council > summary").innerText();
+  expect("panel summary shows the step count and why the captain stopped", /step 1\/3/.test(sub) && /stopped: done/.test(sub), sub.replace(/\s+/g, " "));
+  expect("the captain's decision is a row: 'Step 1: asked X, Y about: ...'", (await page.locator(".rm-note.decision").count()) === 1 && /^Step 1: asked .+ about: /.test((await page.locator(".rm-note.decision .rm-note-text").innerText()).trim()));
+  expect("the step settings control is shown (1-4, default 3)", (await page.locator("[data-set=maxSteps]").inputValue()) === "3");
   expect("panel shows done chips for every agent", (await page.locator(".rm-cagent.st-done").count()) === 3);
   await page.waitForTimeout(1500); // a poll repaint must not collapse what the user opened
   expect("a poll repaint keeps the panel the user opened", (await page.locator(".rm-council[open]").count()) === 1);
@@ -330,11 +334,21 @@ async function roomsChecks(browser, tag) {
 }
 
 // Rail footer "N agents erroring" counts live sessions only, with History on too.
+// The mock fleet randomly flips workers to/from `error` every few seconds (mock.ts `churn`/`emit`), which made the two reads
+// differ by chance (flaked on 1157b63 too). So the page stops applying stream deltas once settled: the fleet is frozen and the
+// two reads must match exactly; the assertion itself is unchanged.
 async function erroringCountChecks(browser, tag) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
+  await page.addInitScript(() => {
+    const add = EventSource.prototype.addEventListener;
+    EventSource.prototype.addEventListener = function (type, fn, opts) {
+      return add.call(this, type, type === "delta" ? (e) => { if (!window.__freezeFleet) fn(e); } : fn, opts);
+    };
+  });
   await page.goto(base + "agent-os/?source=mock");
   await page.waitForSelector(".hist-btn");
   await page.waitForTimeout(2500);
+  await page.evaluate(() => { window.__freezeFleet = true; });
   const foot = () => page.locator(".sys-text").innerText();
   const n = (t) => Number((t.match(/^(\d+) agent/) ?? [])[1] ?? 0);
   const off = await foot();

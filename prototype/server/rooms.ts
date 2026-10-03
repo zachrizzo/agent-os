@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
-  MAX_COUNCILS, MAX_MEMBERS, MAX_MESSAGE_CHARS, MAX_ROOMS, MAX_ROOM_NAME, MAX_STORED_MESSAGES, YOU, clampInt, isExcludedAgent, migrateRoom, normalizeSettings, resolveCaptain, runRound,
+  MAX_COUNCILS, MAX_MEMBERS, MAX_STEPS_LIMIT, MAX_MESSAGE_CHARS, MAX_ROOMS, MAX_ROOM_NAME, MAX_STORED_MESSAGES, YOU, clampInt, isExcludedAgent, migrateRoom, normalizeSettings, resolveCaptain, runRound,
   type Council, type Room, type RoomMember, type RoomMessage, type RoomRunState, type RoomSettings, type RoomTransport,
 } from '../shared/rooms.ts';
 import { councilBypass, runCouncil } from '../shared/council.ts';
@@ -31,7 +31,7 @@ export const ROOM_KEY_RE = /^agent:([a-z0-9][a-z0-9_-]{0,63}):room-(r[0-9a-f]{8}
 export function isRoomKey(key: string) { const m = ROOM_KEY_RE.exec(key); return !!m && !isExcludedAgent(m[1]); }
 
 export interface RoomView { room: Room; members: Array<RoomAgent>; run: RoomRunState | null }
-export interface RoomSummary { id: string; name: string; members: string[]; archived: boolean; updatedAt: number; last?: { from: string; text: string; ts: number }; running: boolean; maxRounds: number; maxTurns: number; mode: Room['mode']; captain: string }
+export interface RoomSummary { id: string; name: string; members: string[]; archived: boolean; updatedAt: number; last?: { from: string; text: string; ts: number }; running: boolean; maxRounds: number; maxTurns: number; maxSteps: number; mode: Room['mode']; captain: string }
 
 export function createRoomsService(opts: { gateway: RoomGateway; file?: string; agentTtlMs?: number }) {
   const { gateway } = opts;
@@ -109,7 +109,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
 
   const summary = (r: Room): RoomSummary => {
     const last = [...r.messages].reverse().find((m) => m.from !== 'system');
-    return { id: r.id, name: r.name, members: r.members, archived: r.archived, updatedAt: r.updatedAt, running: runs.has(r.id), maxRounds: r.maxRounds, maxTurns: r.maxTurns, mode: r.mode, captain: r.captain, ...(last ? { last: { from: last.from, text: last.text.slice(0, 120), ts: last.ts } } : {}) };
+    return { id: r.id, name: r.name, members: r.members, archived: r.archived, updatedAt: r.updatedAt, running: runs.has(r.id), maxRounds: r.maxRounds, maxTurns: r.maxTurns, maxSteps: r.maxSteps, mode: r.mode, captain: r.captain, ...(last ? { last: { from: last.from, text: last.text.slice(0, 120), ts: last.ts } } : {}) };
   };
 
   return {
@@ -152,6 +152,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       r.captain = resolveCaptain(r.captain, r.members); // members changed: the captain stays a member (rfc-lead, else the first)
       if (patch.maxRounds !== undefined) r.maxRounds = clampInt(patch.maxRounds, 1, 4, r.maxRounds);
       if (patch.maxTurns !== undefined) r.maxTurns = clampInt(patch.maxTurns, 1, 32, r.maxTurns);
+      if (patch.maxSteps !== undefined) r.maxSteps = clampInt(patch.maxSteps, 1, MAX_STEPS_LIMIT, r.maxSteps);
       if (typeof patch.mentionGating === 'boolean') r.mentionGating = patch.mentionGating;
       if (typeof patch.archived === 'boolean') {
         if (patch.archived) runs.get(id)?.abort.abort();
@@ -174,7 +175,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       const members: RoomMember[] = r.members.filter((m) => !isExcludedAgent(m)).map((m) => ({ id: m, name: info(list, m).name }));
       const trigger = add(r, { from: YOU, text: msg });
       const abort = new AbortController();
-      const state: RoomRunState = { id: `run${trigger.id}`, status: 'running', round: 1, turnsUsed: 0, maxTurns: r.maxTurns, maxRounds: r.maxRounds, mode: r.mode };
+      const state: RoomRunState = { id: `run${trigger.id}`, status: 'running', round: 1, turnsUsed: 0, maxTurns: r.maxTurns, maxRounds: r.maxRounds, mode: r.mode, maxSteps: r.maxSteps };
       const transport: RoomTransport = {
         async turn(agentId, prompt, signal) {
           await gateway.ensureSession(agentId, id, `Room: ${r.name}`);
@@ -188,7 +189,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       let flow: Promise<RoomRunState['stopReason']>;
       if (useCouncil) {
         const captain = members.some((m) => m.id === r.captain) ? r.captain : members[0].id;
-        const council: Council = { id: trigger.id, captain, phase: 'planning', startedAt: Date.now(), agents: {}, notes: [], turnsUsed: 0, maxTurns: r.maxTurns };
+        const council: Council = { id: trigger.id, captain, phase: 'planning', startedAt: Date.now(), agents: {}, notes: [], turnsUsed: 0, maxTurns: r.maxTurns, maxSteps: r.maxSteps, steps: [] };
         r.councils.push(council);
         if (r.councils.length > MAX_COUNCILS) r.councils.splice(0, r.councils.length - MAX_COUNCILS);
         state.phase = 'planning';
@@ -199,7 +200,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
           },
           abort(agentId) { void gateway.abort?.(agentId, id).catch(() => undefined); },
         };
-        flow = runCouncil(r, members, trigger, council, ctransport, { ...hooks, save: () => { touch(r); persist(); } }, abort.signal, { memberTimeoutMs: r.memberTimeoutSec * 1000 });
+        flow = runCouncil(r, members, trigger, council, ctransport, { ...hooks, save: () => { touch(r); persist(); } }, abort.signal, { memberTimeoutMs: r.memberTimeoutSec * 1000, maxSteps: r.maxSteps });
       } else {
         // Round-table loop; a bypass runs it for just the @mentioned members.
         flow = runRound(r, members, trigger, transport, hooks, abort.signal);

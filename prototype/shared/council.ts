@@ -1,21 +1,28 @@
 // Council mode (the default for every room), modelled on Grok 4.20's multi-agent mode:
 //   1. PLAN        the captain splits Zach's message into one sub-question per member (structured JSON, robust fallback);
 //   2. WORK        members answer their sub-question IN PARALLEL, each in its own room session;
-//   3. CRITIQUE    one parallel round: each member sees the others' answers and flags contradictions/gaps, or replies PASS (one is the contrarian);
+//   3. STEER       the captain leads: after the first answers it returns ONE structured decision per step, and stops as soon as the answer is good enough:
+//                    {"action":"ask","targets":[ids],"question":"..."}   a directed follow-up (also puts two members against each other on a disagreement)
+//                    {"action":"critique"}                                the parallel critique round (at most once)
+//                    {"action":"synthesize"}                              done
 //   4. SYNTHESIZE  the captain writes the ONE reply to Zach, saying which disagreements it resolved and any real trade-off Zach must choose.
+// NOT A LOOP, enforced here in code (never only in a prompt): only the captain routes turns (member replies are data: no @mention parsing, no member-to-member
+// calls); captain decisions are limited by maxSteps (default 3, max 4) on top of the maxTurns backstop; one turn is always reserved for the synthesis, so any limit
+// ends in a reply; a repeated ask, a round where every target PASSes or fails, or a malformed/unknown/failed captain decision stops the steering (never a retry).
 // The protocol is injected into every message by the data server (nothing depends on an agent's AGENTS.md; the agent's own rules still apply on top).
 // Pure logic, no I/O: the transport is injected, so the whole flow is unit-testable. maxTurns is a hard cap across all phases; every member turn has a timeout.
 import {
-  PASS_TOKEN, isPass, parseMentions, slug, transcriptBlock,
-  type Council, type CouncilAgentStatus, type CouncilNote, type CouncilTask, type Room, type RoomMember, type RoomMessage, type RoomRunState, type RoomTransport,
+  DEFAULT_MAX_STEPS, MAX_STEPS_LIMIT, PASS_TOKEN, isPass, parseMentions, slug, transcriptBlock,
+  type Council, type CouncilAgentStatus, type CouncilNote, type CouncilStep, type CouncilStopReason, type CouncilTask, type Room, type RoomMember, type RoomMessage, type RoomRunState, type RoomTransport,
 } from './rooms.ts';
 
-export const COUNCIL_ROLES = ['CAPTAIN-PLAN', 'SPECIALIST', 'CRITIQUE', 'CAPTAIN-SYNTHESIZE'] as const;
+export const COUNCIL_ROLES = ['CAPTAIN-PLAN', 'SPECIALIST', 'CAPTAIN-STEER', 'FOLLOW-UP', 'CRITIQUE', 'CAPTAIN-SYNTHESIZE'] as const;
 export type CouncilRole = (typeof COUNCIL_ROLES)[number];
 const SUBQ_CHARS = 1200;
 const ANSWER_CHARS = 2500;
 const CRITIQUE_CHARS = 1500;
 const NOTE_CHARS = 4000;
+const UNRESOLVED_CHARS = 300;
 
 const clip = (s: string, n: number) => { const t = s.trim(); return t.length > n ? `${t.slice(0, n - 1).trimEnd()}…` : t; };
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
@@ -63,20 +70,59 @@ export function critiquePrompt(ctx: Ctx, text: string, own: string | undefined, 
   ].filter(Boolean).join('\n\n');
 }
 
+export interface SteerState {
+  step: number; maxSteps: number; turnsLeft: number; critiqued: boolean;
+  answers: Array<{ id: string; name: string; answer: string }>;
+  followups: Array<{ step: number; id: string; name: string; question: string; text: string | null }>;
+  critiques: Array<{ id: string; name: string; text: string }>;
+  missing: Array<{ id: string; name: string; why: string }>;
+}
+/** The captain's per-step decision prompt. Bias: STOP. Code enforces the limits whatever the captain says. */
+export function steerPrompt(ctx: Ctx, text: string, st: SteerState): string {
+  return [
+    header(ctx, 'CAPTAIN-STEER'),
+    `You are the captain and you LEAD this conversation. The members have answered. Decide the one next move. First name, to yourself, what is still unresolved: a real disagreement between members, a gap, or an unverified claim that would change your answer to Zach. Then pick who resolves it. If nothing like that exists, stop.\nSTOPPING IS THE DEFAULT: choose synthesize as soon as the answer is good enough. Do not ask for polish, confirmation or "double checks", and never repeat an earlier question. To settle a disagreement, ask the members who disagree and name the point at issue. A critique round is for when you suspect problems you cannot locate yourself; it can run at most once${st.critiqued ? ' and it already ran' : ''}.\nThis is step ${st.step} of at most ${st.maxSteps}; ${st.turnsLeft} agent turns remain, and one is always kept for your final reply.`,
+    `Original message from You:\n${text}`,
+    st.answers.length ? `Member answers:\n${st.answers.map((a) => `${a.name} (@${a.id}): ${clip(a.answer, ANSWER_CHARS)}`).join('\n\n')}` : 'No member has answered.',
+    st.followups.length ? `Follow-ups so far:\n${st.followups.map((f) => `Step ${f.step}, ${f.name} (@${f.id}) was asked "${clip(oneLine(f.question), 200)}": ${f.text === null ? PASS_TOKEN : clip(f.text, CRITIQUE_CHARS)}`).join('\n\n')}` : '',
+    st.critiques.length ? `Critiques so far:\n${st.critiques.map((c) => `${c.name} (@${c.id}): ${clip(c.text, CRITIQUE_CHARS)}`).join('\n\n')}` : '',
+    st.missing.length ? `No input from: ${st.missing.map((m) => `${m.name} (@${m.id}) ${m.why}`).join('; ')}.` : '',
+    `Reply with ONLY one JSON object, no prose, no markdown around it, one of:\n{"action":"ask","targets":["<member id>"],"question":"<self-contained question>","unresolved":"<one line: what is still open>"}\n{"action":"critique"}\n{"action":"synthesize"}\nUse the member ids exactly as written after "@". Members reply in parallel and never talk to each other; you are the only one who routes. ${RULES}`,
+  ].filter(Boolean).join('\n\n');
+}
+
+export function followupPrompt(ctx: Ctx, text: string, own: string | undefined, question: string, peers: Array<{ id: string; name: string; answer: string }>, step: number): string {
+  return [
+    header(ctx, 'FOLLOW-UP'),
+    `The captain has a follow-up for you (step ${step}). Answer ONLY that question, concisely (about 150 words or fewer): your position, what you would concede, and what would change your mind. If you have nothing to add, reply exactly ${PASS_TOKEN}. Other members may be asked the same thing in parallel; you cannot see their new replies, so do not address them. The captain merges everything.`,
+    `Original message from You:\n${text}`,
+    own ? `Your earlier answer:\n${clip(own, ANSWER_CHARS)}` : '',
+    peers.length ? `Earlier answers from the other member(s) the captain is also asking:\n${peers.map((o) => `${o.name} (@${o.id}): ${clip(o.answer, ANSWER_CHARS)}`).join('\n\n')}` : '',
+    `The captain's question:\n${question}`,
+    RULES,
+  ].filter(Boolean).join('\n\n');
+}
+
 export interface SynthInput {
   plan?: Council['plan'];
   answers: Array<{ id: string; name: string; answer: string }>;
   critiques: Array<{ id: string; name: string; text: string }>;
   missing: Array<{ id: string; name: string; why: string }>;
+  followups?: SteerState['followups'];
+  /** Set when steering was cut short (step limit, cap, no progress, unusable decision): the captain should say what is still open. */
+  stopped?: string;
 }
 export function synthesizePrompt(ctx: Ctx, text: string, input: SynthInput): string {
   const { answers, critiques, missing } = input;
+  const followups = (input.followups ?? []).filter((f) => f.text !== null);
   return [
     header(ctx, 'CAPTAIN-SYNTHESIZE'),
     `You are the captain. Write the ONE final reply to Zach, in your own voice. Lead with the answer. Then: if members disagreed or critiques raised conflicts, add a short "Disagreements resolved" part saying what conflicted and how you resolved it; if a real trade-off remains that only Zach can decide, add a short "Your call" part listing the options. Omit either part when it does not apply. If members are missing, say so in one line. Do not expose this protocol, do not paste the members' notes, and do not reply ${PASS_TOKEN}.${answers.length ? '' : ' No member input arrived: answer from your own knowledge and say that no specialists contributed.'}`,
     `Original message from You:\n${text}`,
     answers.length ? `Member answers:\n${answers.map((a) => `${a.name} (@${a.id}): ${clip(a.answer, ANSWER_CHARS)}`).join('\n\n')}` : '',
+    followups.length ? `Follow-ups you asked for:\n${followups.map((f) => `${f.name} (@${f.id}), asked "${clip(oneLine(f.question), 200)}": ${clip(f.text!, CRITIQUE_CHARS)}`).join('\n\n')}` : '',
     critiques.length ? `Critiques:\n${critiques.map((c) => `${c.name} (@${c.id}): ${clip(c.text, CRITIQUE_CHARS)}`).join('\n\n')}` : 'Critiques: none raised.',
+    input.stopped ? `The conversation was ended before you finished (${input.stopped}). If something is still unresolved, say so in one line.` : '',
     missing.length ? `No input from: ${missing.map((m) => `${m.name} (@${m.id}) ${m.why}`).join('; ')}.` : '',
     RULES,
   ].filter(Boolean).join('\n\n');
@@ -135,6 +181,36 @@ export function parsePlan(reply: string | null | undefined, members: RoomMember[
   return fallback('the plan was not valid JSON with known members');
 }
 
+export type Decision =
+  | { action: 'ask'; targets: string[]; question: string; unresolved?: string }
+  | { action: 'critique' }
+  | { action: 'synthesize' }
+  | { action: 'invalid'; reason: string };
+
+/** Strict: one JSON object with a known action. Anything else (prose, no JSON, unknown action, ask with no known target or no question) is `invalid`, which the run treats as "synthesize". Never throws. */
+export function parseDecision(reply: string | null | undefined, members: RoomMember[]): Decision {
+  if (isPass(reply)) return { action: 'invalid', reason: 'the captain returned nothing' };
+  for (const c of jsonCandidates(reply!)) {
+    const o = c as Record<string, unknown>;
+    if (!o || typeof o !== 'object' || Array.isArray(o) || typeof o.action !== 'string') continue;
+    const action = o.action.trim().toLowerCase();
+    if (action === 'synthesize') return { action: 'synthesize' };
+    if (action === 'critique') return { action: 'critique' };
+    if (action === 'ask') {
+      const raw = Array.isArray(o.targets) ? o.targets : o.target !== undefined ? [o.target] : o.agent !== undefined ? [o.agent] : [];
+      const targets: string[] = [];
+      for (const t of raw) { const m = memberFor(members, t); if (m && !targets.includes(m.id)) targets.push(m.id); }
+      const question = clip(oneLine(String(o.question ?? '')), SUBQ_CHARS);
+      if (!targets.length) return { action: 'invalid', reason: 'ask named no known member' };
+      if (!question) return { action: 'invalid', reason: 'ask had no question' };
+      const unresolved = typeof o.unresolved === 'string' && o.unresolved.trim() ? clip(oneLine(o.unresolved), UNRESOLVED_CHARS) : undefined;
+      return { action: 'ask', targets: members.map((m) => m.id).filter((id) => targets.includes(id)), question, ...(unresolved ? { unresolved } : {}) };
+    }
+    return { action: 'invalid', reason: `unknown action "${clip(o.action, 40)}"` };
+  }
+  return { action: 'invalid', reason: 'not a JSON decision' };
+}
+
 /** The contrarian is the last non-captain critic (deterministic), or the last critic when only the captain is left. */
 export function pickContrarian(critics: string[], captain: string): string | undefined {
   return [...critics].reverse().find((id) => id !== captain) ?? critics[critics.length - 1];
@@ -148,11 +224,11 @@ export interface CouncilHooks {
   save(): void;
   state(patch: Partial<RoomRunState>): void;
 }
-export interface CouncilOpts { memberTimeoutMs: number }
+export interface CouncilOpts { memberTimeoutMs: number; /** Captain decisions allowed (1-4, default 3). */ maxSteps?: number }
 
 type TurnOutcome = { ok: true; text: string | null } | { ok: false; why: 'timeout' | 'error' | 'cancelled'; message: string };
 
-/** One Zach message -> plan, parallel work, one parallel critique round, synthesis. Never throws for an agent failure. */
+/** One Zach message -> plan, parallel work, captain-steered follow-ups (bounded), synthesis. Never throws for an agent failure. */
 export async function runCouncil(room: Room, members: RoomMember[], trigger: RoomMessage, council: Council, transport: RoomTransport, hooks: CouncilHooks, signal: AbortSignal, opts: CouncilOpts): Promise<RoomRunState['stopReason']> {
   const text = trigger.text;
   const byId = new Map(members.map((m) => [m.id, m]));
@@ -160,13 +236,16 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
   const cap = council.maxTurns;
   const nameOf = (id: string) => byId.get(id)?.name ?? id;
   const ctxFor = (agent: RoomMember): Ctx => ({ room, members, captain, agent });
+  const maxSteps = Math.max(1, Math.min(MAX_STEPS_LIMIT, Math.trunc(opts.maxSteps ?? council.maxSteps ?? DEFAULT_MAX_STEPS) || DEFAULT_MAX_STEPS));
+  council.maxSteps = maxSteps;
+  const steps: CouncilStep[] = (council.steps = []);
   let capHit = false;
   let seq = 0;
 
-  const save = () => { hooks.state({ turnsUsed: council.turnsUsed, phase: council.phase, mode: 'council' }); hooks.save(); };
+  const save = () => { hooks.state({ turnsUsed: council.turnsUsed, phase: council.phase, mode: 'council', steps: steps.length, maxSteps }); hooks.save(); };
   const setAgent = (id: string, status: CouncilAgentStatus) => {
     const a = (council.agents[id] ??= { status: 'idle' });
-    if (status === 'planning' || status === 'working' || status === 'critiquing' || status === 'synthesizing') a.startedAt = Date.now();
+    if (status === 'planning' || status === 'working' || status === 'steering' || status === 'critiquing' || status === 'synthesizing') a.startedAt = Date.now();
     else a.endedAt = Date.now();
     a.status = status;
   };
@@ -175,8 +254,8 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
   };
   const phase = (p: Council['phase']) => { council.phase = p; save(); };
   const cancelled = (): RoomRunState['stopReason'] => {
-    for (const a of Object.values(council.agents)) if (['planning', 'working', 'critiquing', 'synthesizing'].includes(a.status)) { a.status = 'stopped'; a.endedAt = Date.now(); }
-    council.phase = 'stopped'; council.endedAt = Date.now();
+    for (const a of Object.values(council.agents)) if (['planning', 'working', 'steering', 'critiquing', 'synthesizing'].includes(a.status)) { a.status = 'stopped'; a.endedAt = Date.now(); }
+    council.phase = 'stopped'; council.endedAt = Date.now(); council.stop = { reason: 'cancelled' };
     hooks.append({ from: 'system', text: 'Stopped: the council was cancelled; in-flight agent runs were aborted.' });
     save();
     return 'cancelled';
@@ -259,37 +338,144 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
     if (signal.aborted) return cancelled();
   }
 
-  // ---- 3. one parallel critique round ----
+  // ---- 3. captain-steered conversation ----
+  // The captain returns one decision per step. Everything below that bounds the loop is code: only this loop starts turns, a decision is never retried,
+  // and every exit falls through to the synthesis, which always has a turn reserved (an action needs decide + 1 target + synthesis = 3 turns left).
   const critiques = new Map<string, string>();
-  if (answers.size >= 2) {
-    const critics = inOrder(answers).map(([id]) => id).slice(0, Math.max(0, left() - 1));
-    if (critics.length < answers.size) { capHit = true; note(captain.id, 'system', `Turn cap (${cap}): ${answers.size - critics.length} critique(s) skipped.`); }
-    if (critics.length) {
-      const contrarian = pickContrarian(critics, captain.id);
-      phase('critiquing');
-      spend(critics.length);
-      for (const id of critics) setAgent(id, 'critiquing');
+  const followups: SteerState['followups'] = [];
+  const seenAsks = new Set<string>();
+  const norm = (q: string) => q.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  let critiqued = false;
+  let stop: { reason: CouncilStopReason; detail?: string } = { reason: 'done' };
+  const outcomeOf = (ok: number, pass: number, failed: number): CouncilStep['outcome'] => (ok ? 'answered' : failed >= pass + failed ? 'failed' : 'allPass');
+
+  /** The existing parallel critique round; returns [replied, passed, failed]. */
+  async function critiqueRound(critics: string[]): Promise<[number, number, number]> {
+    const contrarian = pickContrarian(critics, captain.id);
+    phase('critiquing');
+    spend(critics.length);
+    for (const id of critics) setAgent(id, 'critiquing');
+    save();
+    let ok = 0; let pass = 0; let failed = 0;
+    await Promise.all(critics.map(async (id) => {
+      const others = inOrder(answers).filter(([k]) => k !== id).map(([k, a]) => ({ id: k, name: nameOf(k), answer: a }));
+      const r = await turn(id, critiquePrompt(ctxFor(byId.get(id)!), text, answers.get(id), others, id === contrarian));
+      if (!r.ok) {
+        if (r.why === 'cancelled') return;
+        failed++;
+        setAgent(id, r.why === 'timeout' ? 'timeout' : 'error');
+        note(id, 'system', r.why === 'timeout' ? `Critique timed out: ${r.message}.` : `Critique failed: ${r.message}`);
+      } else if (isPass(r.text)) {
+        pass++;
+        setAgent(id, 'done');
+        note(id, 'critique', PASS_TOKEN, true);
+      } else {
+        ok++;
+        critiques.set(id, r.text!.trim());
+        setAgent(id, 'done');
+        note(id, 'critique', r.text!.trim());
+      }
       save();
-      await Promise.all(critics.map(async (id) => {
-        const others = inOrder(answers).filter(([k]) => k !== id).map(([k, a]) => ({ id: k, name: nameOf(k), answer: a }));
-        const r = await turn(id, critiquePrompt(ctxFor(byId.get(id)!), text, answers.get(id), others, id === contrarian));
-        if (!r.ok) {
-          if (r.why === 'cancelled') return;
-          setAgent(id, r.why === 'timeout' ? 'timeout' : 'error');
-          note(id, 'system', r.why === 'timeout' ? `Critique timed out: ${r.message}.` : `Critique failed: ${r.message}`);
-        } else if (isPass(r.text)) {
-          setAgent(id, 'done');
-          note(id, 'critique', PASS_TOKEN, true);
-        } else {
-          critiques.set(id, r.text!.trim());
-          setAgent(id, 'done');
-          note(id, 'critique', r.text!.trim());
-        }
-        save();
-      }));
-      if (signal.aborted) return cancelled();
-    }
+    }));
+    return [ok, pass, failed];
   }
+
+  for (;;) {
+    if (!answers.size) { stop = { reason: 'noProgress', detail: 'no member answered, so there is nothing to steer' }; break; }
+    if (steps.length >= maxSteps) { stop = { reason: 'stepLimit', detail: `${maxSteps} captain decision${maxSteps === 1 ? '' : 's'} used` }; break; }
+    if (left() < 3) { stop = { reason: 'cap', detail: `turn cap ${cap}: a step needs the decision, one reply and the synthesis` }; capHit = true; break; }
+    const stepNo = steps.length + 1;
+
+    // The captain decides. A failed, empty, malformed or unknown decision means "synthesize": there is no retry.
+    phase('steering');
+    setAgent(captain.id, 'steering');
+    spend();
+    save();
+    const d = await turn(captain.id, steerPrompt(ctxFor(captain), text, {
+      step: stepNo, maxSteps, turnsLeft: left(), critiqued,
+      answers: inOrder(answers).map(([id, answer]) => ({ id, name: nameOf(id), answer })),
+      followups, critiques: inOrder(critiques).map(([id, t]) => ({ id, name: nameOf(id), text: t })),
+      missing: inOrder(missing).map(([id, why]) => ({ id, name: nameOf(id), why })),
+    }));
+    if (!d.ok && d.why === 'cancelled') return cancelled();
+    setAgent(captain.id, d.ok ? 'idle' : d.why === 'timeout' ? 'timeout' : 'error');
+    if (!d.ok) { stop = { reason: 'captainFailed', detail: d.message }; break; }
+    const dec = parseDecision(d.text, members);
+    if (dec.action === 'synthesize') { stop = { reason: 'done' }; break; }
+    if (dec.action === 'invalid') { stop = { reason: 'malformed', detail: dec.reason }; break; }
+
+    if (dec.action === 'critique') {
+      if (critiqued || answers.size < 2) { stop = { reason: 'noProgress', detail: critiqued ? 'the captain asked for a second critique round' : 'fewer than two answers to critique' }; break; }
+      critiqued = true;
+      const critics = inOrder(answers).map(([id]) => id).slice(0, Math.max(0, left() - 1));
+      if (critics.length < answers.size) { capHit = true; note(captain.id, 'system', `Turn cap (${cap}): ${answers.size - critics.length} critique(s) skipped.`); }
+      note(captain.id, 'decision', `Step ${stepNo}: called a critique round (${critics.map((id) => nameOf(id)).join(', ')}).`);
+      const step: CouncilStep = { step: stepNo, action: 'critique', targets: critics };
+      steps.push(step);
+      const [ok, pass, failed] = await critiqueRound(critics);
+      if (signal.aborted) return cancelled();
+      step.outcome = outcomeOf(ok, pass, failed);
+      if (!ok) { stop = { reason: 'noProgress', detail: failed >= critics.length ? 'every critic timed out or failed' : 'every critic replied PASS' }; break; }
+      continue;
+    }
+
+    // ask: a directed follow-up to one or more members (two of them against each other on a disagreement)
+    const key = `${[...dec.targets].sort().join(',')}|${norm(dec.question)}`;
+    if (seenAsks.has(key)) {
+      note(captain.id, 'decision', `Step ${stepNo}: repeated an earlier question to ${dec.targets.map((id) => nameOf(id)).join(', ')}; not asked again.`);
+      steps.push({ step: stepNo, action: 'ask', targets: dec.targets, question: dec.question, outcome: 'repeat' });
+      stop = { reason: 'noProgress', detail: 'the captain repeated the same targets and question' };
+      break;
+    }
+    seenAsks.add(key);
+    const targets = dec.targets.slice(0, Math.max(0, left() - 1));
+    if (targets.length < dec.targets.length) { capHit = true; note(captain.id, 'system', `Turn cap (${cap}): ${dec.targets.length - targets.length} follow-up(s) skipped.`); }
+    const step: CouncilStep = { step: stepNo, action: 'ask', targets, question: dec.question, ...(dec.unresolved ? { unresolved: dec.unresolved } : {}) };
+    steps.push(step);
+    note(captain.id, 'decision', `Step ${stepNo}: asked ${targets.map((id) => nameOf(id)).join(', ')} about: ${dec.question}${dec.unresolved ? `\nStill unresolved: ${dec.unresolved}` : ''}`);
+    phase('working');
+    spend(targets.length);
+    for (const id of targets) setAgent(id, 'working');
+    save();
+    let ok = 0; let pass = 0; let failed = 0;
+    await Promise.all(targets.map(async (id) => {
+      const peers = inOrder(answers).filter(([k]) => k !== id && targets.includes(k)).map(([k, a]) => ({ id: k, name: nameOf(k), answer: a }));
+      const r = await turn(id, followupPrompt(ctxFor(byId.get(id)!), text, answers.get(id), dec.question, peers, stepNo));
+      if (!r.ok) {
+        if (r.why === 'cancelled') return;
+        failed++;
+        setAgent(id, r.why === 'timeout' ? 'timeout' : 'error');
+        note(id, 'system', r.why === 'timeout' ? `Follow-up timed out: ${r.message}.` : `Follow-up failed: ${r.message}`);
+      } else if (isPass(r.text)) {
+        pass++;
+        setAgent(id, 'done');
+        followups.push({ step: stepNo, id, name: nameOf(id), question: dec.question, text: null });
+        note(id, 'followup', 'Nothing to add.', true);
+      } else {
+        ok++;
+        const t = r.text!.trim();
+        setAgent(id, 'done');
+        followups.push({ step: stepNo, id, name: nameOf(id), question: dec.question, text: t });
+        if (!answers.has(id)) { answers.set(id, t); missing.delete(id); } // a member that missed the first round and now answers counts as having answered
+        note(id, 'followup', t);
+      }
+      save();
+    }));
+    if (signal.aborted) return cancelled();
+    step.outcome = outcomeOf(ok, pass, failed);
+    if (!ok) { stop = { reason: 'noProgress', detail: failed >= targets.length ? 'every target timed out or failed' : 'every target replied PASS' }; break; }
+  }
+  council.stop = stop;
+  const STOP_TEXT: Record<CouncilStopReason, string> = {
+    done: 'Captain is done: the answer is good enough.',
+    stepLimit: `Step limit reached${stop.detail ? ` (${stop.detail})` : ''}: moving to the answer.`,
+    cap: `Turn cap reached${stop.detail ? ` (${stop.detail})` : ''}: moving to the answer.`,
+    noProgress: `No progress${stop.detail ? `: ${stop.detail}` : ''}: moving to the answer.`,
+    malformed: `The captain's decision was unusable${stop.detail ? ` (${stop.detail})` : ''}: moving to the answer.`,
+    captainFailed: `The captain could not decide${stop.detail ? ` (${stop.detail})` : ''}: moving to the answer.`,
+    cancelled: 'Cancelled.',
+  };
+  note(captain.id, 'system', STOP_TEXT[stop.reason]);
 
   // ---- 4. synthesis ----
   phase('synthesizing');
@@ -301,6 +487,8 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
     answers: inOrder(answers).map(([id, answer]) => ({ id, name: nameOf(id), answer })),
     critiques: inOrder(critiques).map(([id, t]) => ({ id, name: nameOf(id), text: t })),
     missing: inOrder(missing).map(([id, why]) => ({ id, name: nameOf(id), why })),
+    followups,
+    ...(stop.reason === 'done' ? {} : { stopped: STOP_TEXT[stop.reason].replace(/: moving to the answer\.$/, '') }),
   };
   const r = await turn(captain.id, synthesizePrompt(ctxFor(captain), text, input));
   if (!r.ok && r.why === 'cancelled') return cancelled();
@@ -309,7 +497,7 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
   else {
     // The captain could not synthesize: still give Zach one reply, built from what the members said, and say so.
     const why = r.ok ? 'returned nothing' : r.message;
-    final = `The captain (${captain.name}) could not write the summary (${why}), so here is what the council produced.\n\n${input.answers.map((a) => `${a.name}: ${a.answer}`).join('\n\n') || '(no member answers arrived)'}${input.critiques.length ? `\n\nFlagged:\n${input.critiques.map((c) => `${c.name}: ${c.text}`).join('\n')}` : ''}`;
+    final = `The captain (${captain.name}) could not write the summary (${why}), so here is what the council produced.\n\n${input.answers.map((a) => `${a.name}: ${a.answer}`).join('\n\n') || '(no member answers arrived)'}${followups.filter((f) => f.text).length ? `\n\nFollow-ups:\n${followups.filter((f) => f.text).map((f) => `${f.name}: ${f.text}`).join('\n')}` : ''}${input.critiques.length ? `\n\nFlagged:\n${input.critiques.map((c) => `${c.name}: ${c.text}`).join('\n')}` : ''}`;
     note(captain.id, 'system', `Synthesis failed (${why}); showing the raw member answers.`);
   }
   const msg = hooks.append({ from: captain.id, text: final, council: council.id });

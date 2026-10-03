@@ -5,7 +5,7 @@
 //   GET /api/history?source=..&key=<sessionKey>
 //   POST /api/send?source=..   {key, message}  ("Message agent": one Gateway sessions.send; needs header x-agent-os-send: 1)
 //   GET  /api/rooms            rooms + the live agent list (PHI excluded)      GET /api/rooms/:id   one room with its thread and run state
-//   POST /api/rooms {name, members, maxRounds?, maxTurns?}   create             POST /api/rooms/:id {name?, addMembers?, removeMembers?, archived?, maxRounds?, maxTurns?}
+//   POST /api/rooms {name, members, maxRounds?, maxTurns?, maxSteps?}   create             POST /api/rooms/:id {name?, addMembers?, removeMembers?, archived?, maxRounds?, maxTurns?, maxSteps?}
 //   POST /api/rooms/:id/send {message}   one bounded run: council (default: captain plan -> parallel work -> critique -> synthesis; @mention bypasses it) or round-table
 //   POST /api/rooms/:id/stop   aborts every in-flight member run (chat.abort, room sessions only)      update also takes {captain?, mode?, memberTimeoutSec?}
 //   Room writes use the same guard as /api/send (JSON + x-agent-os-send: 1, same body cap).

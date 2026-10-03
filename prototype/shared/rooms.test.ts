@@ -20,9 +20,13 @@ test('gating: no mention = everyone, mention = only those, gating off = everyone
   assert.deepEqual(selectResponders('@bravo status?', M, false), ['alpha', 'bravo', 'forge-coder']);
 });
 
-test('settings clamp: rounds 1-4 default 1, turns default = member count', () => {
-  assert.deepEqual(normalizeSettings({ mode: 'roundtable' }, 3), { maxRounds: 1, maxTurns: 3, mentionGating: true, mode: 'roundtable', memberTimeoutSec: 90 });
-  assert.deepEqual(normalizeSettings(undefined, 3), { maxRounds: 1, maxTurns: 8, mentionGating: true, mode: 'council', memberTimeoutSec: 90 }); // council default: plan + 3 answers + 3 critiques + synthesis
+test('settings clamp: rounds 1-4 default 1, turns default = member count, steps 1-4 default 3', () => {
+  assert.deepEqual(normalizeSettings({ mode: 'roundtable' }, 3), { maxRounds: 1, maxTurns: 3, maxSteps: 3, mentionGating: true, mode: 'roundtable', memberTimeoutSec: 90 });
+  assert.deepEqual(normalizeSettings(undefined, 3), { maxRounds: 1, maxTurns: 12, maxSteps: 3, mentionGating: true, mode: 'council', memberTimeoutSec: 90 }); // council default 3n+3
+  assert.equal(normalizeSettings(undefined, 20).maxTurns, 32); // clamped
+  assert.equal(normalizeSettings({ maxSteps: 9 } as never, 3).maxSteps, 4);
+  assert.equal(normalizeSettings({ maxSteps: 0 } as never, 3).maxSteps, 1);
+  assert.equal(normalizeSettings({ maxSteps: 'x' as never }, 3).maxSteps, 3);
   assert.equal(normalizeSettings({ maxRounds: 99 } as never, 3).maxRounds, 4);
   assert.equal(normalizeSettings({ maxRounds: 0 } as never, 3).maxRounds, 1);
   assert.equal(normalizeSettings({ maxTurns: 500 } as never, 3).maxTurns, 32);
@@ -40,7 +44,7 @@ test('pass detection', () => {
 });
 
 function harness(settings: Partial<Room>, members = M) {
-  const room: Room = { id: 'r1', name: 'T', members: members.map((m) => m.id), captain: members[0].id, councils: [], archived: false, createdAt: 0, updatedAt: 0, messages: [], maxRounds: 1, maxTurns: 3, mentionGating: true, mode: 'roundtable', memberTimeoutSec: 90, ...settings };
+  const room: Room = { id: 'r1', name: 'T', members: members.map((m) => m.id), captain: members[0].id, councils: [], archived: false, createdAt: 0, updatedAt: 0, messages: [], maxRounds: 1, maxTurns: 3, maxSteps: 3, mentionGating: true, mode: 'roundtable', memberTimeoutSec: 90, ...settings };
   let n = 0;
   const state: Partial<RoomRunState> = {};
   const hooks = {

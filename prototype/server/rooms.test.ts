@@ -25,13 +25,16 @@ function fakeGateway(delays: Record<string, number> = {}) {
 }
 const tmp = () => mkdtempSync(join(tmpdir(), 'aos-rooms-'));
 
-test('new rooms: council by default, captain = first member (or rfc-lead when present), maxTurns = 2n+2', async () => {
+test('new rooms: council by default, captain = first member (or rfc-lead when present), maxTurns = 3n+3, maxSteps 3', async () => {
   const { gw } = fakeGateway();
   const svc = createRoomsService({ gateway: gw });
   const a = await svc.create({ name: 'A', members: ['rfc-skeptic', 'rfc-scribe'] });
   assert.equal(a.room.mode, 'council');
   assert.equal(a.room.captain, 'rfc-skeptic');
-  assert.equal(a.room.maxTurns, 6);
+  assert.equal(a.room.maxTurns, 9);
+  assert.equal(a.room.maxSteps, 3);
+  assert.equal((await svc.update(a.room.id, { maxSteps: 9 })).room.maxSteps, 4); // clamped to 1-4
+  assert.equal((await svc.update(a.room.id, { maxSteps: 2 })).room.maxSteps, 2);
   const b = await svc.create({ name: 'B', members: ['rfc-skeptic', 'rfc-lead'] });
   assert.equal(b.room.captain, 'rfc-lead');
   const c = await svc.update(b.room.id, { captain: 'rfc-skeptic' });
@@ -52,9 +55,13 @@ test('a message runs the council: ONE captain reply, persisted plan/notes/final,
   await svc.idle(room.id);
   const v = await svc.get(room.id);
   assert.deepEqual(v.room.messages.filter((m) => m.from !== 'system').map((m) => m.from), ['you', 'rfc-lead']);
-  assert.equal(log.length, 8);
+  assert.equal(log.length, 9); // plan + 3 answers + 2 steer decisions + 2 follow-ups + synthesis
+  assert.deepEqual(log.map((l) => l.role), ['CAPTAIN-PLAN', 'SPECIALIST', 'SPECIALIST', 'SPECIALIST', 'CAPTAIN-STEER', 'FOLLOW-UP', 'FOLLOW-UP', 'CAPTAIN-STEER', 'CAPTAIN-SYNTHESIZE']);
   assert.equal(v.room.councils.length, 1);
   const c = v.room.councils[0];
+  assert.equal(c.maxSteps, 3);
+  assert.equal(c.steps?.length, 1);
+  assert.deepEqual(c.stop, { reason: 'done' });
   assert.equal(c.phase, 'done');
   assert.equal(c.finalId, v.room.messages.find((m) => m.council)!.id);
   assert.ok(c.plan && !c.plan.fallback && c.notes.length >= 7);
@@ -83,7 +90,7 @@ test('@mention bypass: straight to that agent, no council record; @all and no-me
   await svc.idle(room.id);
   v = await svc.get(room.id);
   assert.equal(v.room.councils.length, 1);
-  assert.equal(log.length, 8);
+  assert.equal(log.length, 6); // no cue: the captain stops right after the first answers
   const rt = await svc.update(room.id, { mode: 'roundtable' });
   assert.equal(rt.room.mode, 'roundtable');
   log.length = 0;
@@ -146,11 +153,13 @@ test('old rooms.json (version 1, no mode/captain/councils) loads: RFC Council ge
   const rfc = (await svc.get('rc1cabea9')).room;
   assert.equal(rfc.captain, 'rfc-lead');
   assert.equal(rfc.mode, 'council');
-  assert.equal(rfc.maxTurns, 8); // old default cap (= members) raised to a full council
+  assert.equal(rfc.maxTurns, 12); // old default cap (= members) raised to a full captain-led council (3n+3)
+  assert.equal(rfc.maxSteps, 3);
   assert.equal(rfc.messages.length, 2);
   const other = (await svc.get('r11111111')).room;
   assert.equal(other.captain, 'forge');
   assert.equal(other.maxTurns, 5);
+  assert.equal(other.maxSteps, 3);
   assert.equal(other.mentionGating, false);
   assert.equal(readFileSync(file, 'utf8'), raw, 'load does not rewrite the file');
   await svc.update('rc1cabea9', { name: 'RFC Council' }); // first save writes the migrated shape
@@ -171,5 +180,19 @@ test('a council that was mid-run when the server died loads as stopped, not fore
   const c = (await svc.get('r22222222')).room.councils[0];
   assert.equal(c.phase, 'stopped');
   assert.equal(c.agents['rfc-skeptic'].status, 'stopped');
+  svc.close(); rmSync(dir, { recursive: true });
+});
+
+test('rooms.json migration for captain-led steering: no maxSteps -> 3; the old 2n+2 default becomes 3n+3 once; custom caps and explicit maxSteps are kept', async () => {
+  const dir = tmp();
+  const file = join(dir, 'rooms.json');
+  const mk = (id: string, over: Record<string, unknown>) => ({ id, name: id, members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'], captain: 'rfc-lead', mode: 'council', archived: false, createdAt: 1, updatedAt: 2, maxRounds: 1, maxTurns: 8, mentionGating: true, memberTimeoutSec: 90, messages: [], councils: [], ...over });
+  writeFileSync(file, JSON.stringify({ version: 2, rooms: [mk('r10000001', {}), mk('r10000002', { maxTurns: 20 }), mk('r10000003', { maxSteps: 2 }), mk('r10000004', { mode: 'roundtable', maxTurns: 8 })] }));
+  const svc = createRoomsService({ gateway: fakeGateway().gw, file });
+  const get = async (id: string) => (await svc.get(id)).room;
+  assert.deepEqual([(await get('r10000001')).maxTurns, (await get('r10000001')).maxSteps], [12, 3]);
+  assert.deepEqual([(await get('r10000002')).maxTurns, (await get('r10000002')).maxSteps], [20, 3]);
+  assert.deepEqual([(await get('r10000003')).maxTurns, (await get('r10000003')).maxSteps], [8, 2]); // already migrated: an explicit 8 is not raised again
+  assert.deepEqual([(await get('r10000004')).maxTurns, (await get('r10000004')).maxSteps], [8, 3]); // round-table keeps its cap
   svc.close(); rmSync(dir, { recursive: true });
 });
