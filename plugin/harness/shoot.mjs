@@ -113,8 +113,6 @@ await page.waitForFunction(() => document.querySelectorAll(".rm-members .rm-chip
 await page.waitForTimeout(300);
 await shot("1c-room-members-removed");
 await page.selectOption("[data-set=maxRounds]", "3");
-await page.locator("[data-set=maxTurns]").fill("5");
-await page.locator("[data-set=maxTurns]").dispatchEvent("change");
 await page.waitForTimeout(500);
 await say("pingpong between you all", 9);
 await page.waitForTimeout(400);

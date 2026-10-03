@@ -16,9 +16,9 @@ export interface RoomGateway {
   listAgents(): Promise<RoomAgent[]>;
   /** Idempotent: make sure the dedicated room session exists. */
   ensureSession(agentId: string, roomId: string, label: string): Promise<void>;
-  /** One turn on that session: send `prompt`, wait for the run to finish, return the reply text (null if none). `timeoutMs` is a backstop deadline for the wait. */
-  turn(agentId: string, roomId: string, prompt: string, signal: AbortSignal, timeoutMs?: number): Promise<string | null>;
-  /** Cancel that room session's in-flight run (Stop, member timeout). Best effort. */
+  /** One turn on that session: send `prompt`, wait for the run to finish, return the reply text (null if none). There is no deadline: it ends with a reply, an error, or the signal (Stop). */
+  turn(agentId: string, roomId: string, prompt: string, signal: AbortSignal): Promise<string | null>;
+  /** Cancel that room session's in-flight run (Stop). Best effort. */
   abort?(agentId: string, roomId: string): Promise<void>;
 }
 
@@ -31,7 +31,7 @@ export const ROOM_KEY_RE = /^agent:([a-z0-9][a-z0-9_-]{0,63}):room-(r[0-9a-f]{8}
 export function isRoomKey(key: string) { const m = ROOM_KEY_RE.exec(key); return !!m && !isExcludedAgent(m[1]); }
 
 export interface RoomView { room: Room; members: Array<RoomAgent>; run: RoomRunState | null }
-export interface RoomSummary { id: string; name: string; members: string[]; archived: boolean; updatedAt: number; last?: { from: string; text: string; ts: number }; running: boolean; maxRounds: number; maxTurns: number; maxSteps: number; mode: Room['mode']; captain: string }
+export interface RoomSummary { id: string; name: string; members: string[]; archived: boolean; updatedAt: number; last?: { from: string; text: string; ts: number }; running: boolean; maxRounds: number; maxSteps: number; mode: Room['mode']; captain: string }
 
 export function createRoomsService(opts: { gateway: RoomGateway; file?: string; agentTtlMs?: number }) {
   const { gateway } = opts;
@@ -109,7 +109,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
 
   const summary = (r: Room): RoomSummary => {
     const last = [...r.messages].reverse().find((m) => m.from !== 'system');
-    return { id: r.id, name: r.name, members: r.members, archived: r.archived, updatedAt: r.updatedAt, running: runs.has(r.id), maxRounds: r.maxRounds, maxTurns: r.maxTurns, maxSteps: r.maxSteps, mode: r.mode, captain: r.captain, ...(last ? { last: { from: last.from, text: last.text.slice(0, 120), ts: last.ts } } : {}) };
+    return { id: r.id, name: r.name, members: r.members, archived: r.archived, updatedAt: r.updatedAt, running: runs.has(r.id), maxRounds: r.maxRounds, maxSteps: r.maxSteps, mode: r.mode, captain: r.captain, ...(last ? { last: { from: last.from, text: last.text.slice(0, 120), ts: last.ts } } : {}) };
   };
 
   return {
@@ -125,7 +125,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       if (rooms.size >= MAX_ROOMS) throw new RoomError(400, `at most ${MAX_ROOMS} rooms`);
       const members = await validMembers(body.members ?? []);
       const now = Date.now();
-      const room: Room = { id: `r${randomBytes(4).toString('hex')}`, name: cleanName(body.name), members, captain: resolveCaptain(body.captain, members), councils: [], archived: false, createdAt: now, updatedAt: now, messages: [], ...normalizeSettings(body, members.length) };
+      const room: Room = { id: `r${randomBytes(4).toString('hex')}`, name: cleanName(body.name), members, captain: resolveCaptain(body.captain, members), councils: [], archived: false, createdAt: now, updatedAt: now, messages: [], ...normalizeSettings(body) };
       rooms.set(room.id, room);
       persist();
       return this.get(room.id);
@@ -148,10 +148,8 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
         if (patch.mode !== 'council' && patch.mode !== 'roundtable') throw new RoomError(400, 'mode must be council or roundtable');
         r.mode = patch.mode;
       }
-      if (patch.memberTimeoutSec !== undefined) r.memberTimeoutSec = clampInt(patch.memberTimeoutSec, 1, 600, r.memberTimeoutSec);
       r.captain = resolveCaptain(r.captain, r.members); // members changed: the captain stays a member (rfc-lead, else the first)
       if (patch.maxRounds !== undefined) r.maxRounds = clampInt(patch.maxRounds, 1, 4, r.maxRounds);
-      if (patch.maxTurns !== undefined) r.maxTurns = clampInt(patch.maxTurns, 1, 32, r.maxTurns);
       if (patch.maxSteps !== undefined) r.maxSteps = clampInt(patch.maxSteps, 1, MAX_STEPS_LIMIT, r.maxSteps);
       if (typeof patch.mentionGating === 'boolean') r.mentionGating = patch.mentionGating;
       if (typeof patch.archived === 'boolean') {
@@ -175,7 +173,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       const members: RoomMember[] = r.members.filter((m) => !isExcludedAgent(m)).map((m) => ({ id: m, name: info(list, m).name }));
       const trigger = add(r, { from: YOU, text: msg });
       const abort = new AbortController();
-      const state: RoomRunState = { id: `run${trigger.id}`, status: 'running', round: 1, turnsUsed: 0, maxTurns: r.maxTurns, maxRounds: r.maxRounds, mode: r.mode, maxSteps: r.maxSteps };
+      const state: RoomRunState = { id: `run${trigger.id}`, status: 'running', round: 1, turnsUsed: 0, maxRounds: r.maxRounds, mode: r.mode, maxSteps: r.maxSteps };
       const transport: RoomTransport = {
         async turn(agentId, prompt, signal) {
           await gateway.ensureSession(agentId, id, `Room: ${r.name}`);
@@ -189,18 +187,18 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       let flow: Promise<RoomRunState['stopReason']>;
       if (useCouncil) {
         const captain = members.some((m) => m.id === r.captain) ? r.captain : members[0].id;
-        const council: Council = { id: trigger.id, captain, phase: 'planning', startedAt: Date.now(), agents: {}, notes: [], turnsUsed: 0, maxTurns: r.maxTurns, maxSteps: r.maxSteps, steps: [] };
+        const council: Council = { id: trigger.id, captain, phase: 'planning', startedAt: Date.now(), agents: {}, notes: [], turnsUsed: 0, maxSteps: r.maxSteps, steps: [] };
         r.councils.push(council);
         if (r.councils.length > MAX_COUNCILS) r.councils.splice(0, r.councils.length - MAX_COUNCILS);
         state.phase = 'planning';
         const ctransport: RoomTransport = {
           async turn(agentId, prompt, signal) {
             await gateway.ensureSession(agentId, id, `Room: ${r.name}`);
-            return gateway.turn(agentId, id, prompt, signal, r.memberTimeoutSec * 1000 + 15_000);
+            return gateway.turn(agentId, id, prompt, signal);
           },
           abort(agentId) { void gateway.abort?.(agentId, id).catch(() => undefined); },
         };
-        flow = runCouncil(r, members, trigger, council, ctransport, { ...hooks, save: () => { touch(r); persist(); } }, abort.signal, { memberTimeoutMs: r.memberTimeoutSec * 1000, maxSteps: r.maxSteps });
+        flow = runCouncil(r, members, trigger, council, ctransport, { ...hooks, save: () => { touch(r); persist(); } }, abort.signal, { maxSteps: r.maxSteps });
       } else {
         // Round-table loop; a bypass runs it for just the @mentioned members.
         flow = runRound(r, members, trigger, transport, hooks, abort.signal);

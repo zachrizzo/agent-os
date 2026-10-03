@@ -7,10 +7,10 @@
 //                    {"action":"synthesize"}                              done
 //   4. SYNTHESIZE  the captain writes the ONE reply to Zach, saying which disagreements it resolved and any real trade-off Zach must choose.
 // NOT A LOOP, enforced here in code (never only in a prompt): only the captain routes turns (member replies are data: no @mention parsing, no member-to-member
-// calls); captain decisions are limited by maxSteps (default 3, max 4) on top of the maxTurns backstop; one turn is always reserved for the synthesis, so any limit
-// ends in a reply; a repeated ask, a round where every target PASSes or fails, or a malformed/unknown/failed captain decision stops the steering (never a retry).
+// calls); captain decisions are limited by maxSteps (default 3, max 4) and nothing else caps turns: there is no turn cap and no per-member timeout, only Stop; the synthesis always runs after the steering loop, so every uncancelled run ends in
+// one reply; a repeated ask, a round where every target PASSes or fails, or a malformed/unknown/failed captain decision stops the steering (never a retry).
 // The protocol is injected into every message by the data server (nothing depends on an agent's AGENTS.md; the agent's own rules still apply on top).
-// Pure logic, no I/O: the transport is injected, so the whole flow is unit-testable. maxTurns is a hard cap across all phases; every member turn has a timeout.
+// Pure logic, no I/O: the transport is injected, so the whole flow is unit-testable. There is no turn cap and no member timeout: a run ends through the guards above or Stop.
 import {
   DEFAULT_MAX_STEPS, MAX_STEPS_LIMIT, PASS_TOKEN, isPass, parseMentions, slug, transcriptBlock,
   type Council, type CouncilAgentStatus, type CouncilNote, type CouncilStep, type CouncilStopReason, type CouncilTask, type Room, type RoomMember, type RoomMessage, type RoomRunState, type RoomTransport,
@@ -71,7 +71,7 @@ export function critiquePrompt(ctx: Ctx, text: string, own: string | undefined, 
 }
 
 export interface SteerState {
-  step: number; maxSteps: number; turnsLeft: number; critiqued: boolean;
+  step: number; maxSteps: number; critiqued: boolean;
   answers: Array<{ id: string; name: string; answer: string }>;
   followups: Array<{ step: number; id: string; name: string; question: string; text: string | null }>;
   critiques: Array<{ id: string; name: string; text: string }>;
@@ -81,7 +81,7 @@ export interface SteerState {
 export function steerPrompt(ctx: Ctx, text: string, st: SteerState): string {
   return [
     header(ctx, 'CAPTAIN-STEER'),
-    `You are the captain and you LEAD this conversation. The members have answered. Decide the one next move. First name, to yourself, what is still unresolved: a real disagreement between members, a gap, or an unverified claim that would change your answer to Zach. Then pick who resolves it. If nothing like that exists, stop.\nSTOPPING IS THE DEFAULT: choose synthesize as soon as the answer is good enough. Do not ask for polish, confirmation or "double checks", and never repeat an earlier question. To settle a disagreement, ask the members who disagree and name the point at issue. A critique round is for when you suspect problems you cannot locate yourself; it can run at most once${st.critiqued ? ' and it already ran' : ''}.\nThis is step ${st.step} of at most ${st.maxSteps}; ${st.turnsLeft} agent turns remain, and one is always kept for your final reply.`,
+    `You are the captain and you LEAD this conversation. The members have answered. Decide the one next move. First name, to yourself, what is still unresolved: a real disagreement between members, a gap, or an unverified claim that would change your answer to Zach. Then pick who resolves it. If nothing like that exists, stop.\nSTOPPING IS THE DEFAULT: choose synthesize as soon as the answer is good enough. Do not ask for polish, confirmation or "double checks", and never repeat an earlier question. To settle a disagreement, ask the members who disagree and name the point at issue. A critique round is for when you suspect problems you cannot locate yourself; it can run at most once${st.critiqued ? ' and it already ran' : ''}.\nThis is step ${st.step} of at most ${st.maxSteps}; stopping early is always allowed, and you write the final reply afterwards.`,
     `Original message from You:\n${text}`,
     st.answers.length ? `Member answers:\n${st.answers.map((a) => `${a.name} (@${a.id}): ${clip(a.answer, ANSWER_CHARS)}`).join('\n\n')}` : 'No member has answered.',
     st.followups.length ? `Follow-ups so far:\n${st.followups.map((f) => `Step ${f.step}, ${f.name} (@${f.id}) was asked "${clip(oneLine(f.question), 200)}": ${f.text === null ? PASS_TOKEN : clip(f.text, CRITIQUE_CHARS)}`).join('\n\n')}` : '',
@@ -109,7 +109,7 @@ export interface SynthInput {
   critiques: Array<{ id: string; name: string; text: string }>;
   missing: Array<{ id: string; name: string; why: string }>;
   followups?: SteerState['followups'];
-  /** Set when steering was cut short (step limit, cap, no progress, unusable decision): the captain should say what is still open. */
+  /** Set when steering was cut short (step limit, no progress, unusable decision): the captain should say what is still open. */
   stopped?: string;
 }
 export function synthesizePrompt(ctx: Ctx, text: string, input: SynthInput): string {
@@ -224,22 +224,20 @@ export interface CouncilHooks {
   save(): void;
   state(patch: Partial<RoomRunState>): void;
 }
-export interface CouncilOpts { memberTimeoutMs: number; /** Captain decisions allowed (1-4, default 3). */ maxSteps?: number }
+export interface CouncilOpts { /** Captain decisions allowed (1-4, default 3). */ maxSteps?: number }
 
-type TurnOutcome = { ok: true; text: string | null } | { ok: false; why: 'timeout' | 'error' | 'cancelled'; message: string };
+type TurnOutcome = { ok: true; text: string | null } | { ok: false; why: 'error' | 'cancelled'; message: string };
 
 /** One Zach message -> plan, parallel work, captain-steered follow-ups (bounded), synthesis. Never throws for an agent failure. */
 export async function runCouncil(room: Room, members: RoomMember[], trigger: RoomMessage, council: Council, transport: RoomTransport, hooks: CouncilHooks, signal: AbortSignal, opts: CouncilOpts): Promise<RoomRunState['stopReason']> {
   const text = trigger.text;
   const byId = new Map(members.map((m) => [m.id, m]));
   const captain = byId.get(council.captain) ?? members[0];
-  const cap = council.maxTurns;
   const nameOf = (id: string) => byId.get(id)?.name ?? id;
   const ctxFor = (agent: RoomMember): Ctx => ({ room, members, captain, agent });
   const maxSteps = Math.max(1, Math.min(MAX_STEPS_LIMIT, Math.trunc(opts.maxSteps ?? council.maxSteps ?? DEFAULT_MAX_STEPS) || DEFAULT_MAX_STEPS));
   council.maxSteps = maxSteps;
   const steps: CouncilStep[] = (council.steps = []);
-  let capHit = false;
   let seq = 0;
 
   const save = () => { hooks.state({ turnsUsed: council.turnsUsed, phase: council.phase, mode: 'council', steps: steps.length, maxSteps }); hooks.save(); };
@@ -261,56 +259,46 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
     return 'cancelled';
   };
 
-  /** One member turn with its own timeout. Timeout or Stop also aborts that agent's Gateway run so it stops spending tokens. */
-  async function turn(id: string, prompt: string, timeoutMs = opts.memberTimeoutMs): Promise<TurnOutcome> {
+  /** One member turn. There is no timeout: it ends by replying, failing, or Stop (which also aborts that agent's Gateway run so it stops spending tokens). */
+  async function turn(id: string, prompt: string): Promise<TurnOutcome> {
     if (signal.aborted) return { ok: false, why: 'cancelled', message: 'cancelled' };
     const ac = new AbortController();
     const onAbort = () => ac.abort();
     signal.addEventListener('abort', onAbort, { once: true });
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; ac.abort(); }, timeoutMs);
     try {
       return { ok: true, text: await transport.turn(id, prompt, ac.signal) };
     } catch (e) {
       if (signal.aborted) return { ok: false, why: 'cancelled', message: 'cancelled' };
-      if (timedOut) return { ok: false, why: 'timeout', message: `no reply within ${Math.round(timeoutMs / 1000)}s` };
       return { ok: false, why: 'error', message: (e as Error).message };
     } finally {
-      clearTimeout(timer);
       signal.removeEventListener('abort', onAbort);
       if (ac.signal.aborted) { try { transport.abort?.(id); } catch { /* best effort */ } }
     }
   }
   const inOrder = <T>(m: Map<string, T>) => members.map((x) => x.id).filter((id) => m.has(id)).map((id) => [id, m.get(id)!] as const); // member order, not completion order
   const spend = (n = 1) => { council.turnsUsed += n; };
-  const left = () => cap - council.turnsUsed;
 
   // ---- 1. plan ----
   let plan: ParsedPlan | undefined;
-  const canPlan = left() >= 2; // plan + synthesis; below that the captain simply answers
-  if (canPlan) {
+  {
     phase('planning');
     setAgent(captain.id, 'planning'); save();
     spend();
     const r = await turn(captain.id, planPrompt(ctxFor(captain), text, room.messages.filter((m) => m.id !== trigger.id && !m.council)));
     if (!r.ok && r.why === 'cancelled') return cancelled();
     plan = parsePlan(r.ok ? r.text : null, members, text);
-    if (!r.ok) { plan.reason = `captain plan failed (${r.message})`; setAgent(captain.id, r.why === 'timeout' ? 'timeout' : 'error'); }
+    if (!r.ok) { plan.reason = `captain plan failed (${r.message})`; setAgent(captain.id, 'error'); }
     council.plan = plan;
     if (council.agents[captain.id]?.status === 'planning') setAgent(captain.id, 'idle'); // planning is over; the captain waits for the members
     note(captain.id, 'plan', plan.fallback ? `No usable plan (${plan.reason}); every member gets the whole question.` : `${plan.note ? `${plan.note}\n` : ''}${plan.tasks.map((t) => `@${t.agent}: ${t.question}`).join('\n')}`);
     save();
-  } else {
-    capHit = true;
   }
 
   // ---- 2. parallel work ----
   const answers = new Map<string, string>();
   const missing = new Map<string, string>();
   let tasks = plan ? [...plan.tasks.filter((t) => t.agent !== captain.id), ...plan.tasks.filter((t) => t.agent === captain.id)] : [];
-  const room1 = Math.max(0, left() - 1); // keep one turn for the synthesis
-  const runTasks = tasks.slice(0, room1);
-  for (const t of tasks.slice(room1)) { setAgent(t.agent, 'skipped'); missing.set(t.agent, '(skipped: turn cap)'); capHit = true; }
+  const runTasks = tasks;
   for (const m of members) if (!council.agents[m.id]) council.agents[m.id] = { status: 'idle' };
   if (runTasks.length) {
     phase('working');
@@ -322,9 +310,9 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
       const r = await turn(t.agent, specialistPrompt(ctxFor(agent), text, t.question));
       if (!r.ok) {
         if (r.why === 'cancelled') return;
-        setAgent(t.agent, r.why === 'timeout' ? 'timeout' : 'error');
-        missing.set(t.agent, r.why === 'timeout' ? `(timed out: ${r.message})` : `(failed: ${r.message})`);
-        note(t.agent, 'system', r.why === 'timeout' ? `Timed out: ${r.message}. The captain proceeds without it.` : `Did not answer: ${r.message}`);
+        setAgent(t.agent, 'error');
+        missing.set(t.agent, `(failed: ${r.message})`);
+        note(t.agent, 'system', `Did not answer: ${r.message}`);
       } else if (isPass(r.text)) {
         setAgent(t.agent, 'done');
         note(t.agent, 'answer', 'No answer given.', true);
@@ -363,8 +351,8 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
       if (!r.ok) {
         if (r.why === 'cancelled') return;
         failed++;
-        setAgent(id, r.why === 'timeout' ? 'timeout' : 'error');
-        note(id, 'system', r.why === 'timeout' ? `Critique timed out: ${r.message}.` : `Critique failed: ${r.message}`);
+        setAgent(id, 'error');
+        note(id, 'system', `Critique failed: ${r.message}`);
       } else if (isPass(r.text)) {
         pass++;
         setAgent(id, 'done');
@@ -383,7 +371,6 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
   for (;;) {
     if (!answers.size) { stop = { reason: 'noProgress', detail: 'no member answered, so there is nothing to steer' }; break; }
     if (steps.length >= maxSteps) { stop = { reason: 'stepLimit', detail: `${maxSteps} captain decision${maxSteps === 1 ? '' : 's'} used` }; break; }
-    if (left() < 3) { stop = { reason: 'cap', detail: `turn cap ${cap}: a step needs the decision, one reply and the synthesis` }; capHit = true; break; }
     const stepNo = steps.length + 1;
 
     // The captain decides. A failed, empty, malformed or unknown decision means "synthesize": there is no retry.
@@ -392,13 +379,13 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
     spend();
     save();
     const d = await turn(captain.id, steerPrompt(ctxFor(captain), text, {
-      step: stepNo, maxSteps, turnsLeft: left(), critiqued,
+      step: stepNo, maxSteps, critiqued,
       answers: inOrder(answers).map(([id, answer]) => ({ id, name: nameOf(id), answer })),
       followups, critiques: inOrder(critiques).map(([id, t]) => ({ id, name: nameOf(id), text: t })),
       missing: inOrder(missing).map(([id, why]) => ({ id, name: nameOf(id), why })),
     }));
     if (!d.ok && d.why === 'cancelled') return cancelled();
-    setAgent(captain.id, d.ok ? 'idle' : d.why === 'timeout' ? 'timeout' : 'error');
+    setAgent(captain.id, d.ok ? 'idle' : 'error');
     if (!d.ok) { stop = { reason: 'captainFailed', detail: d.message }; break; }
     const dec = parseDecision(d.text, members);
     if (dec.action === 'synthesize') { stop = { reason: 'done' }; break; }
@@ -407,8 +394,7 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
     if (dec.action === 'critique') {
       if (critiqued || answers.size < 2) { stop = { reason: 'noProgress', detail: critiqued ? 'the captain asked for a second critique round' : 'fewer than two answers to critique' }; break; }
       critiqued = true;
-      const critics = inOrder(answers).map(([id]) => id).slice(0, Math.max(0, left() - 1));
-      if (critics.length < answers.size) { capHit = true; note(captain.id, 'system', `Turn cap (${cap}): ${answers.size - critics.length} critique(s) skipped.`); }
+      const critics = inOrder(answers).map(([id]) => id);
       note(captain.id, 'decision', `Step ${stepNo}: called a critique round (${critics.map((id) => nameOf(id)).join(', ')}).`);
       const step: CouncilStep = { step: stepNo, action: 'critique', targets: critics };
       steps.push(step);
@@ -428,8 +414,7 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
       break;
     }
     seenAsks.add(key);
-    const targets = dec.targets.slice(0, Math.max(0, left() - 1));
-    if (targets.length < dec.targets.length) { capHit = true; note(captain.id, 'system', `Turn cap (${cap}): ${dec.targets.length - targets.length} follow-up(s) skipped.`); }
+    const targets = dec.targets;
     const step: CouncilStep = { step: stepNo, action: 'ask', targets, question: dec.question, ...(dec.unresolved ? { unresolved: dec.unresolved } : {}) };
     steps.push(step);
     note(captain.id, 'decision', `Step ${stepNo}: asked ${targets.map((id) => nameOf(id)).join(', ')} about: ${dec.question}${dec.unresolved ? `\nStill unresolved: ${dec.unresolved}` : ''}`);
@@ -444,8 +429,8 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
       if (!r.ok) {
         if (r.why === 'cancelled') return;
         failed++;
-        setAgent(id, r.why === 'timeout' ? 'timeout' : 'error');
-        note(id, 'system', r.why === 'timeout' ? `Follow-up timed out: ${r.message}.` : `Follow-up failed: ${r.message}`);
+        setAgent(id, 'error');
+        note(id, 'system', `Follow-up failed: ${r.message}`);
       } else if (isPass(r.text)) {
         pass++;
         setAgent(id, 'done');
@@ -469,7 +454,7 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
   const STOP_TEXT: Record<CouncilStopReason, string> = {
     done: 'Captain is done: the answer is good enough.',
     stepLimit: `Step limit reached${stop.detail ? ` (${stop.detail})` : ''}: moving to the answer.`,
-    cap: `Turn cap reached${stop.detail ? ` (${stop.detail})` : ''}: moving to the answer.`,
+    cap: 'Moving to the answer.', // legacy: recorded by councils from before the turn cap was removed; never produced now
     noProgress: `No progress${stop.detail ? `: ${stop.detail}` : ''}: moving to the answer.`,
     malformed: `The captain's decision was unusable${stop.detail ? ` (${stop.detail})` : ''}: moving to the answer.`,
     captainFailed: `The captain could not decide${stop.detail ? ` (${stop.detail})` : ''}: moving to the answer.`,
@@ -502,11 +487,10 @@ export async function runCouncil(room: Room, members: RoomMember[], trigger: Roo
   }
   const msg = hooks.append({ from: captain.id, text: final, council: council.id });
   council.finalId = msg.id;
-  setAgent(captain.id, council.agents[captain.id]?.status === 'timeout' && !r.ok ? 'timeout' : 'done');
+  setAgent(captain.id, 'done');
   council.phase = 'done'; council.endedAt = Date.now();
-  if (capHit) hooks.append({ from: 'system', text: `Turn cap reached (${cap} turns for this message): some council steps were skipped.` });
   save();
-  return capHit ? 'maxTurns' : 'complete';
+  return 'complete';
 }
 
 /** True when this message should skip the council and go straight to the @mentioned member(s). */

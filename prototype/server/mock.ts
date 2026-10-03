@@ -224,7 +224,11 @@ export function createMockSource(): Source {
   const gateway: RoomGateway = {
     async listAgents() { return MOCK_ROSTER; },
     async ensureSession() { /* nothing to create */ },
-    async turn(_agentId, _roomId, prompt, signal) {
+    async turn(agentId, _roomId, prompt, signal) {
+      // "hang" in Zach's message makes the member `forge` never reply (until Stop aborts it): the no-timeout scenario.
+      if (agentId === 'forge' && /Original message from You:\n[^\n]*\bhang\b/i.test(prompt)) {
+        await new Promise<void>((_res, reject) => { if (signal.aborted) reject(new Error('cancelled')); signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }); });
+      }
       // "slow" in Zach's message stretches each turn so the live council statuses can be watched (and Stop tried).
       const ms = /Original message from You:\n[^\n]*\bslow\b/i.test(prompt) ? 2500 : 250;
       await new Promise<void>((resolve, reject) => {

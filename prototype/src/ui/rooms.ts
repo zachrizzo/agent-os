@@ -85,6 +85,11 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
   const NOTE_KIND: Record<CouncilNote['kind'], string> = { plan: 'plan', decision: 'decision', answer: 'answer', followup: 'follow-up', critique: 'critique', system: 'note' };
   const STOP_LABEL: Record<CouncilStopReason, string> = { done: 'done: good enough', stepLimit: 'step limit', cap: 'turn cap', noProgress: 'no progress', malformed: 'unusable decision', captainFailed: 'captain failed', cancelled: 'cancelled' };
   const NOTE_CLAMP = 260;
+  const BUSY = new Set<CouncilAgentStatus>(['planning', 'working', 'steering', 'critiquing', 'synthesizing']);
+  /** Live elapsed time on a running member, e.g. "3m12s": a hung member shows up as a clock that keeps climbing (there is no timeout; Stop ends it). */
+  const fmtClock = (ms: number) => { const t = Math.max(0, Math.floor(ms / 1000)); return t < 60 ? `${t}s` : `${Math.floor(t / 60)}m${String(t % 60).padStart(2, '0')}s`; };
+  // Ticks once a second without repainting the thread (a repaint would eat text selection and open notes).
+  window.setInterval(() => { for (const t of el.querySelectorAll<HTMLElement>('time.rm-cel[data-since]')) t.textContent = fmtClock(Date.now() - Number(t.dataset.since)); }, 1000);
   const mentionize = (text: string, room: RoomView['room']) => renderMarkdown(text, { mentions: room.members });
   const fmtDur = (ms: number) => (ms < 1000 ? '<1s' : ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
 
@@ -107,7 +112,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     const chips = ids.map((id) => {
       const st = c.agents[id]?.status ?? 'idle';
       const w = who(id);
-      return `<span class="rm-cagent st-${st}" title="${esc(w.name)}: ${STATUS_LABEL[st]}">${avatarHtml(id, w.name, agentOf(id).emoji, 'sm')}<span class="rm-cname">${esc(w.name)}${id === c.captain ? '<small>captain</small>' : ''}</span><i class="rm-cst">${STATUS_LABEL[st]}</i></span>`;
+      return `<span class="rm-cagent st-${st}" title="${esc(w.name)}: ${STATUS_LABEL[st]}">${avatarHtml(id, w.name, agentOf(id).emoji, 'sm')}<span class="rm-cname">${esc(w.name)}${id === c.captain ? '<small>captain</small>' : ''}</span><i class="rm-cst">${STATUS_LABEL[st]}</i>${BUSY.has(st) && c.agents[id]?.startedAt ? `<time class="rm-cel" data-since="${c.agents[id]!.startedAt}">${fmtClock(Date.now() - c.agents[id]!.startedAt!)}</time>` : ''}</span>`;
     }).join('');
     const plan = c.plan?.fallback ? '<span class="rm-cwarn" title="The captain\'s plan could not be parsed, so every member got the whole question">fallback plan</span>' : '';
     const elapsed = fmtDur((c.endedAt ?? Date.now()) - c.startedAt);
@@ -115,7 +120,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     const steps = c.maxSteps ? ` · step ${nSteps}/${c.maxSteps}` : '';
     const stopped = c.stop && c.stop.reason !== 'cancelled' ? `<span class="rm-cstop ${c.stop.reason}" title="${esc(c.stop.detail ?? '')}">stopped: ${esc(STOP_LABEL[c.stop.reason])}</span>` : '';
     return `<details class="rm-council ${c.phase}" data-cid="${esc(c.id)}" data-live="${live ? 1 : 0}" ${open ? 'open' : ''}>
-      <summary><span class="rm-chev">${svg('chevron', 12)}</span><b>Council thinking</b>${live ? '<i class="rm-run"></i>' : ''}<span class="rm-csub">${esc(PHASE_LABEL[c.phase])} · ${ids.length} agents · ${c.turnsUsed}/${c.maxTurns} turns${steps} · ${elapsed}</span>${plan}${stopped}</summary>
+      <summary><span class="rm-chev">${svg('chevron', 12)}</span><b>Council thinking</b>${live ? '<i class="rm-run"></i>' : ''}<span class="rm-csub">${esc(PHASE_LABEL[c.phase])} · ${ids.length} agents · ${c.turnsUsed} turns${steps} · ${elapsed}</span>${plan}${stopped}</summary>
       <div class="rm-cagents">${chips}</div>
       <div class="rm-notes">${c.notes.map((n) => noteRow(n, room)).join('') || '<div class="rm-none">Waiting for the first notes…</div>'}</div>
     </details>`;
@@ -164,8 +169,8 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     }).join('');
     const status = running
       ? run!.mode === 'council' && run!.phase
-        ? `<span class="rm-typing"><i></i>Council · ${esc(PHASE_LABEL[run!.phase].toLowerCase())} · turn ${run!.turnsUsed}/${run!.maxTurns}</span><button class="rm-ghost" data-act="stop">Stop</button>`
-        : `<span class="rm-typing"><i></i>${run!.current ? `${esc(agentOf(run!.current).name)} is answering` : 'Working'} · round ${run!.round}/${run!.maxRounds} · turn ${run!.turnsUsed}/${run!.maxTurns}</span><button class="rm-ghost" data-act="stop">Stop</button>`
+        ? `<span class="rm-typing"><i></i>Council · ${esc(PHASE_LABEL[run!.phase].toLowerCase())} · turn ${run!.turnsUsed}</span><button class="rm-ghost" data-act="stop">Stop</button>`
+        : `<span class="rm-typing"><i></i>${run!.current ? `${esc(agentOf(run!.current).name)} is answering` : 'Working'} · round ${run!.round}/${run!.maxRounds} · turn ${run!.turnsUsed}</span><button class="rm-ghost" data-act="stop">Stop</button>`
       : '';
     mainEl.innerHTML = `
       <header class="rm-bar">
@@ -178,12 +183,11 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
         ${view.members.map((a) => `<span class="rm-chip${a.id === room.captain && room.mode === 'council' ? ' captain' : ''}" title="${a.id === room.captain && room.mode === 'council' ? 'Council captain' : ''}">${avatarHtml(a.id, a.name, a.emoji, 'sm')}<span>${esc(a.name)}</span>${a.id === room.captain && room.mode === 'council' ? '<small class="rm-cap">captain</small>' : ''}<button data-remove="${esc(a.id)}" title="Remove ${esc(a.name)}" aria-label="Remove ${esc(a.name)}" ${running ? 'disabled' : ''}>${svg('close', 12)}</button></span>`).join('') || '<span class="muted">No agents in this room.</span>'}
         ${room.members.length < MAX_MEMBERS && nonMembers.length ? `<button class="rm-add" data-act="add-toggle" ${running ? 'disabled' : ''}>${svg('plus', 12)}<span>Add agent</span></button>` : ''}
         <span class="grow"></span>
-        <span class="rm-limits" title="Council: the captain splits your message, members answer in parallel, then the captain steers (a follow-up to chosen members, a critique round, or stop) for at most the set number of steps, and gives ONE answer. Only the captain routes turns. An @mention goes straight to that agent. Round-table: everyone answers in turn. turns caps agent runs per message across all phases; timeout cuts off a slow member.">
+        <span class="rm-limits" title="Council: the captain splits your message, members answer in parallel, then the captain steers (a follow-up to chosen members, a critique round, or stop) for at most the set number of steps, and gives ONE answer. Only the captain routes turns. An @mention goes straight to that agent. Round-table: everyone answers in turn. There is no turn cap or member timeout: Stop ends a run.">
           mode <select data-set="mode" aria-label="Room mode"><option value="council" ${room.mode === 'council' ? 'selected' : ''}>Council</option><option value="roundtable" ${room.mode === 'roundtable' ? 'selected' : ''}>Round-table</option></select>
           ${room.mode === 'council' ? `captain <select data-set="captain" class="wide" aria-label="Council captain" ${running ? 'disabled' : ''}>${view.members.map((a) => `<option value="${esc(a.id)}" ${a.id === room.captain ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>` : `rounds <select data-set="maxRounds">${[1, 2, 3, 4].map((n) => `<option ${n === room.maxRounds ? 'selected' : ''}>${n}</option>`).join('')}</select>`}
           ${room.mode === 'council' ? `steps <input type="number" min="1" max="4" value="${room.maxSteps}" data-set="maxSteps" title="How many follow-up decisions the captain may make before it must answer (1-4)"/>` : ''}
-          turns <input type="number" min="1" max="32" value="${room.maxTurns}" data-set="maxTurns" title="Hard cap on agent runs per message, across all phases"/>
-          timeout <input type="number" min="1" max="600" value="${room.memberTimeoutSec}" data-set="memberTimeoutSec" title="Seconds before a slow member is cut off"/>s</span>
+          </span>
       </div>
       ${adding ? `<div class="rm-addbox">${agentPicker(new Set(), room.members, 'data-addpick')}<div class="rm-actions"><button class="rm-ghost sm" data-act="add-close">Done</button></div></div>` : ''}
       <div class="rm-thread" tabindex="0">${msgs || '<div class="rm-blank small"><span>No messages yet. Ask something: the captain splits it across the council and gives you one answer. <span class="rm-at">@name</span> goes straight to just that agent.</span></div>'}</div>

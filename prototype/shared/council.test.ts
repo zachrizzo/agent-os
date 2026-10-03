@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { councilBypass, parseDecision, parsePlan, pickContrarian, runCouncil, type CouncilHooks } from './council.ts';
-import { migrateRoom, resolveCaptain, councilTurns, type Council, type Room, type RoomMember, type RoomMessage, type RoomRunState, type RoomTransport } from './rooms.ts';
+import { migrateRoom, resolveCaptain, councilTurnBound, type Council, type Room, type RoomMember, type RoomMessage, type RoomRunState, type RoomTransport } from './rooms.ts';
 import { scriptedReply } from './scripted.ts';
 
 const M: RoomMember[] = [{ id: 'rfc-lead', name: 'RFC Lead' }, { id: 'rfc-skeptic', name: 'RFC Skeptic' }, { id: 'rfc-scribe', name: 'RFC Scribe' }];
@@ -35,13 +35,11 @@ test('captain resolution + migration of an old (version 1) room', () => {
   assert.equal(m.captain, 'rfc-lead');
   assert.equal(m.mode, 'council');
   assert.deepEqual(m.councils, []);
-  assert.equal(m.maxTurns, councilTurns(3)); // the old default cap (= member count) is raised so a council can finish
+  assert.ok(!('maxTurns' in m) && !('memberTimeoutSec' in m) && !('noLimitMigrated' in m), 'retired limit fields are dropped');
   assert.equal(m.messages.length, 1);
-  const custom = migrateRoom({ ...old, maxTurns: 20 } as Room);
-  assert.equal(custom.maxTurns, 20); // an explicit larger cap is kept
+  assert.ok(!('maxTurns' in migrateRoom({ ...old, maxTurns: 20, memberTimeoutSec: 45, noLimitMigrated: true } as Room)));
   const rt = migrateRoom({ ...old, mode: 'roundtable' } as Room);
   assert.equal(rt.mode, 'roundtable');
-  assert.equal(rt.maxTurns, 3);
 });
 
 test('contrarian is the last non-captain critic', () => {
@@ -50,7 +48,7 @@ test('contrarian is the last non-captain critic', () => {
 });
 
 function harness(settings: Partial<Room> = {}, members = M) {
-  const room: Room = { id: 'r1', name: 'T', members: members.map((m) => m.id), captain: 'rfc-lead', councils: [], archived: false, createdAt: 0, updatedAt: 0, messages: [], maxRounds: 1, maxTurns: 16, maxSteps: 3, mentionGating: true, mode: 'council', memberTimeoutSec: 90, ...settings };
+  const room: Room = { id: 'r1', name: 'T', members: members.map((m) => m.id), captain: 'rfc-lead', councils: [], archived: false, createdAt: 0, updatedAt: 0, messages: [], maxRounds: 1, maxSteps: 3, mentionGating: true, mode: 'council', ...settings };
   let n = 0;
   const state: Partial<RoomRunState> = {};
   const hooks: CouncilHooks = {
@@ -58,9 +56,9 @@ function harness(settings: Partial<Room> = {}, members = M) {
     save: () => {}, state: (p) => Object.assign(state, p),
   };
   const trigger = hooks.append({ from: 'you', text: '' });
-  const council: Council = { id: trigger.id, captain: room.captain, phase: 'planning', startedAt: 0, agents: {}, notes: [], turnsUsed: 0, maxTurns: room.maxTurns };
+  const council: Council = { id: trigger.id, captain: room.captain, phase: 'planning', startedAt: 0, agents: {}, notes: [], turnsUsed: 0 };
   room.councils.push(council);
-  const run = (text: string, transport: RoomTransport, signal = new AbortController().signal, timeoutMs = 5000) => { trigger.text = text; return runCouncil(room, members, trigger, council, transport, hooks, signal, { memberTimeoutMs: timeoutMs, maxSteps: room.maxSteps }); };
+  const run = (text: string, transport: RoomTransport, signal = new AbortController().signal) => { trigger.text = text; return runCouncil(room, members, trigger, council, transport, hooks, signal, { maxSteps: room.maxSteps }); };
   return { room, council, run, state };
 }
 interface Call { id: string; role: string; t0: number; t1: number; prompt: string }
@@ -152,20 +150,6 @@ test('bad plan -> fallback: every member gets the whole question, and the counci
   assert.ok(h.council.notes.some((n) => n.kind === 'plan' && /No usable plan/.test(n.text)));
 });
 
-test('timeout: a slow member is cut off, its run aborted, the captain proceeds and names who timed out', async () => {
-  const h = harness();
-  const t = scripted({ 'rfc-skeptic': 5000 });
-  const t0 = Date.now();
-  await h.run('x crit', t, undefined, 150);
-  assert.ok(Date.now() - t0 < 2500, 'did not wait for the slow member');
-  assert.equal(h.council.agents['rfc-skeptic'].status, 'timeout');
-  assert.ok(t.aborts.includes('rfc-skeptic'), 'the slow member run was aborted on the Gateway');
-  assert.equal(h.council.notes.filter((n) => n.kind === 'answer').length, 2);
-  assert.equal(t.calls.filter((c) => c.role === 'CRITIQUE').length, 2); // only the two that answered critique
-  assert.match(t.calls.find((c) => c.role === 'CAPTAIN-SYNTHESIZE')!.prompt, /No input from: RFC Skeptic \(@rfc-skeptic\) \(timed out/);
-  assert.equal(h.room.messages.filter((m) => m.council).length, 1);
-});
-
 test('captain synthesis failure still yields ONE reply (built from the member answers)', async () => {
   const h = harness();
   const base = scripted();
@@ -182,7 +166,7 @@ test('Stop: aborts every in-flight run, marks agents stopped, no final reply', a
   const ac = new AbortController();
   const t = scripted({ 'rfc-lead': 20, 'rfc-skeptic': 5000, 'rfc-scribe': 5000 });
   setTimeout(() => ac.abort(), 250);
-  const stop = await h.run('x', t, ac.signal, 60_000);
+  const stop = await h.run('x', t, ac.signal);
   assert.equal(stop, 'cancelled');
   assert.deepEqual([...t.aborts].sort(), ['rfc-scribe', 'rfc-skeptic']);
   assert.equal(h.council.phase, 'stopped');
@@ -305,17 +289,6 @@ test('G4 no progress: every target replies PASS -> synthesis; every target times
   assert.equal(tf.calls.at(-1)!.role, 'CAPTAIN-SYNTHESIZE');
   oneReply(hf);
 
-  const ht = harness();
-  const slowSkeptic = scripted({ 'rfc-skeptic': 5000 });
-  const tt = steered(() => ask(['rfc-skeptic'], 'Anything?'), (id, p, s) => (/FOLLOW-UP/.test(p) ? slowSkeptic.turn(id, p, s) : undefined));
-  const t0 = Date.now();
-  await ht.run('x', tt, undefined, 150);
-  assert.ok(Date.now() - t0 < 2500);
-  assert.equal(ht.council.stop?.reason, 'noProgress'); // the follow-up target timed out
-  assert.equal(ht.council.agents['rfc-skeptic'].status, 'timeout');
-  assert.ok(tt.aborts.includes('rfc-skeptic'), 'the timed-out run was aborted');
-  oneReply(ht);
-
   const hc = harness();
   const tc = steered((step) => (step <= 2 ? '{"action":"critique"}' : '{"action":"synthesize"}'));
   await hc.run('x', tc);
@@ -327,7 +300,7 @@ test('G4 no progress: every target replies PASS -> synthesis; every target times
 
 test('G2 step limit: maxSteps bounds captain decisions (default 3, max 4); hitting it forces synthesis without asking again', async () => {
   for (const [maxSteps, want] of [[1, 1], [2, 2], [3, 3], [4, 4], [9, 4]] as const) {
-    const h = harness({ maxSteps, maxTurns: 32 });
+    const h = harness({ maxSteps });
     const t = scripted();
     const stop = await h.run('endless', t);
     assert.equal(count(t, 'FOLLOW-UP'), want, `maxSteps ${maxSteps}`);
@@ -340,28 +313,6 @@ test('G2 step limit: maxSteps bounds captain decisions (default 3, max 4); hitti
     assert.ok(h.council.notes.some((n) => /Step limit reached/.test(n.text)));
     oneReply(h);
   }
-});
-
-test('G3 cap: hitting maxTurns mid-conversation still synthesizes; never exceeds maxTurns; one reply', async () => {
-  for (let cap = 1; cap <= 10; cap++) {
-    const h = harness({ maxTurns: cap, maxSteps: 4 });
-    h.council.maxTurns = cap;
-    const t = scripted();
-    const stop = await h.run('endless', t);
-    assert.ok(t.calls.length <= cap, `cap ${cap}: ${t.calls.length} turns`);
-    assert.equal(h.council.turnsUsed, t.calls.length);
-    assert.equal(t.calls.at(-1)!.role, 'CAPTAIN-SYNTHESIZE', `cap ${cap}`);
-    assert.equal(stop, 'maxTurns', `cap ${cap}`);
-    oneReply(h);
-    assert.ok(h.room.messages.some((m) => m.from === 'system' && /Turn cap reached/.test(m.text)));
-  }
-  const h = harness({ maxTurns: 7, maxSteps: 4 });
-  h.council.maxTurns = 7;
-  await h.run('endless', scripted());
-  assert.equal(h.council.stop?.reason, 'cap');
-  assert.ok(h.council.notes.some((n) => /Turn cap reached/.test(n.text)));
-  const roomy = harness({ maxTurns: 11 });
-  assert.equal(await roomy.run('endless', scripted()), 'complete'); // plenty of turns: the step limit, not the cap, ends it
 });
 
 test('G5 malformed / unknown / failed captain decision: synthesize, exactly one decision turn, no retry', async () => {
@@ -397,30 +348,6 @@ test('G5 malformed / unknown / failed captain decision: synthesize, exactly one 
   oneReply(hf);
 });
 
-test('G2/G3 sweep: whatever the captain does, turns <= maxTurns, the last turn is the synthesis, and there is exactly one reply', async () => {
-  const cues = ['x', 'endless', 'repeat', 'conflict', 'crit', 'allpass', 'badsteer', 'routeme conflict'];
-  for (const cue of cues) {
-    for (const maxTurns of [1, 2, 3, 4, 5, 6, 8, 9, 12, 16, 32]) {
-      for (const maxSteps of [1, 3, 4]) {
-        const h = harness({ maxTurns, maxSteps });
-        h.council.maxTurns = maxTurns;
-        const t = scripted();
-        await h.run(cue, t);
-        const ctx = `cue=${cue} maxTurns=${maxTurns} maxSteps=${maxSteps}`;
-        assert.ok(t.calls.length <= maxTurns, `${ctx}: ${t.calls.length} turns`);
-        assert.equal(h.council.turnsUsed, t.calls.length, ctx);
-        assert.equal(t.calls.at(-1)!.role, 'CAPTAIN-SYNTHESIZE', ctx);
-        assert.ok(count(t, 'CAPTAIN-STEER') >= h.council.steps!.length, ctx);
-        assert.ok(h.council.steps!.length <= maxSteps, ctx);
-        assert.ok(count(t, 'CAPTAIN-STEER') <= maxSteps + 1, ctx);
-        assert.equal(h.room.messages.filter((m) => m.council).length, 1, ctx);
-        assert.ok(h.council.stop, ctx);
-        assert.equal(h.council.phase, 'done', ctx);
-      }
-    }
-  }
-});
-
 test('G1 members cannot route: @mentions in member replies start nothing; only the captain\'s decision starts a follow-up, and only for its targets', async () => {
   const h = harness();
   const t = scripted();
@@ -445,13 +372,13 @@ test('G1 members cannot route: @mentions in member replies start nothing; only t
   assert.equal(parseDecision('{"action":"ask","question":"hi @rfc-lead"}', M).action, 'invalid');
 });
 
-test('G6 Stop during a follow-up aborts the in-flight runs and ends cancelled, no reply; the per-member timeout still cuts a slow follow-up', async () => {
+test('G6 Stop during a follow-up aborts the in-flight runs and ends cancelled, no reply', async () => {
   const h = harness();
   const ac = new AbortController();
   const slow = scripted({ 'rfc-skeptic': 5000, 'rfc-lead': 5000 });
   const t = steered((step) => (step === 1 ? ask(['rfc-skeptic', 'rfc-lead'], 'Settle this.') : '{"action":"synthesize"}'), (id, p, s) => (/FOLLOW-UP/.test(p) ? slow.turn(id, p, s) : undefined));
   setTimeout(() => ac.abort(), 300);
-  const stop = await h.run('x', t, ac.signal, 60_000);
+  const stop = await h.run('x', t, ac.signal);
   assert.equal(stop, 'cancelled');
   assert.deepEqual([...t.aborts].sort(), ['rfc-lead', 'rfc-skeptic']);
   assert.equal(h.council.phase, 'stopped');
@@ -463,10 +390,65 @@ test('G6 Stop during a follow-up aborts the in-flight runs and ends cancelled, n
 
 test('a follow-up from a member that missed the first round counts as an answer', async () => {
   const h = harness();
-  const base = scripted({ 'rfc-scribe': 5000 });
-  const t = steered((step) => (step === 1 ? ask(['rfc-scribe'], 'Now that the rest answered, your take?') : '{"action":"synthesize"}'), (id, p, s) => (/SPECIALIST/.test(p) && id === 'rfc-scribe' ? base.turn(id, p, s) : undefined));
-  await h.run('x', t, undefined, 150);
+  const t = steered((step) => (step === 1 ? ask(['rfc-scribe'], 'Now that the rest answered, your take?') : '{"action":"synthesize"}'), (id, p) => { if (/SPECIALIST/.test(p) && id === 'rfc-scribe') throw new Error('gateway hiccup'); return undefined; });
+  await h.run('x', t);
   assert.equal(h.council.agents['rfc-scribe'].status, 'done');
   assert.doesNotMatch(t.calls.find((c) => c.role === 'CAPTAIN-SYNTHESIZE')!.prompt, /No input from: RFC Scribe/);
   assert.equal(h.council.stop?.reason, 'done');
 });
+
+test('always terminates: every cue x step limit x member count ends with exactly ONE synthesis, within the derived turn bound (no turn cap, no timeout)', async () => {
+  const cues = ['x', 'endless', 'repeat', 'conflict', 'crit', 'allpass', 'badsteer', 'routeme conflict'];
+  const four: RoomMember[] = [...M, { id: 'rfc-risk', name: 'RFC Risk' }];
+  for (const members of [M, four, M.slice(0, 2)]) {
+    for (const cue of cues) {
+      for (const maxSteps of [1, 2, 3, 4]) {
+        const h = harness({ maxSteps }, members);
+        const t = scripted();
+        const stop = await h.run(cue, t);
+        const ctx = `cue=${cue} n=${members.length} maxSteps=${maxSteps}`;
+        assert.ok(t.calls.length <= councilTurnBound(members.length, maxSteps), `${ctx}: ${t.calls.length} turns`);
+        assert.equal(h.council.turnsUsed, t.calls.length, ctx);
+        assert.equal(stop, 'complete', ctx);
+        assert.equal(count(t, 'CAPTAIN-SYNTHESIZE'), 1, ctx);
+        assert.equal(t.calls.at(-1)!.role, 'CAPTAIN-SYNTHESIZE', ctx);
+        assert.ok(h.council.steps!.length <= maxSteps, ctx);
+        assert.ok(count(t, 'CAPTAIN-STEER') <= maxSteps + 1, ctx);
+        assert.ok(h.council.stop && h.council.stop.reason !== 'cap', ctx);
+        assert.equal(h.council.phase, 'done', ctx);
+        oneReply(h);
+      }
+    }
+  }
+  const h = harness({ maxSteps: 4 });
+  await h.run('endless', scripted()); // a captain that never stops: the step limit alone ends it
+  assert.equal(h.council.stop?.reason, 'stepLimit');
+});
+
+test('no timeout: a member that never replies is NOT cut off; Stop ends it mid-turn, aborts its run, no reply', async () => {
+  const h = harness();
+  const ac = new AbortController();
+  const t = scripted({ 'rfc-lead': 10, 'rfc-skeptic': 3_600_000, 'rfc-scribe': 10 }); // skeptic hangs for an hour
+  const t0 = Date.now();
+  let settled = false;
+  const p = h.run('x', t, ac.signal).then((r) => { settled = true; return r; });
+  await new Promise((r) => setTimeout(r, 700)); // far beyond any 90s-style timer scaled to this test: nothing fires
+  assert.equal(settled, false, 'still waiting on the hung member');
+  assert.equal(h.council.agents['rfc-skeptic'].status, 'working');
+  assert.equal(h.council.agents['rfc-scribe'].status, 'done');
+  ac.abort(); // the Stop button
+  const stop = await p;
+  assert.equal(stop, 'cancelled');
+  assert.ok(Date.now() - t0 < 3000, 'Stop returns promptly');
+  assert.deepEqual([...t.aborts], ['rfc-skeptic']); // only the hung run is aborted on the Gateway
+  assert.equal(h.council.phase, 'stopped');
+  assert.equal(h.council.agents['rfc-skeptic'].status, 'stopped');
+  assert.ok(h.council.agents['rfc-skeptic'].startedAt, 'start time is recorded so the UI can show elapsed time');
+  assert.equal(h.room.messages.filter((m) => m.council).length, 0);
+});
+
+test('councilTurnBound: plan + n answers + steps*n + (steps+1) decisions + synthesis', () => {
+  assert.equal(councilTurnBound(3, 3), 1 + 3 + 9 + 4 + 1);
+  assert.equal(councilTurnBound(4, 4), 1 + 4 + 16 + 5 + 1);
+});
+

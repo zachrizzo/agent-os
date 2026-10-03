@@ -18,7 +18,6 @@ const READ_METHODS = new Set(['sessions.list', 'agents.list', 'chat.history', 'u
 const SEND_METHOD = 'sessions.send';
 const CREATE_METHOD = 'sessions.create'; // only for dedicated room sessions (agent:<id>:room-<roomId>), see call()
 const ABORT_METHOD = 'chat.abort'; // Stop / member timeout: only for dedicated room sessions, see call()
-const ROOM_TURN_TIMEOUT_MS = Number(process.env.AGENT_OS_ROOM_TURN_TIMEOUT_MS ?? 120_000) || 120_000;
 const ROOM_POLL_MS = 1200;
 const agentOfKey = (key: unknown) => String(key ?? '').match(/^agent:([^:]+):/)?.[1] ?? '';
 const MAX_MESSAGE_CHARS = 4000;
@@ -360,16 +359,15 @@ export function createLiveSource(): Source {
     async abort(agentId, roomId) {
       await call(ABORT_METHOD, { sessionKey: roomSessionKey(agentId, roomId) }, 15_000);
     },
-    async turn(agentId, roomId, prompt, signal, timeoutMs) {
+    async turn(agentId, roomId, prompt, signal) {
       const key = roomSessionKey(agentId, roomId);
       const seqOf = (m: any) => Number(m?.__openclaw?.seq ?? 0);
       const peek = async () => { const h = await call('chat.history', { sessionKey: key, limit: 60 }, 15_000); return { msgs: (h.messages ?? []) as any[], active: Boolean(h.sessionInfo?.hasActiveRun) }; };
       const base = Math.max(0, ...(await peek()).msgs.map(seqOf));
       await call(SEND_METHOD, { key, message: prompt, idempotencyKey: randomUUID() }, 20_000);
-      const deadline = Date.now() + (timeoutMs ?? ROOM_TURN_TIMEOUT_MS);
       let sawUser = false;
       let quiet = 0;
-      while (Date.now() < deadline) {
+      for (;;) { // no deadline: a reply, an error, or Stop (signal) ends it
         if (signal.aborted) throw new Error('cancelled');
         await new Promise((r) => setTimeout(r, ROOM_POLL_MS));
         const { msgs, active } = await peek();
@@ -382,7 +380,6 @@ export function createLiveSource(): Source {
           if (++quiet >= 3) throw new Error('the run ended without a reply (model unavailable?)');
         } else quiet = 0;
       }
-      throw new Error('timed out waiting for a reply');
     },
   };
   const roomsFile = process.env.AGENT_OS_ROOMS_FILE ?? `${process.env.HOME ?? ''}/.openclaw/agent-os/rooms.json`;

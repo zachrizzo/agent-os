@@ -163,17 +163,9 @@ try {
   if (stats.length - before !== 3) console.log("quiet-step stub requests:", JSON.stringify(stats.slice(before).map((x) => [x.agent, x.head.slice(0, 90)])));
   check("a member answering PASS is not shown (3 turns, 2 visible replies)", stats.length - before === 3 && names.slice(6).join(",") === "You,Alpha,Charlie", `${stats.length - before} turns, tail ${names.slice(6).join(",")}`);
 
-  // 4) loops are bounded: maxTurns, then maxRounds
-  await api(`rooms/${ID}`, { maxRounds: 4, maxTurns: 4 });
-  before = (await stubStats()).length;
-  await send("pingpong until you drop");
-  await idle();
-  stats = await stubStats();
-  let sys = await page.locator(".rm-sys").allInnerTexts();
-  check("pingpong with maxRounds 4 / maxTurns 4 stops at exactly 4 model turns", stats.length - before === 4, String(stats.length - before));
-  check("thread says the turn cap was hit", sys.some((t) => /turn cap reached \(4 turns/.test(t)), sys.join("|"));
-  await page.screenshot({ path: path.join(outDir, "room-3-turn-cap.png") });
-  await api(`rooms/${ID}`, { maxRounds: 2, maxTurns: 32 });
+  // 4) loops are bounded by maxRounds (there is no turn cap)
+  let sys;
+  await api(`rooms/${ID}`, { maxRounds: 2 });
   before = (await stubStats()).length;
   await send("pingpong round test");
   await idle();

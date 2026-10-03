@@ -1,6 +1,6 @@
 // Group rooms: one thread, several agents. Semantics mirror OpenClaw broadcast groups (channels/broadcast-groups.md):
 //   - @mention gating: explicit @mentions pick the round-1 responders; no match (or @all) picks everyone;
-//   - maxRounds 1-4 (default 1) including the first round; maxTurns caps agent runs started per Zach message;
+//   - maxRounds 1-4 (default 1) including the first round; there is no turn cap and no per-member timeout (only Stop and the guards end a run);
 //   - a follow-up round runs only for members that replied or were @mentioned in the previous round, and "PASS" passes.
 // Pure logic, no I/O: the server injects a transport (real Gateway sessions or a fake) so the loop is unit-testable.
 // Default room mode is "council" (shared/council.ts: captain plans, members work in parallel, the captain then steers the conversation one decision at a time, captain synthesizes);
@@ -54,14 +54,13 @@ export interface Council {
   agents: Record<string, CouncilAgent>;
   notes: CouncilNote[];
   turnsUsed: number;
-  maxTurns: number;
   /** Captain decisions allowed between the first answers and the synthesis. Absent on councils recorded before captain-led steering. */
   maxSteps?: number;
   steps?: CouncilStep[];
   stop?: { reason: CouncilStopReason; detail?: string };
   finalId?: string;
 }
-export interface RoomSettings { maxRounds: number; maxTurns: number; maxSteps: number; mentionGating: boolean; mode: RoomMode; memberTimeoutSec: number }
+export interface RoomSettings { maxRounds: number; maxSteps: number; mentionGating: boolean; mode: RoomMode }
 export interface Room extends RoomSettings {
   id: string;
   name: string;
@@ -79,12 +78,11 @@ export interface RoomRunState {
   status: 'running' | 'done' | 'stopped';
   round: number;
   turnsUsed: number;
-  maxTurns: number;
   maxRounds: number;
   current?: string; // agent id with a turn in flight
   mode?: RoomMode;
   phase?: CouncilPhase;
-  stopReason?: 'maxRounds' | 'maxTurns' | 'passed' | 'cancelled' | 'complete';
+  stopReason?: 'maxRounds' | 'passed' | 'cancelled' | 'complete';
   /** Council only: captain decisions taken so far / allowed. */
   steps?: number;
   maxSteps?: number;
@@ -96,21 +94,21 @@ export const clampInt = (v: unknown, min: number, max: number, dflt: number) => 
 };
 
 export const MAX_COUNCILS = 60;
-export const DEFAULT_MEMBER_TIMEOUT_SEC = 90;
-/** Default turn backstop for a captain-led council: 3n + 3 (plan, n answers, a few steered rounds, synthesis), clamped to 32. */
-export const councilTurns = (memberCount: number) => Math.max(1, Math.min(32, 3 * memberCount + 3));
-/** The pre-steering default (plan + n answers + n critiques + synthesis); rooms still at this value are raised once by migrateRoom. */
-export const legacyCouncilTurns = (memberCount: number) => Math.max(1, Math.min(32, 2 * memberCount + 2));
 export const DEFAULT_MAX_STEPS = 3;
 export const MAX_STEPS_LIMIT = 4;
 
-/** Defaults: council mode, 1 round (round-table / @mention path), maxTurns = a captain-led council (3n+3) or, round-table, the member count (as in OpenClaw broadcast groups), mention gating on, 90s per member. */
-export function normalizeSettings(raw: Partial<RoomSettings> | undefined, memberCount: number): RoomSettings {
+/**
+ * Upper bound on agent turns for ONE council message (there is no turn cap), n members, maxSteps captain decisions:
+ * plan (1) + n answers + per step at most n (follow-ups or critics) + decisions (at most maxSteps + 1, the last may be "synthesize") + synthesis (1).
+ */
+export const councilTurnBound = (n: number, maxSteps: number) => 1 + n + maxSteps * n + (maxSteps + 1) + 1;
+
+/** Defaults: council mode, 1 round (round-table / @mention path), no turn cap, no member timeout, mention gating on. */
+export function normalizeSettings(raw: Partial<RoomSettings> | undefined, _memberCount?: number): RoomSettings {
   const mode: RoomMode = raw?.mode === 'roundtable' ? 'roundtable' : 'council';
   const maxRounds = clampInt(raw?.maxRounds, 1, 4, 1);
-  const maxTurns = clampInt(raw?.maxTurns, 1, 32, mode === 'council' ? councilTurns(memberCount) : Math.max(1, Math.min(32, memberCount)));
   const maxSteps = clampInt(raw?.maxSteps, 1, MAX_STEPS_LIMIT, DEFAULT_MAX_STEPS);
-  return { maxRounds, maxTurns, maxSteps, mentionGating: raw?.mentionGating !== false, mode, memberTimeoutSec: clampInt(raw?.memberTimeoutSec, 1, 600, DEFAULT_MEMBER_TIMEOUT_SEC) };
+  return { maxRounds, maxSteps, mentionGating: raw?.mentionGating !== false, mode };
 }
 
 /** The captain is always a member. A saved captain that is still a member wins; otherwise `rfc-lead` when present, else the first member. */
@@ -120,17 +118,12 @@ export function resolveCaptain(saved: unknown, members: string[]): string {
 }
 
 /**
- * Backward-compatible load of a stored room (rooms.json version 1 had no mode/captain/councils):
- * missing fields get the council defaults, the captain is resolved by resolveCaptain, and an old default turn cap (= member count, far too low for
- * plan + answers + steps + synthesis) is raised to a full council; steering rooms also get maxSteps (default 3) and the former 2n+2 default becomes 3n+3. Nothing is written until the room's next normal save.
+ * Backward-compatible load of a stored room (rooms.json version 1 had no mode/captain/councils): missing fields get the council defaults and the captain is
+ * resolved by resolveCaptain. The retired maxTurns / memberTimeoutSec / noLimitMigrated fields are dropped; nothing is written until the room's next normal save.
  */
 export function migrateRoom(r: Room): Room {
-  const legacy = (r as Partial<Room>).mode === undefined;
-  const s = normalizeSettings(r, r.members.length);
-  if (legacy && s.mode === 'council' && s.maxTurns <= r.members.length) s.maxTurns = councilTurns(r.members.length);
-  // Rooms saved before captain-led steering have no maxSteps: add it, and raise the old 2n+2 default (no room for steps) to 3n+3 once. A custom cap is kept.
-  if ((r as Partial<Room>).maxSteps === undefined && s.mode === 'council' && s.maxTurns === legacyCouncilTurns(r.members.length)) s.maxTurns = councilTurns(r.members.length);
-  return { ...r, ...s, captain: resolveCaptain(r.captain, r.members), councils: Array.isArray(r.councils) ? r.councils : [], messages: r.messages ?? [] };
+  const { maxTurns: _t, memberTimeoutSec: _m, noLimitMigrated: _n, ...rest } = r as Room & { maxTurns?: number; memberTimeoutSec?: number; noLimitMigrated?: boolean };
+  return { ...rest, ...normalizeSettings(r), captain: resolveCaptain(r.captain, r.members), councils: Array.isArray(r.councils) ? r.councils : [], messages: r.messages ?? [] };
 }
 
 export const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -223,7 +216,6 @@ export async function runRound(room: Room, members: RoomMember[], trigger: RoomM
     hooks.state({ round });
     for (const id of targets) {
       if (signal.aborted) return 'cancelled';
-      if (turnsUsed >= room.maxTurns) { hooks.append({ from: 'system', text: `Stopped: turn cap reached (${room.maxTurns} turns for this message).`, round }); return 'maxTurns'; }
       const agent = byId.get(id)!;
       turnsUsed++;
       hooks.state({ turnsUsed, current: id });

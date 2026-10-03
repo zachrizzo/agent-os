@@ -20,16 +20,15 @@ test('gating: no mention = everyone, mention = only those, gating off = everyone
   assert.deepEqual(selectResponders('@bravo status?', M, false), ['alpha', 'bravo', 'forge-coder']);
 });
 
-test('settings clamp: rounds 1-4 default 1, turns default = member count, steps 1-4 default 3', () => {
-  assert.deepEqual(normalizeSettings({ mode: 'roundtable' }, 3), { maxRounds: 1, maxTurns: 3, maxSteps: 3, mentionGating: true, mode: 'roundtable', memberTimeoutSec: 90 });
-  assert.deepEqual(normalizeSettings(undefined, 3), { maxRounds: 1, maxTurns: 12, maxSteps: 3, mentionGating: true, mode: 'council', memberTimeoutSec: 90 }); // council default 3n+3
-  assert.equal(normalizeSettings(undefined, 20).maxTurns, 32); // clamped
+test('settings clamp: rounds 1-4 default 1, steps 1-4 default 3; no turn or timeout settings exist', () => {
+  assert.deepEqual(normalizeSettings({ mode: 'roundtable' }, 3), { maxRounds: 1, maxSteps: 3, mentionGating: true, mode: 'roundtable' });
+  assert.deepEqual(normalizeSettings(undefined, 3), { maxRounds: 1, maxSteps: 3, mentionGating: true, mode: 'council' });
+  assert.deepEqual(normalizeSettings({ maxTurns: 5, memberTimeoutSec: 45 } as never, 3), normalizeSettings(undefined, 3)); // retired fields are ignored
   assert.equal(normalizeSettings({ maxSteps: 9 } as never, 3).maxSteps, 4);
   assert.equal(normalizeSettings({ maxSteps: 0 } as never, 3).maxSteps, 1);
   assert.equal(normalizeSettings({ maxSteps: 'x' as never }, 3).maxSteps, 3);
   assert.equal(normalizeSettings({ maxRounds: 99 } as never, 3).maxRounds, 4);
   assert.equal(normalizeSettings({ maxRounds: 0 } as never, 3).maxRounds, 1);
-  assert.equal(normalizeSettings({ maxTurns: 500 } as never, 3).maxTurns, 32);
   assert.equal(normalizeSettings({ maxRounds: 'x' as never }, 3).maxRounds, 1);
 });
 
@@ -44,7 +43,7 @@ test('pass detection', () => {
 });
 
 function harness(settings: Partial<Room>, members = M) {
-  const room: Room = { id: 'r1', name: 'T', members: members.map((m) => m.id), captain: members[0].id, councils: [], archived: false, createdAt: 0, updatedAt: 0, messages: [], maxRounds: 1, maxTurns: 3, maxSteps: 3, mentionGating: true, mode: 'roundtable', memberTimeoutSec: 90, ...settings };
+  const room: Room = { id: 'r1', name: 'T', members: members.map((m) => m.id), captain: members[0].id, councils: [], archived: false, createdAt: 0, updatedAt: 0, messages: [], maxRounds: 1, maxSteps: 3, mentionGating: true, mode: 'roundtable', ...settings };
   let n = 0;
   const state: Partial<RoomRunState> = {};
   const hooks = {
@@ -81,24 +80,13 @@ test('mention gating: only the mentioned member runs', async () => {
 test('ping-pong is bounded by maxRounds', async () => {
   log.length = 0;
   const pingpong: RoomTransport = { async turn(id, p) { log.push({ id, prompt: p }); return `@${id === 'alpha' ? 'bravo' : 'alpha'} your turn`; } };
-  const h = harness({ maxRounds: 3, maxTurns: 32 }, M.slice(0, 2));
+  const h = harness({ maxRounds: 3 }, M.slice(0, 2));
   const stop = await h.run('go', pingpong);
   assert.equal(log.length, 6); // 3 rounds x 2 members
   assert.equal(stop, 'maxRounds');
   assert.match(h.room.messages.at(-1)!.text, /round cap reached \(3 rounds\)/);
   assert.match(log[2].prompt, /Follow-up round 2/);
   assert.match(log[2].prompt, /Original message from You:\ngo/);
-});
-
-test('maxTurns caps total agent runs and says so in the thread', async () => {
-  log.length = 0;
-  const pingpong: RoomTransport = { async turn(id, p) { log.push({ id, prompt: p }); return `@${id === 'alpha' ? 'bravo' : 'alpha'} again`; } };
-  const h = harness({ maxRounds: 4, maxTurns: 3 }, M.slice(0, 2));
-  const stop = await h.run('go', pingpong);
-  assert.equal(log.length, 3);
-  assert.equal(stop, 'maxTurns');
-  assert.match(h.room.messages.at(-1)!.text, /turn cap reached \(3 turns/);
-  assert.equal(h.room.messages.at(-1)!.from, 'system');
 });
 
 test('PASS is not shown; all passing ends the thread early', async () => {

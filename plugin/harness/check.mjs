@@ -231,7 +231,7 @@ async function councilChecks(browser, tag) {
 }
 
 // Group rooms: create (live agent list, phi absent), one thread with per-agent avatar+name and "You", mention gating,
-// member add/remove, rename, archive, round/turn caps, persistence across reload, write guards.
+// member add/remove, rename, archive, round cap, persistence across reload, write guards.
 async function roomsChecks(browser, tag) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
   const errors = [];
@@ -289,15 +289,12 @@ async function roomsChecks(browser, tag) {
   // caps
   await page.selectOption("[data-set=maxRounds]", "3");
   await page.waitForTimeout(700); // let the first update land (the view ignores a second change while one is in flight)
-  await page.locator("[data-set=maxTurns]").fill("4");
-  await page.locator("[data-set=maxTurns]").dispatchEvent("change");
-  await page.waitForTimeout(500);
   await send("pingpong forever");
   await page.waitForFunction(() => document.querySelector(".rm-sys"), null, { timeout: 15000 });
   const sys = await page.locator(".rm-sys").allInnerTexts();
-  expect("turn cap stops the loop", sys.some((t) => /turn cap reached \(4 turns/.test(t)), sys.join("|"));
+  expect("round cap stops the loop", sys.some((t) => /round cap reached \(3 rounds/.test(t)), sys.join("|"));
   const agentTurns = await page.locator(".rm-msg:not(.me)").count();
-  expect("loop produced a bounded number of replies", agentTurns <= 3 + 1 + 4 + 1, String(agentTurns));
+  expect("loop produced a bounded number of replies", agentTurns <= 3 + 3 * 3 + 1, String(agentTurns));
   await page.waitForFunction(() => !document.querySelector(".rm-typing"), null, { timeout: 8000 });
 
   // rename + archive + persistence
@@ -653,6 +650,60 @@ async function markdownChecks(browser, tag) {
   await page.close();
 }
 
+// ---- No limit: the room UI has no turns/timeout controls at all; a member that never replies is visible (live clock) and Stop ends it ------------
+async function noLimitChecks(browser, tag) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const bad = [];
+  const expect = (name, ok, detail = "") => { if (!ok) bad.push([name, detail]); };
+  await page.goto(base + "agent-os/?source=mock");
+  await page.waitForSelector(".rooms-btn");
+  await page.click(".rooms-btn");
+  await page.click("#rooms [data-act=new]");
+  await page.fill(".rm-name-in", `NoLimit ${tag} ${Date.now() % 100000}`);
+  for (const id of ["spark", "forge", "research"]) await page.locator(`input[data-pick=${id}]`).check();
+  await page.click("[data-act=create]");
+  await page.waitForSelector(".rm-bar h3");
+  const lim = (k) => page.locator(`[data-set=${k}]`);
+  expect("no turns or timeout controls in the room UI", (await page.locator("[data-set=maxTurns], [data-set=memberTimeoutSec]").count()) === 0 && !/no limit/i.test(await page.locator(".rm-limits").innerText()));
+  // a hung member: no timeout fires, the clock climbs, Stop ends it
+  await page.locator(".rm-compose textarea").fill("hang: is the migration safe?");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector(".rm-council[open] .rm-cagent.st-working .rm-cel", { timeout: 10000 });
+  const clock = async () => { const t = await page.locator(".rm-cagent.st-working .rm-cel").first().innerText(); const m = /^(?:(\d+)m)?(\d+)s$/.exec(t.trim()); return m ? Number(m[1] ?? 0) * 60 + Number(m[2]) : NaN; };
+  const c0 = await clock();
+  await page.waitForTimeout(3200);
+  const c1 = await clock();
+  expect("the running member shows a live elapsed clock that keeps climbing", Number.isFinite(c0) && c1 >= c0 + 2, `${c0}s -> ${c1}s`);
+  expect("the hung member is still working (no timeout)", (await page.locator(".rm-cagent.st-working").filter({ hasText: "Forge" }).count()) === 1 && (await page.locator(".rm-cagent.st-timeout").count()) === 0);
+  expect("the status line has no turn cap in it", !/\/\d+/.test(await page.locator(".rm-status .rm-typing").innerText()));
+  // clock readable in dark and light
+  const ratio = async () => {
+    const rows = (await page.evaluate(contrastSweep)).filter((x) => /rm-cel/.test(x.cls));
+    return { mode: await page.evaluate(() => document.documentElement.dataset.mode), ratio: rows.length ? Math.min(...rows.map((x) => x.ratio)) : 0 };
+  };
+  const seen = [];
+  for (const scheme of ["dark", "light"]) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.waitForTimeout(700);
+    const r = await ratio();
+    seen.push(`${scheme}:${r.mode}:${r.ratio}`);
+    expect(`elapsed clock readable in ${scheme} (>= 4.5:1)`, r.ratio >= 4.5, JSON.stringify(r));
+  }
+  await page.click(".rm-status [data-act=stop]");
+  await page.waitForFunction(() => !document.querySelector(".rm-compose .rm-typing") && !document.querySelector(".rm-compose textarea[disabled]"), null, { timeout: 15000 });
+  const sys = await page.locator(".rm-sys").allInnerTexts();
+  expect("Stop ends the hung member's council: cancelled note, no captain reply", sys.some((t) => /council was cancelled/.test(t)) && (await page.locator(".rm-msg.captain:not(.pending)").count()) === 0, sys.join("|"));
+  expect("no clock left once stopped", (await page.locator(".rm-cel").count()) === 0);
+  await page.emulateMedia({ colorScheme: null });
+  await page.click("[data-act=archive]");
+  if (errors.length) bad.push(["pageerrors", errors.join("; ")]);
+  if (bad.length) failed++;
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · no limit (defaults, live clock on a hung member, Stop; contrast ${seen.join(" ")})${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  await page.close();
+}
+
 let failed = 0;
 for (const [tag, engine] of [["webkit", webkit], ["chromium", chromium]]) {
   const browser = await engine.launch();
@@ -663,6 +714,7 @@ for (const [tag, engine] of [["webkit", webkit], ["chromium", chromium]]) {
   await a2aChecks(browser, tag);
   await roomsChecks(browser, tag);
   await councilChecks(browser, tag);
+  await noLimitChecks(browser, tag);
   await erroringCountChecks(browser, tag);
   await activityChecks(browser, tag);
   await markdownChecks(browser, tag);

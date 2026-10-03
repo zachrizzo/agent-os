@@ -25,13 +25,15 @@ function fakeGateway(delays: Record<string, number> = {}) {
 }
 const tmp = () => mkdtempSync(join(tmpdir(), 'aos-rooms-'));
 
-test('new rooms: council by default, captain = first member (or rfc-lead when present), maxTurns = 3n+3, maxSteps 3', async () => {
+test('new rooms: council by default, captain = first member (or rfc-lead when present), maxSteps 3, no turn/timeout settings', async () => {
   const { gw } = fakeGateway();
   const svc = createRoomsService({ gateway: gw });
   const a = await svc.create({ name: 'A', members: ['rfc-skeptic', 'rfc-scribe'] });
   assert.equal(a.room.mode, 'council');
   assert.equal(a.room.captain, 'rfc-skeptic');
-  assert.equal(a.room.maxTurns, 9);
+  assert.ok(!('maxTurns' in a.room) && !('memberTimeoutSec' in a.room));
+  const patched = (await svc.update(a.room.id, { maxTurns: 6, memberTimeoutSec: 30 } as never)).room; // retired fields are ignored
+  assert.ok(!('maxTurns' in patched) && !('memberTimeoutSec' in patched));
   assert.equal(a.room.maxSteps, 3);
   assert.equal((await svc.update(a.room.id, { maxSteps: 9 })).room.maxSteps, 4); // clamped to 1-4
   assert.equal((await svc.update(a.room.id, { maxSteps: 2 })).room.maxSteps, 2);
@@ -122,16 +124,8 @@ test('Stop aborts every in-flight member run on the Gateway and ends the council
   svc.close();
 });
 
-test('member timeout setting: a slow member is cut off and named; phi stays refused', async () => {
-  const { gw, aborted } = fakeGateway({ 'rfc-scribe': 5000 });
-  const svc = createRoomsService({ gateway: gw });
-  const { room } = await svc.create({ name: 'T', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'], memberTimeoutSec: 1 });
-  await svc.send(room.id, 'x');
-  await svc.idle(room.id);
-  const c = (await svc.get(room.id)).room.councils[0];
-  assert.equal(c.agents['rfc-scribe'].status, 'timeout');
-  assert.ok(aborted.includes('rfc-scribe'));
-  assert.equal(c.phase, 'done');
+test('phi stays refused', async () => {
+  const svc = createRoomsService({ gateway: fakeGateway().gw });
   await assert.rejects(svc.create({ name: 'P', members: ['phi'] }), /cannot join/);
   svc.close();
 });
@@ -153,12 +147,12 @@ test('old rooms.json (version 1, no mode/captain/councils) loads: RFC Council ge
   const rfc = (await svc.get('rc1cabea9')).room;
   assert.equal(rfc.captain, 'rfc-lead');
   assert.equal(rfc.mode, 'council');
-  assert.equal(rfc.maxTurns, 12); // old default cap (= members) raised to a full captain-led council (3n+3)
+  assert.ok(!('maxTurns' in rfc) && !('memberTimeoutSec' in rfc)); // retired fields dropped on load
   assert.equal(rfc.maxSteps, 3);
   assert.equal(rfc.messages.length, 2);
   const other = (await svc.get('r11111111')).room;
   assert.equal(other.captain, 'forge');
-  assert.equal(other.maxTurns, 5);
+  assert.ok(!('maxTurns' in other));
   assert.equal(other.maxSteps, 3);
   assert.equal(other.mentionGating, false);
   assert.equal(readFileSync(file, 'utf8'), raw, 'load does not rewrite the file');
@@ -183,16 +177,40 @@ test('a council that was mid-run when the server died loads as stopped, not fore
   svc.close(); rmSync(dir, { recursive: true });
 });
 
-test('rooms.json migration for captain-led steering: no maxSteps -> 3; the old 2n+2 default becomes 3n+3 once; custom caps and explicit maxSteps are kept', async () => {
+test('rooms.json with the retired maxTurns / memberTimeoutSec / noLimitMigrated fields loads without them and never writes them back', async () => {
   const dir = tmp();
   const file = join(dir, 'rooms.json');
-  const mk = (id: string, over: Record<string, unknown>) => ({ id, name: id, members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'], captain: 'rfc-lead', mode: 'council', archived: false, createdAt: 1, updatedAt: 2, maxRounds: 1, maxTurns: 8, mentionGating: true, memberTimeoutSec: 90, messages: [], councils: [], ...over });
-  writeFileSync(file, JSON.stringify({ version: 2, rooms: [mk('r10000001', {}), mk('r10000002', { maxTurns: 20 }), mk('r10000003', { maxSteps: 2 }), mk('r10000004', { mode: 'roundtable', maxTurns: 8 })] }));
+  const mk = (id: string, over: Record<string, unknown>) => ({ id, name: id, members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'], captain: 'rfc-lead', mode: 'council', archived: false, createdAt: 1, updatedAt: 2, maxRounds: 1, mentionGating: true, messages: [], councils: [], ...over });
+  writeFileSync(file, JSON.stringify({ version: 2, rooms: [
+    mk('r10000001', { maxTurns: 12, memberTimeoutSec: 90 }),
+    mk('r10000002', { maxTurns: 7, maxSteps: 2, memberTimeoutSec: 45, noLimitMigrated: true }),
+  ] }));
   const svc = createRoomsService({ gateway: fakeGateway().gw, file });
-  const get = async (id: string) => (await svc.get(id)).room;
-  assert.deepEqual([(await get('r10000001')).maxTurns, (await get('r10000001')).maxSteps], [12, 3]);
-  assert.deepEqual([(await get('r10000002')).maxTurns, (await get('r10000002')).maxSteps], [20, 3]);
-  assert.deepEqual([(await get('r10000003')).maxTurns, (await get('r10000003')).maxSteps], [8, 2]); // already migrated: an explicit 8 is not raised again
-  assert.deepEqual([(await get('r10000004')).maxTurns, (await get('r10000004')).maxSteps], [8, 3]); // round-table keeps its cap
+  for (const id of ['r10000001', 'r10000002']) {
+    const r = (await svc.get(id)).room as unknown as Record<string, unknown>;
+    assert.ok(!('maxTurns' in r) && !('memberTimeoutSec' in r) && !('noLimitMigrated' in r), id);
+  }
+  assert.equal((await svc.get('r10000002')).room.maxSteps, 2);
+  await svc.update('r10000001', { name: 'renamed' });
+  const saved = JSON.parse(readFileSync(file, 'utf8'));
+  assert.ok(saved.rooms.every((r: any) => !('maxTurns' in r) && !('memberTimeoutSec' in r) && !('noLimitMigrated' in r)));
   svc.close(); rmSync(dir, { recursive: true });
+});
+
+test('a member that never replies is never timed out; Stop ends it', async () => {
+  const { gw, aborted } = fakeGateway({ 'rfc-scribe': 3_600_000 });
+  const svc = createRoomsService({ gateway: gw });
+  const { room } = await svc.create({ name: 'T', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'] });
+  await svc.send(room.id, 'x');
+  await new Promise((r) => setTimeout(r, 500));
+  const mid = await svc.get(room.id);
+  assert.equal(mid.run?.status, 'running');
+  assert.equal(mid.room.councils[0].agents['rfc-scribe'].status, 'working'); // still hanging, not timed out
+  await svc.stop(room.id);
+  await svc.idle(room.id);
+  const end = await svc.get(room.id);
+  assert.equal(end.run?.status, 'stopped');
+  assert.equal(end.room.councils[0].agents['rfc-scribe'].status, 'stopped');
+  assert.ok(aborted.includes('rfc-scribe'));
+  svc.close();
 });

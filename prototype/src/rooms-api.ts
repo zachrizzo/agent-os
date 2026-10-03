@@ -20,7 +20,7 @@ export function createRoomsApi(source: Source) {
   return {
     list: () => call<RoomList>('rooms'),
     get: (id: string) => call<RoomView>(`rooms/${id}`),
-    create: (b: { name: string; members: string[]; maxRounds?: number; maxTurns?: number; maxSteps?: number }) => call<RoomView>('rooms', b),
+    create: (b: { name: string; members: string[]; maxRounds?: number; maxSteps?: number }) => call<RoomView>('rooms', b),
     update: (id: string, b: Record<string, unknown>) => call<RoomView>(`rooms/${id}`, b),
     send: (id: string, message: string) => call<RoomView>(`rooms/${id}/send`, { message }),
     stop: (id: string) => call<RoomView>(`rooms/${id}/stop`, {}),

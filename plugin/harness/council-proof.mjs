@@ -3,9 +3,9 @@
 // answered by harness/stub-llm.mjs, a local OpenAI-compatible server wired in as the Gateway's model provider, so every reply travels
 // the real path (sessions.create -> sessions.send -> agent run -> chat.history). The stub only chooses the reply text.
 //   node harness/council-proof.mjs <screenshot-dir> [port=19480]    uses PORT..PORT+3 (gateway, data server, harness web, stub)
-// Proves: old rooms.json migrates (RFC Council -> rfc-lead captain, maxSteps 3, 2n+2 -> 3n+3), parallel dispatch (overlapping runs), the captain's steering
+// Proves: old rooms.json migrates (RFC Council -> rfc-lead captain, maxSteps 3, old default turn cap/timeout -> no limit 0/0), parallel dispatch (overlapping runs), the captain's steering
 // (directed follow-up to chosen members only, critique round), ONE synthesized reply, the not-a-loop limits on the real path (step limit, repeat -> no progress,
-// malformed decision -> synthesis, hard turn cap), member timeout (run aborted on the Gateway), Stop cancels in-flight runs, @mention bypass,
+// malformed decision -> synthesis, hard turn cap), member timeout (run aborted on the Gateway), Stop cancels in-flight runs, a hung member with timeout 0 is not cut off (live clock) until Stop, @mention bypass,
 // persistence across a data-server restart, phi refused.
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync, readFileSync, existsSync } from "node:fs";
@@ -125,8 +125,8 @@ try {
   const rfc = (await getRoom(RFC)).room;
   const other = (await getRoom("r1a2b3c4d")).room;
   check("migration: old RFC Council gets captain rfc-lead (council mode, thread kept)", rfc.captain === "rfc-lead" && rfc.mode === "council" && rfc.messages.length === 2, `captain=${rfc.captain} mode=${rfc.mode} msgs=${rfc.messages.length} maxTurns=${rfc.maxTurns}`);
-  check("migration: old turn cap raised to 3n+3 = 12 and maxSteps defaults to 3", rfc.maxTurns === 12 && rfc.maxSteps === 3, `maxTurns=${rfc.maxTurns} maxSteps=${rfc.maxSteps}`);
-  check("migration: another old room gets its first member as captain; explicit caps kept (maxSteps still defaulted)", other.captain === "rfc-scribe" && other.maxTurns === 5 && other.maxRounds === 2 && other.maxSteps === 3, `captain=${other.captain}`);
+  check("migration: old default turn cap (= member count 3) and no timeout become NO LIMIT (0 / 0); maxSteps defaults to 3", rfc.maxTurns === 0 && rfc.memberTimeoutSec === 0 && rfc.maxSteps === 3, `maxTurns=${rfc.maxTurns} maxSteps=${rfc.maxSteps}`);
+  check("migration: another old room gets its first member as captain; a custom cap (5) is kept, no timeout stored -> 0 (maxSteps still defaulted)", other.captain === "rfc-scribe" && other.maxTurns === 5 && other.memberTimeoutSec === 0 && other.maxRounds === 2 && other.maxSteps === 3, `captain=${other.captain}`);
   check("migration: loading did not rewrite the old file", readFileSync(ROOMS_FILE, "utf8") === oldRaw);
 
   const browser = await webkit.launch();
@@ -174,7 +174,7 @@ try {
   const c1 = room1.councils.at(-1);
   check("council recorded: plan, answers, the decision, follow-ups, final id", c1.phase === "done" && c1.plan && !c1.plan.fallback && c1.notes.filter((n) => n.kind === "answer").length === 3 && c1.notes.filter((n) => n.kind === "decision").length === 1 && c1.notes.filter((n) => n.kind === "followup").length === 2 && c1.finalId === thread[1].id, `${c1.notes.length} notes, turns ${c1.turnsUsed}/${c1.maxTurns}`);
   check("captain step trace: step 1 asked rfc-skeptic+rfc-scribe (answered); stop reason = done", c1.steps?.length === 1 && c1.steps[0].action === "ask" && c1.steps[0].targets.join(",") === "rfc-skeptic,rfc-scribe" && c1.steps[0].outcome === "answered" && c1.stop?.reason === "done" && c1.maxSteps === 3, JSON.stringify({ steps: c1.steps, stop: c1.stop }));
-  check("turn accounting: 9 of maxTurns 12", c1.turnsUsed === 9 && c1.maxTurns === 12 && r1.view.run.turnsUsed === 9 && r1.view.run.steps === 1 && r1.view.run.maxSteps === 3);
+  check("turn accounting: 9 turns used, maxTurns 0 = no cap", c1.turnsUsed === 9 && c1.maxTurns === 0 && r1.view.run.turnsUsed === 9 && r1.view.run.steps === 1 && r1.view.run.maxSteps === 3);
   const hs = roomHist("rfc-skeptic", RFC);
   const prompts = hs.messages.filter((m) => m.role === "user").map(textOf);
   check("protocol is injected into the agent's room session (roles + captain), no AGENTS.md involved", prompts.some((t) => /Council role: SPECIALIST/.test(t) && /Your sub-question:/.test(t)) && prompts.some((t) => /Council role: FOLLOW-UP/.test(t) && /The captain's question:/.test(t)));
@@ -221,6 +221,32 @@ try {
   await page.waitForTimeout(1500);
   await page.screenshot({ path: path.join(outDir, "council-5-stopped.png") });
 
+
+  // ---- 3b) no timeout: a member that never replies is NOT cut off; Stop ends it ----
+  await api(`rooms/${RFC}`, { memberTimeoutSec: 0 });
+  before = (await stubStats()).length;
+  const hangT0 = Date.now();
+  let hangSeen = null;
+  let hangFired = false;
+  const hangRes = await sendAndWatch(RFC, `[[delay:rfc-skeptic=600000]] Hang drill: no timeout`, {
+    onSample: async (s, v) => {
+      if (s.phase === "working" && s.agents["rfc-skeptic"] === "working" && s.agents["rfc-scribe"] === "done" && !hangFired) {
+        hangFired = true;
+        await sleep(25000); // longer than the 5s timeout used in section 2: with timeout 0 nothing may fire
+        const mid = (await getRoom(RFC)).room.councils.at(-1);
+        await page.waitForSelector(".rm-cagent.st-working .rm-cel", { timeout: 5000 }).catch(() => {});
+        hangSeen = { at: Date.now() - hangT0, status: mid.agents["rfc-skeptic"].status, phase: mid.phase, clock: await page.locator(".rm-cagent.st-working .rm-cel").first().innerText().catch(() => "") };
+        await api(`rooms/${RFC}/stop`, {});
+      }
+    },
+  });
+  await sleep(2500);
+  console.log(`     hang timeline: ${hangRes.samples.filter((x, i, a) => i === 0 || JSON.stringify(x.agents) + x.phase !== JSON.stringify(a[i - 1].agents) + a[i - 1].phase).map((x) => `${x.t}ms:${x.phase}:${Object.entries(x.agents).map(([k, v]) => k.replace("rfc-", "") + "=" + v).join(",")}`).join(" | ")}`);
+  const st3c = await stubSince(before);
+  const c3c = hangRes.view.room.councils.at(-1);
+  check("no timeout: after 25s the hung member is still 'working' (not timed out) and the UI shows its live clock", hangSeen?.status === "working" && hangSeen?.phase === "working" && /^\d+(m\d+)?s$/.test(hangSeen?.clock ?? ""), JSON.stringify(hangSeen));
+  check("no timeout: Stop ended it (stopped, no captain reply), the hung run was aborted on the Gateway and its session is idle", hangRes.view.run.status === "stopped" && c3c.phase === "stopped" && !c3c.finalId && c3c.agents["rfc-skeptic"].status === "stopped" && st3c.find((x) => x.agent === "rfc-skeptic" && x.role === "SPECIALIST")?.aborted === true && !sessActive("rfc-skeptic", RFC), `${Date.now() - hangT0}ms`);
+
   // ---- 4) @mention bypass ----
   await api(`rooms/${RFC}`, { memberTimeoutSec: 90 });
   before = (await stubStats()).length;
@@ -242,7 +268,7 @@ try {
     return { r, st, c, rl };
   };
   const dEnd = await drill("endless: keep going", "endless");
-  check("step limit: a captain that never stops is cut at 3 decisions, then ONE synthesis (turns <= maxTurns)", dEnd.c.stop?.reason === "stepLimit" && dEnd.c.steps.length === 3 && dEnd.rl("CAPTAIN-STEER") === 3 && dEnd.rl("FOLLOW-UP") === 3 && dEnd.rl("CAPTAIN-SYNTHESIZE") === 1 && dEnd.st.at(-1).role === "CAPTAIN-SYNTHESIZE" && dEnd.c.turnsUsed === dEnd.st.length && dEnd.st.length <= dEnd.c.maxTurns && dEnd.r.view.room.messages.filter((m) => m.council === dEnd.c.id).length === 1, `${dEnd.st.length} turns, stop=${dEnd.c.stop?.reason}`);
+  check("step limit: a captain that never stops is cut at 3 decisions, then ONE synthesis (maxTurns 0 = no cap; turns <= the derived bound 18)", dEnd.c.stop?.reason === "stepLimit" && dEnd.c.steps.length === 3 && dEnd.rl("CAPTAIN-STEER") === 3 && dEnd.rl("FOLLOW-UP") === 3 && dEnd.rl("CAPTAIN-SYNTHESIZE") === 1 && dEnd.st.at(-1).role === "CAPTAIN-SYNTHESIZE" && dEnd.c.turnsUsed === dEnd.st.length && dEnd.c.maxTurns === 0 && dEnd.st.length <= 1 + 3 + 3 * 3 + 4 + 1 && dEnd.r.view.room.messages.filter((m) => m.council === dEnd.c.id).length === 1, `${dEnd.st.length} turns, stop=${dEnd.c.stop?.reason}`);
   await page.waitForFunction(() => document.querySelectorAll(".rm-council").length >= 4, null, { timeout: 20000 });
   await page.locator(".rm-council").last().locator("summary").click();
   check("UI: the endless run's panel lists 3 decisions and 'stopped: step limit'", (await page.locator(".rm-council").last().locator(".rm-note.decision").count()) === 3 && /stopped: step limit/.test(await page.locator(".rm-council").last().locator(".rm-cstop").innerText()));
@@ -258,9 +284,9 @@ try {
   await api(`rooms/${RFC}`, { maxTurns: 7 });
   const dCap = await drill("endless: with a tight cap", "endless @ maxTurns 7");
   check("hard cap: maxTurns 7 stops the steering and STILL synthesizes (one reply, 7 turns, stop reason cap)", dCap.c.stop?.reason === "cap" && dCap.st.length <= 7 && dCap.st.at(-1).role === "CAPTAIN-SYNTHESIZE" && dCap.r.view.room.messages.filter((m) => m.council === dCap.c.id).length === 1 && dCap.r.view.run.stopReason === "maxTurns", `${dCap.st.length} turns, stop=${dCap.c.stop?.reason}`);
-  await api(`rooms/${RFC}`, { maxTurns: 12 });
+  await api(`rooms/${RFC}`, { maxTurns: 0 });
   const planB = (await getRoom(RFC)).room;
-  check("settings: maxSteps is editable and clamped 1-4 through the API", (await api(`rooms/${RFC}`, { maxSteps: 9 })).json.room.maxSteps === 4 && (await api(`rooms/${RFC}`, { maxSteps: 3 })).json.room.maxSteps === 3 && planB.maxTurns === 12);
+  check("settings: maxSteps is editable and clamped 1-4 through the API", (await api(`rooms/${RFC}`, { maxSteps: 9 })).json.room.maxSteps === 4 && (await api(`rooms/${RFC}`, { maxSteps: 3 })).json.room.maxSteps === 3 && planB.maxTurns === 0);
 
   // ---- 5) persistence across a data-server restart ----
   const beforeRestart = await getRoom(RFC);
@@ -269,14 +295,14 @@ try {
   data = startData();
   await wait(async () => (await fetch(`${web}/config`)).ok, "data server restart");
   const back = await getRoom(RFC);
-  check("restart: same thread, plan, notes and final answers", JSON.stringify(back.room.messages) === JSON.stringify(beforeRestart.room.messages) && JSON.stringify(back.room.councils) === JSON.stringify(beforeRestart.room.councils) && back.room.councils.length === 9, `${back.room.messages.length} msgs, ${back.room.councils.length} councils`);
+  check("restart: same thread, plan, notes and final answers", JSON.stringify(back.room.messages) === JSON.stringify(beforeRestart.room.messages) && JSON.stringify(back.room.councils) === JSON.stringify(beforeRestart.room.councils) && back.room.councils.length === 10, `${back.room.messages.length} msgs, ${back.room.councils.length} councils`);
   const saved = JSON.parse(readFileSync(ROOMS_FILE, "utf8"));
   check("rooms.json is 0600, version 2, and now carries the captain for BOTH migrated rooms", execFileSync("stat", ["-f", "%Lp", ROOMS_FILE], { encoding: "utf8" }).trim() === "600" && saved.version === 2 && saved.rooms.find((r) => r.id === RFC)?.captain === "rfc-lead" && saved.rooms.find((r) => r.id === "r1a2b3c4d")?.captain === "rfc-scribe");
   await page.reload();
   await page.click(".rooms-btn");
   await page.locator(".rm-row", { hasText: "RFC Council" }).click();
   await page.waitForSelector(".rm-msg.captain");
-  check("restart: UI reload shows the same captain replies and Council panels", (await page.locator(".rm-msg.captain").count()) === 8 && (await page.locator(".rm-council").count()) === 9, `${await page.locator(".rm-msg.captain").count()} replies, ${await page.locator(".rm-council").count()} panels`);
+  check("restart: UI reload shows the same captain replies and Council panels", (await page.locator(".rm-msg.captain").count()) === 8 && (await page.locator(".rm-council").count()) === 10, `${await page.locator(".rm-msg.captain").count()} replies, ${await page.locator(".rm-council").count()} panels`);
   check("restart: finished panels are collapsed by default", (await page.locator(".rm-council[open]").count()) === 0);
   await page.screenshot({ path: path.join(outDir, "council-6-after-restart.png") });
 
