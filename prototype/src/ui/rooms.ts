@@ -125,7 +125,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
           ${menuOpen ? `<div class="rm-menu" role="menu">
             <button role="menuitem" data-act="rename">Rename room</button>
             <button role="menuitem" data-act="archive">${room.archived ? 'Restore room' : 'Archive room'}</button>
-            ${host?.has('open-session') && room.captain ? `<i class="rm-sep" role="separator"></i><button role="menuitem" data-act="open-captain" title="Open ${esc(agentOf(room.captain).name)}'s room session in the Control UI chat">${svg('chat', 14)}<span>Open captain's chat</span></button>` : ''}
+            ${host?.has('open-session') && room.captain ? `<i class="rm-sep" role="separator"></i><button role="menuitem" data-act="open-captain" title="Open ${esc(agentOf(room.captain).name)}'s room session in the Control UI chat">${svg('chat', 14)}<span>Open lead's chat</span></button>` : ''}
           </div>` : ''}
         </div>
       </header>
