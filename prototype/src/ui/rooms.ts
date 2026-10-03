@@ -167,6 +167,10 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
         ? `<span class="rm-typing"><i></i>Council · ${esc(PHASE_LABEL[run!.phase].toLowerCase())} · turn ${run!.turnsUsed}/${run!.maxTurns}</span><button class="rm-ghost" data-act="stop">Stop</button>`
         : `<span class="rm-typing"><i></i>${run!.current ? `${esc(agentOf(run!.current).name)} is answering` : 'Working'} · round ${run!.round}/${run!.maxRounds} · turn ${run!.turnsUsed}/${run!.maxTurns}</span><button class="rm-ghost" data-act="stop">Stop</button>`
       : '';
+    // The repaint below replaces the whole thread element, which resets scrollTop to 0: read where the user is first.
+    const prevTh = mainEl.querySelector<HTMLElement>('.rm-thread');
+    let keepTop = 0;
+    if (prevTh) { keepTop = prevTh.scrollTop; stick = keepTop + prevTh.clientHeight >= prevTh.scrollHeight - 40; }
     mainEl.innerHTML = `
       <header class="rm-bar">
         ${renaming ? `<input class="rm-rename" maxlength="60" value="${esc(room.name)}" aria-label="Room name"/><button class="rm-primary sm" data-act="rename-ok">Save</button><button class="rm-ghost sm" data-act="rename-cancel">Cancel</button>`
@@ -195,7 +199,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
         <div class="cmp-status ${notice ? 'err' : ''}" role="status">${esc(notice)}</div>
       </footer>`;
     const th = mainEl.querySelector<HTMLElement>('.rm-thread')!;
-    if (stick) th.scrollTop = th.scrollHeight;
+    th.scrollTop = stick ? th.scrollHeight : keepTop; // follow new messages only when already near the bottom; otherwise stay put
     th.addEventListener('scroll', () => { stick = th.scrollTop + th.clientHeight >= th.scrollHeight - 40; });
     const box = mainEl.querySelector('textarea');
     box?.addEventListener('input', () => { draft = box.value; (mainEl.querySelector<HTMLButtonElement>('[data-act=send]')!).disabled = !draft.trim(); });
