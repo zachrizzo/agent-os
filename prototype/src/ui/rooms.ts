@@ -1,7 +1,7 @@
 // Group rooms: create a room, pick agents from the live list, chat with all of them in one thread.
-// Everything is server-side (persisted rooms, bounded runs); this view only renders it and polls while a run is in flight.
+// Everything is server-side (persisted rooms, the open discussion run); this view only renders the thread and polls while a discussion is in flight.
 import { installMarkdownHandlers, renderInline, renderMarkdown } from '../../shared/markdown';
-import { MAX_MEMBERS, YOU, type Council, type CouncilAgentStatus, type CouncilNote, type CouncilStopReason } from '../../shared/rooms';
+import { MAX_MEMBERS, YOU } from '../../shared/rooms';
 import { createRoomsApi, type RoomAgent, type RoomSummary, type RoomView } from '../rooms-api';
 import type { ShellStore } from '../store';
 import { avatarHtml, avatarHue, esc, fmtHM, svg } from './format';
@@ -27,11 +27,6 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
   let createName = '';
   let timer: number | undefined;
   let busy = false;
-  // Council panel open/closed + expanded notes: a poll repaints the thread, so what the user toggled is remembered here.
-  // Default: open while the council runs, collapsed once it is done.
-  const councilOpen = new Map<string, boolean>();
-  const noteOpen = new Set<string>();
-
   const agentOf = (id: string): RoomAgent => agents.find((a) => a.id === id) ?? view?.members.find((a) => a.id === id) ?? { id, name: id };
   const who = (id: string): { name: string; html: string } => id === YOU
     ? { name: 'You', html: `<span class="avatar you" title="You">Y</span>` }
@@ -80,63 +75,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     return list.length ? `<div class="rm-picker">${list.map((a) => `<label class="rm-pick${selected.has(a.id) ? ' on' : ''}"><input type="checkbox" ${attr}="${esc(a.id)}" ${selected.has(a.id) ? 'checked' : ''}/>${avatarHtml(a.id, a.name, a.emoji, 'sm')}<span>${esc(a.name)}<small class="mono">@${esc(a.id)}</small></span></label>`).join('')}</div>` : '<div class="rm-none">No other agents available.</div>';
   };
 
-  const STATUS_LABEL: Record<CouncilAgentStatus, string> = { idle: 'waiting', planning: 'planning', working: 'working', steering: 'deciding', critiquing: 'critiquing', synthesizing: 'synthesizing', done: 'done', timeout: 'timed out', error: 'failed', skipped: 'skipped', stopped: 'stopped' };
-  const PHASE_LABEL: Record<Council['phase'], string> = { planning: 'Captain is planning', working: 'Members are working', steering: 'Captain is deciding the next step', critiquing: 'Members are critiquing each other', synthesizing: 'Captain is writing the answer', done: 'Done', stopped: 'Stopped' };
-  const NOTE_KIND: Record<CouncilNote['kind'], string> = { plan: 'plan', decision: 'decision', answer: 'answer', followup: 'follow-up', critique: 'critique', system: 'note' };
-  const STOP_LABEL: Record<CouncilStopReason, string> = { done: 'done: good enough', stepLimit: 'step limit', cap: 'turn cap', noProgress: 'no progress', malformed: 'unusable decision', captainFailed: 'captain failed', cancelled: 'cancelled' };
-  const NOTE_CLAMP = 260;
-  const BUSY = new Set<CouncilAgentStatus>(['planning', 'working', 'steering', 'critiquing', 'synthesizing']);
-  /** Live elapsed time on a running member, e.g. "3m12s": a hung member shows up as a clock that keeps climbing (there is no timeout; Stop ends it). */
-  const fmtClock = (ms: number) => { const t = Math.max(0, Math.floor(ms / 1000)); return t < 60 ? `${t}s` : `${Math.floor(t / 60)}m${String(t % 60).padStart(2, '0')}s`; };
-  // Ticks once a second without repainting the thread (a repaint would eat text selection and open notes).
-  window.setInterval(() => { for (const t of el.querySelectorAll<HTMLElement>('time.rm-cel[data-since]')) t.textContent = fmtClock(Date.now() - Number(t.dataset.since)); }, 1000);
   const mentionize = (text: string, room: RoomView['room']) => renderMarkdown(text, { mentions: room.members });
-  const fmtDur = (ms: number) => (ms < 1000 ? '<1s' : ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
-
-  function noteRow(n: CouncilNote, room: RoomView['room']): string {
-    const w = who(n.agent);
-    const long = n.text.length > NOTE_CLAMP;
-    const body = n.pass ? '<span class="rm-pass">PASS · no objection</span>' : long
-      ? `<details class="rm-note-more" data-nid="${esc(n.id)}" ${noteOpen.has(n.id) ? 'open' : ''}><summary><span class="rm-note-prev">${renderInline(n.text.slice(0, NOTE_CLAMP).trimEnd())}…</span><span class="rm-more">more</span></summary><div class="rm-note-full">${mentionize(n.text, room)}</div></details>`
-      : mentionize(n.text, room);
-    return `<div class="rm-note ${n.kind}${n.pass ? ' pass' : ''}" style="--hue:${avatarHue(n.agent)}">
-      <div class="rm-note-line"><b>${esc(w.name)}</b><span class="rm-kind">${NOTE_KIND[n.kind]}</span><time>${fmtHM(n.ts)}</time></div>
-      <div class="rm-note-text md">${body}</div></div>`;
-  }
-
-  /** The collapsible "Council thinking" panel under the captain's reply: per-agent status chips + compact note rows. */
-  function councilPanel(c: Council, room: RoomView['room']): string {
-    const live = c.phase !== 'done' && c.phase !== 'stopped';
-    const open = councilOpen.get(c.id) ?? live;
-    const ids = Object.keys(c.agents).length ? Object.keys(c.agents) : room.members;
-    const chips = ids.map((id) => {
-      const st = c.agents[id]?.status ?? 'idle';
-      const w = who(id);
-      return `<span class="rm-cagent st-${st}" title="${esc(w.name)}: ${STATUS_LABEL[st]}">${avatarHtml(id, w.name, agentOf(id).emoji, 'sm')}<span class="rm-cname">${esc(w.name)}${id === c.captain ? '<small>captain</small>' : ''}</span><i class="rm-cst">${STATUS_LABEL[st]}</i>${BUSY.has(st) && c.agents[id]?.startedAt ? `<time class="rm-cel" data-since="${c.agents[id]!.startedAt}">${fmtClock(Date.now() - c.agents[id]!.startedAt!)}</time>` : ''}</span>`;
-    }).join('');
-    const plan = c.plan?.fallback ? '<span class="rm-cwarn" title="The captain\'s plan could not be parsed, so every member got the whole question">fallback plan</span>' : '';
-    const elapsed = fmtDur((c.endedAt ?? Date.now()) - c.startedAt);
-    const nSteps = c.steps?.length ?? 0;
-    const steps = c.maxSteps ? ` · step ${nSteps}/${c.maxSteps}` : '';
-    const stopped = c.stop && c.stop.reason !== 'cancelled' ? `<span class="rm-cstop ${c.stop.reason}" title="${esc(c.stop.detail ?? '')}">stopped: ${esc(STOP_LABEL[c.stop.reason])}</span>` : '';
-    return `<details class="rm-council ${c.phase}" data-cid="${esc(c.id)}" data-live="${live ? 1 : 0}" ${open ? 'open' : ''}>
-      <summary><span class="rm-chev">${svg('chevron', 12)}</span><b>Council thinking</b>${live ? '<i class="rm-run"></i>' : ''}<span class="rm-csub">${esc(PHASE_LABEL[c.phase])} · ${ids.length} agents · ${c.turnsUsed} turns${steps} · ${elapsed}</span>${plan}${stopped}</summary>
-      <div class="rm-cagents">${chips}</div>
-      <div class="rm-notes">${c.notes.map((n) => noteRow(n, room)).join('') || '<div class="rm-none">Waiting for the first notes…</div>'}</div>
-    </details>`;
-  }
-
-  /** Zach's message, then ONE captain reply (or a placeholder while the council works), then the collapsible panel. */
-  function councilBlock(c: Council, view: RoomView): string {
-    const { room } = view;
-    const final = c.finalId ? room.messages.find((m) => m.id === c.finalId) : undefined;
-    const w = who(c.captain);
-    const reply = final
-      ? `<div class="rm-msg captain">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b><span class="rm-rnd">captain · council answer</span><time>${fmtHM(final.ts)}</time></div><div class="rm-text md">${mentionize(final.text, room)}</div></div></div>`
-      : c.phase === 'stopped' ? ''
-      : `<div class="rm-msg captain pending">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b><span class="rm-rnd">captain</span></div><div class="rm-text muted"><span class="rm-typing"><i></i>${esc(PHASE_LABEL[c.phase])}…</span></div></div></div>`;
-    return `${reply}<div class="rm-council-wrap">${councilPanel(c, room)}</div>`;
-  }
 
   function paintMain() {
     if (mode.t === 'empty') {
@@ -156,21 +95,19 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     const { room, run } = view;
     const running = run?.status === 'running';
     const nonMembers = agents.filter((a) => !room.members.includes(a.id));
-    const councils = new Map(room.councils.map((c) => [c.id, c]));
-    const finals = new Set(room.councils.map((c) => c.finalId).filter(Boolean));
     const msgs = room.messages.map((m) => {
-      if (finals.has(m.id)) return ''; // the captain's reply is drawn with its council, right under Zach's message
       if (m.from === 'system') return `<div class="rm-sys">${esc(m.text)}</div>`;
       const w = who(m.from);
-      const text = mentionize(m.text, room);
-      const mine = `<div class="rm-msg${m.from === YOU ? ' me' : ''}">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b>${m.round && m.round > 1 ? `<span class="rm-rnd">round ${m.round}</span>` : ''}<time>${fmtHM(m.ts)}</time></div><div class="rm-text md">${text}</div></div></div>`;
-      const c = councils.get(m.id);
-      return c ? mine + councilBlock(c, view!) : mine;
+      return `<div class="rm-msg${m.from === YOU ? ' me' : ''}${m.final ? ' final' : ''}">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b>${m.final ? '<span class="rm-rnd">final answer</span>' : ''}<time>${fmtHM(m.ts)}</time></div><div class="rm-text md">${mentionize(m.text, room)}</div></div></div>`;
     }).join('');
+    // Agents with a turn in flight show as typing bubbles at the end of the thread, like a group chat.
+    const typing = (run?.status === 'running' ? run.active ?? [] : []).map((id) => {
+      const w = who(id);
+      return `<div class="rm-msg pending" data-typing="${esc(id)}">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b></div><div class="rm-text muted"><span class="rm-typing"><i></i><i></i><i></i></span></div></div></div>`;
+    }).join('');
+    const names = (run?.active ?? []).map((id) => agentOf(id).name);
     const status = running
-      ? run!.mode === 'council' && run!.phase
-        ? `<span class="rm-typing"><i></i>Council · ${esc(PHASE_LABEL[run!.phase].toLowerCase())} · turn ${run!.turnsUsed}</span><button class="rm-ghost" data-act="stop">Stop</button>`
-        : `<span class="rm-typing"><i></i>${run!.current ? `${esc(agentOf(run!.current).name)} is answering` : 'Working'} · round ${run!.round}/${run!.maxRounds} · turn ${run!.turnsUsed}</span><button class="rm-ghost" data-act="stop">Stop</button>`
+      ? `<span class="rm-typing"><i></i>${names.length ? `${esc(names.slice(0, 3).join(', '))}${names.length > 3 ? ` +${names.length - 3}` : ''} ${names.length === 1 ? 'is' : 'are'} typing…` : 'Discussion in progress…'}</span><button class="rm-ghost" data-act="stop">Stop</button>`
       : '';
     // The repaint below replaces the whole thread element, which resets scrollTop to 0: read where the user is first.
     const prevTh = mainEl.querySelector<HTMLElement>('.rm-thread');
@@ -184,17 +121,14 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
         <button class="rm-ghost sm" data-act="archive">${room.archived ? 'Restore' : 'Archive'}</button>
       </header>
       <div class="rm-members">
-        ${view.members.map((a) => `<span class="rm-chip${a.id === room.captain && room.mode === 'council' ? ' captain' : ''}" title="${a.id === room.captain && room.mode === 'council' ? 'Council captain' : ''}">${avatarHtml(a.id, a.name, a.emoji, 'sm')}<span>${esc(a.name)}</span>${a.id === room.captain && room.mode === 'council' ? '<small class="rm-cap">captain</small>' : ''}<button data-remove="${esc(a.id)}" title="Remove ${esc(a.name)}" aria-label="Remove ${esc(a.name)}" ${running ? 'disabled' : ''}>${svg('close', 12)}</button></span>`).join('') || '<span class="muted">No agents in this room.</span>'}
+        ${view.members.map((a) => `<span class="rm-chip${a.id === room.captain ? ' captain' : ''}" title="${a.id === room.captain ? 'Lead: moderates and posts the final answer' : ''}">${avatarHtml(a.id, a.name, a.emoji, 'sm')}<span>${esc(a.name)}</span>${a.id === room.captain && view!.members.length > 1 ? '<small class="rm-cap">lead</small>' : ''}<button data-remove="${esc(a.id)}" title="Remove ${esc(a.name)}" aria-label="Remove ${esc(a.name)}" ${running ? 'disabled' : ''}>${svg('close', 12)}</button></span>`).join('') || '<span class="muted">No agents in this room.</span>'}
         ${room.members.length < MAX_MEMBERS && nonMembers.length ? `<button class="rm-add" data-act="add-toggle" ${running ? 'disabled' : ''}>${svg('plus', 12)}<span>Add agent</span></button>` : ''}
         <span class="grow"></span>
-        <span class="rm-limits" title="Council: the captain splits your message, members answer in parallel, then the captain steers (a follow-up to chosen members, a critique round, or stop) for at most the set number of steps, and gives ONE answer. Only the captain routes turns. An @mention goes straight to that agent. Round-table: everyone answers in turn. There is no turn cap or member timeout: Stop ends a run.">
-          mode <select data-set="mode" aria-label="Room mode"><option value="council" ${room.mode === 'council' ? 'selected' : ''}>Council</option><option value="roundtable" ${room.mode === 'roundtable' ? 'selected' : ''}>Round-table</option></select>
-          ${room.mode === 'council' ? `captain <select data-set="captain" class="wide" aria-label="Council captain" ${running ? 'disabled' : ''}>${view.members.map((a) => `<option value="${esc(a.id)}" ${a.id === room.captain ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>` : `rounds <select data-set="maxRounds">${[1, 2, 3, 4].map((n) => `<option ${n === room.maxRounds ? 'selected' : ''}>${n}</option>`).join('')}</select>`}
-          ${room.mode === 'council' ? `steps <input type="number" min="1" max="4" value="${room.maxSteps}" data-set="maxSteps" title="How many follow-up decisions the captain may make before it must answer (1-4)"/>` : ''}
-          </span>
+        <span class="rm-limits" title="The lead moderates the discussion and posts the final answer. An @mention in your message goes straight to that agent.">
+          lead <select data-set="captain" class="wide" aria-label="Discussion lead" ${running ? 'disabled' : ''}>${view.members.map((a) => `<option value="${esc(a.id)}" ${a.id === room.captain ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></span>
       </div>
       ${adding ? `<div class="rm-addbox">${agentPicker(new Set(), room.members, 'data-addpick')}<div class="rm-actions"><button class="rm-ghost sm" data-act="add-close">Done</button></div></div>` : ''}
-      <div class="rm-thread" tabindex="0">${msgs || '<div class="rm-blank small"><span>No messages yet. Ask something: the captain splits it across the council and gives you one answer. <span class="rm-at">@name</span> goes straight to just that agent.</span></div>'}</div>
+      <div class="rm-thread" tabindex="0">${msgs || typing ? msgs + typing : '<div class="rm-blank small"><span>No messages yet. Ask something: every agent replies, they talk it through together, and the lead posts the answer. <span class="rm-at">@name</span> goes straight to just that agent.</span></div>'}</div>
       <footer class="rm-compose">
         <div class="rm-status">${status}</div>
         <div class="rm-mentions">${view.members.map((a) => `<button class="rm-mention" data-mention="${esc(a.id)}">@${esc(a.id)}</button>`).join('')}</div>
@@ -244,13 +178,6 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
 
   installMarkdownHandlers(el);
 
-  // <details> toggles do not bubble: remember what the user opened/closed so the next poll repaint keeps it.
-  el.addEventListener('toggle', (e) => {
-    const d = e.target as HTMLDetailsElement;
-    // Only a state that differs from the default (open while running, collapsed once done) is a user choice; the repaint's own toggles are not.
-    if (d.dataset?.cid) { if (d.open === (d.dataset.live === '1')) councilOpen.delete(d.dataset.cid); else councilOpen.set(d.dataset.cid, d.open); }
-    else if (d.dataset?.nid) { if (d.open) noteOpen.add(d.dataset.nid); else noteOpen.delete(d.dataset.nid); }
-  }, true);
   el.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
     const roomBtn = t.closest<HTMLElement>('[data-room]');
@@ -295,7 +222,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     } else if (t.matches('[data-set]') && mode.t === 'room') {
       const id = mode.id;
       const key = (t as HTMLElement).dataset.set!;
-      void act(() => api.update(id, { [key]: key === 'mode' || key === 'captain' ? t.value : Number(t.value) }));
+      void act(() => api.update(id, { [key]: t.value }));
     }
   });
   el.addEventListener('input', (e) => {

@@ -1,26 +1,34 @@
-// Group rooms: one thread, several agents. Semantics mirror OpenClaw broadcast groups (channels/broadcast-groups.md):
-//   - @mention gating: explicit @mentions pick the round-1 responders; no match (or @all) picks everyone;
-//   - maxRounds 1-4 (default 1) including the first round; there is no turn cap and no per-member timeout (only Stop and the guards end a run);
-//   - a follow-up round runs only for members that replied or were @mentioned in the previous round, and "PASS" passes.
-// Pure logic, no I/O: the server injects a transport (real Gateway sessions or a fake) so the loop is unit-testable.
-// Default room mode is "council" (shared/council.ts: captain plans, members work in parallel, the captain then steers the conversation one decision at a time, captain synthesizes);
-// the loop above is kept as mode "roundtable" and as the @mention bypass.
+// Group rooms: an OPEN DISCUSSION, like a group chat. Pure logic, no I/O: the server injects a transport (real Gateway sessions or a fake) so the loop is unit-testable.
+//   - Zach posts; every member replies in the shared thread (round 1, in parallel, as each one finishes its bubble appears).
+//   - Every next round, every member sees the whole discussion so far and either replies (builds on it, disagrees, @mentions a member) or says PASS.
+//   - The lead (room.captain) speaks last in each round and moderates: it can steer by addressing members, and posts the FINAL answer once the discussion has converged.
+//   - The run ends when the lead posts its final answer, or after a round where nobody adds anything new (the lead then wraps up), or when Zach hits Stop.
+//     A generous silent backstop (MAX_DISCUSSION_ROUNDS) keeps a runaway conversation finite; nothing about it is shown.
+//   - A message that @mentions members is a direct question: only they reply, and replies that @mention others pull those in (no lead wrap-up).
 
 // Rooms ask for "PASS", not OpenClaw's NO_REPLY: in a direct session the Gateway treats an exact NO_REPLY as a failed turn and re-prompts
 // the agent ("The previous attempt did not produce a user-visible answer"), which would burn a turn and force an answer. NO_REPLY is still accepted as a pass.
 export const PASS_TOKEN = 'PASS';
+export const FINAL_MARK = 'FINAL:';
 export const MAX_MEMBERS = 16;
 export const MAX_ROOMS = 50;
 export const MAX_ROOM_NAME = 60;
 export const MAX_MESSAGE_CHARS = 4000;
 export const MAX_STORED_MESSAGES = 400;
-export const TRANSCRIPT_MESSAGES = 12;
-const TRANSCRIPT_ITEM_CHARS = 1200;
-const TRANSCRIPT_TOTAL_CHARS = 8000;
+/** Silent backstop on discussion rounds (never shown). */
+export const MAX_DISCUSSION_ROUNDS = 20;
+const CONTEXT_MESSAGES = 6;
+const CONTEXT_ITEM_CHARS = 600;
+const DISCUSSION_ITEM_CHARS = 1500;
+const DISCUSSION_TOTAL_CHARS = 14000;
 export const YOU = 'you';
 
 /** The PHI agent is never listed, joined or messaged. */
 export const isExcludedAgent = (id: string) => /^phi($|[-_.])/i.test(id.trim());
+
+export const roomSessionKey = (agentId: string, roomId: string) => `agent:${agentId}:room-${roomId}`;
+/** The only session keys rooms create, message, or hand to the host. */
+export const ROOM_KEY_RE = /^agent:([a-z0-9][a-z0-9_-]{0,63}):room-(r[0-9a-f]{8})$/;
 
 export interface RoomMember { id: string; name: string }
 export interface RoomMessage {
@@ -30,44 +38,16 @@ export interface RoomMessage {
   from: string;
   text: string;
   round?: number;
-  /** Set on a captain reply: the Council (room.councils[].id = the triggering message id) that produced it. */
-  council?: string;
+  /** The lead's final answer: the discussion converged (or went quiet) and this is the answer for Zach. */
+  final?: boolean;
 }
-export type RoomMode = 'council' | 'roundtable';
-export type CouncilPhase = 'planning' | 'working' | 'steering' | 'critiquing' | 'synthesizing' | 'done' | 'stopped';
-export type CouncilAgentStatus = 'idle' | 'planning' | 'working' | 'steering' | 'critiquing' | 'synthesizing' | 'done' | 'timeout' | 'error' | 'skipped' | 'stopped';
-export interface CouncilNote { id: string; ts: number; agent: string; kind: 'plan' | 'decision' | 'answer' | 'followup' | 'critique' | 'system'; text: string; pass?: boolean }
-/** Why the captain stopped steering: it was done, a limit was hit, the conversation stopped making progress, or its decision was unusable. */
-export type CouncilStopReason = 'done' | 'stepLimit' | 'cap' | 'noProgress' | 'malformed' | 'captainFailed' | 'cancelled';
-/** One captain decision that was acted on. `step` counts from 1; `outcome` is filled in once the targets have replied. */
-export interface CouncilStep { step: number; action: 'ask' | 'critique'; targets: string[]; question?: string; unresolved?: string; outcome?: 'answered' | 'allPass' | 'failed' | 'repeat' }
-export interface CouncilTask { agent: string; question: string }
-export interface CouncilAgent { status: CouncilAgentStatus; startedAt?: number; endedAt?: number }
-/** One council run for one message from Zach. Persisted with the room; the UI renders it as the "Council thinking" panel. */
-export interface Council {
-  id: string; // the triggering message id
-  captain: string;
-  phase: CouncilPhase;
-  startedAt: number;
-  endedAt?: number;
-  plan?: { tasks: CouncilTask[]; fallback: boolean; reason?: string; note?: string };
-  agents: Record<string, CouncilAgent>;
-  notes: CouncilNote[];
-  turnsUsed: number;
-  /** Captain decisions allowed between the first answers and the synthesis. Absent on councils recorded before captain-led steering. */
-  maxSteps?: number;
-  steps?: CouncilStep[];
-  stop?: { reason: CouncilStopReason; detail?: string };
-  finalId?: string;
-}
-export interface RoomSettings { maxRounds: number; maxSteps: number; mentionGating: boolean; mode: RoomMode }
+export interface RoomSettings { mentionGating: boolean }
 export interface Room extends RoomSettings {
   id: string;
   name: string;
   members: string[]; // agent ids, join order
-  /** The council captain: always one of `members` (or '' for an empty room). */
+  /** The lead who moderates and posts the final answer: always one of `members` (or '' for an empty room). */
   captain: string;
-  councils: Council[];
   archived: boolean;
   createdAt: number;
   updatedAt: number;
@@ -78,14 +58,9 @@ export interface RoomRunState {
   status: 'running' | 'done' | 'stopped';
   round: number;
   turnsUsed: number;
-  maxRounds: number;
-  current?: string; // agent id with a turn in flight
-  mode?: RoomMode;
-  phase?: CouncilPhase;
-  stopReason?: 'maxRounds' | 'passed' | 'cancelled' | 'complete';
-  /** Council only: captain decisions taken so far / allowed. */
-  steps?: number;
-  maxSteps?: number;
+  /** Agent ids with a turn in flight right now (their typing bubbles). */
+  active: string[];
+  stopReason?: 'passed' | 'cancelled' | 'complete';
 }
 
 export const clampInt = (v: unknown, min: number, max: number, dflt: number) => {
@@ -93,37 +68,28 @@ export const clampInt = (v: unknown, min: number, max: number, dflt: number) => 
   return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.trunc(n))) : dflt;
 };
 
-export const MAX_COUNCILS = 60;
-export const DEFAULT_MAX_STEPS = 3;
-export const MAX_STEPS_LIMIT = 4;
-
-/**
- * Upper bound on agent turns for ONE council message (there is no turn cap), n members, maxSteps captain decisions:
- * plan (1) + n answers + per step at most n (follow-ups or critics) + decisions (at most maxSteps + 1, the last may be "synthesize") + synthesis (1).
- */
-export const councilTurnBound = (n: number, maxSteps: number) => 1 + n + maxSteps * n + (maxSteps + 1) + 1;
-
-/** Defaults: council mode, 1 round (round-table / @mention path), no turn cap, no member timeout, mention gating on. */
-export function normalizeSettings(raw: Partial<RoomSettings> | undefined, _memberCount?: number): RoomSettings {
-  const mode: RoomMode = raw?.mode === 'roundtable' ? 'roundtable' : 'council';
-  const maxRounds = clampInt(raw?.maxRounds, 1, 4, 1);
-  const maxSteps = clampInt(raw?.maxSteps, 1, MAX_STEPS_LIMIT, DEFAULT_MAX_STEPS);
-  return { maxRounds, maxSteps, mentionGating: raw?.mentionGating !== false, mode };
+export function normalizeSettings(raw: Partial<RoomSettings> | undefined): RoomSettings {
+  return { mentionGating: raw?.mentionGating !== false };
 }
 
-/** The captain is always a member. A saved captain that is still a member wins; otherwise `rfc-lead` when present, else the first member. */
+/** The lead is always a member. A saved lead that is still a member wins; otherwise `rfc-lead` when present, else the first member. */
 export function resolveCaptain(saved: unknown, members: string[]): string {
   if (typeof saved === 'string' && members.includes(saved)) return saved;
   return members.includes('rfc-lead') ? 'rfc-lead' : members[0] ?? '';
 }
 
 /**
- * Backward-compatible load of a stored room (rooms.json version 1 had no mode/captain/councils): missing fields get the council defaults and the captain is
- * resolved by resolveCaptain. The retired maxTurns / memberTimeoutSec / noLimitMigrated fields are dropped; nothing is written until the room's next normal save.
+ * Load a stored room from any earlier version. The captain-led pipeline's fields (mode, maxRounds, maxSteps, councils, turn/timeout caps) are dropped, and
+ * a former council answer becomes a normal final bubble. Nothing is written until the room's next normal save.
  */
 export function migrateRoom(r: Room): Room {
-  const { maxTurns: _t, memberTimeoutSec: _m, noLimitMigrated: _n, ...rest } = r as Room & { maxTurns?: number; memberTimeoutSec?: number; noLimitMigrated?: boolean };
-  return { ...rest, ...normalizeSettings(r), captain: resolveCaptain(r.captain, r.members), councils: Array.isArray(r.councils) ? r.councils : [], messages: r.messages ?? [] };
+  const { maxTurns: _t, memberTimeoutSec: _m, noLimitMigrated: _n, maxRounds: _r, maxSteps: _s, mode: _mode, councils: _c, ...rest } =
+    r as Room & { maxTurns?: number; memberTimeoutSec?: number; noLimitMigrated?: boolean; maxRounds?: number; maxSteps?: number; mode?: string; councils?: unknown };
+  const messages = (r.messages ?? []).map((m) => {
+    const { council, ...msg } = m as RoomMessage & { council?: string };
+    return council ? { ...msg, final: true } : msg;
+  });
+  return { ...rest, ...normalizeSettings(r), captain: resolveCaptain(r.captain, r.members), messages };
 }
 
 export const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -152,96 +118,174 @@ export const isPass = (reply: string | null | undefined) => {
   return !t || /^(PASS|NO_REPLY)[.!]?$/i.test(t);
 };
 
-const clipText = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+/** A reply that starts with "FINAL:" is the lead's final answer. Returns the text without the marker. */
+export function parseFinal(reply: string): { final: boolean; text: string } {
+  const m = /^\s*FINAL:\s*/i.exec(reply);
+  return m ? { final: true, text: reply.slice(m[0].length).trim() } : { final: false, text: reply.trim() };
+}
 
-export function transcriptBlock(messages: RoomMessage[], nameOf: (id: string) => string): string {
+const words = (s: string) => new Set(s.toLowerCase().match(/[a-z0-9']{3,}/g) ?? []);
+/** "Adds nothing new": a bare acknowledgement, or a reply whose words were nearly all already said in the discussion. */
+export function addsNothingNew(reply: string, prior: string[]): boolean {
+  const mine = words(reply);
+  if (mine.size <= 5) return true;
+  const seen = new Set<string>();
+  for (const p of prior) for (const w of words(p)) seen.add(w);
+  let known = 0;
+  for (const w of mine) if (seen.has(w)) known++;
+  return known / mine.size >= 0.85;
+}
+
+const clipText = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
+const nameFor = (members: RoomMember[]) => (id: string) => (id === YOU ? 'You' : members.find((m) => m.id === id)?.name ?? id);
+
+/** The thread as one agent reads it: a little earlier context, then Zach's message, then the whole discussion since (newest kept when it is long). */
+export function discussionBlock(messages: RoomMessage[], trigger: RoomMessage, nameOf: (id: string) => string): { context: string; discussion: string } {
+  const real = messages.filter((m) => m.from !== 'system');
+  const at = real.findIndex((m) => m.id === trigger.id);
+  const before = (at < 0 ? real : real.slice(0, at)).slice(-CONTEXT_MESSAGES);
+  const after = at < 0 ? [] : real.slice(at + 1);
+  const context = before.map((m) => `${nameOf(m.from)}: ${clipText(oneLine(m.text), CONTEXT_ITEM_CHARS)}`).join('\n');
   const lines: string[] = [];
   let total = 0;
-  for (const m of messages.filter((x) => x.from !== 'system').slice(-TRANSCRIPT_MESSAGES).reverse()) {
-    const line = `${nameOf(m.from)}: ${clipText(m.text.replace(/\s+/g, ' ').trim(), TRANSCRIPT_ITEM_CHARS)}`;
-    if (total + line.length > TRANSCRIPT_TOTAL_CHARS) break;
+  for (const m of [...after].reverse()) {
+    const line = `${nameOf(m.from)}: ${clipText(oneLine(m.text), DISCUSSION_ITEM_CHARS)}`;
+    if (total + line.length > DISCUSSION_TOTAL_CHARS) { lines.unshift('(earlier replies trimmed)'); break; }
     total += line.length;
     lines.unshift(line);
   }
-  return lines.length ? lines.join('\n') : '(no earlier messages)';
+  return { context, discussion: lines.join('\n') || '(nobody has replied yet)' };
 }
 
-interface PromptCtx { room: Room; members: RoomMember[]; agent: RoomMember; history: RoomMessage[] }
-const nameFor = (members: RoomMember[]) => (id: string) => (id === YOU ? 'You' : members.find((m) => m.id === id)?.name ?? id);
+interface PromptCtx { room: Room; members: RoomMember[]; agent: RoomMember; lead: RoomMember; trigger: RoomMessage; round: number; directed: boolean }
 
-function header({ room, members, agent }: PromptCtx) {
-  const roster = ['You (Zach)', ...members.map((m) => `${m.name} (@${m.id})`)].join(', ');
-  return `[Agent OS group room "${room.name}". You are ${agent.name} (@${agent.id}). Members: ${roster}.]`;
-}
-const FOOTER = `Write only your own reply to the room. Use @id to hand a point to a specific member. If you have nothing new to add, reply exactly ${PASS_TOKEN}.`;
-
-/** Round 1: the new message plus the recent room transcript, so each agent sees the others' replies. */
-export function firstRoundPrompt(ctx: PromptCtx, text: string): string {
-  const nm = nameFor(ctx.members);
-  return [header(ctx), 'Recent room transcript:', transcriptBlock(ctx.history, nm), `New message from You:\n${text}`, FOOTER].join('\n\n');
-}
-
-/** Rounds 2+: an attributed digest of the previous round's replies, with the original ask for context. */
-export function followUpPrompt(ctx: PromptCtx, original: string, round: number, digest: RoomMessage[]): string {
-  const nm = nameFor(ctx.members);
-  const lines = digest.filter((d) => d.from !== ctx.agent.id).map((d) => `${nm(d.from)}: ${clipText(d.text.replace(/\s+/g, ' ').trim(), TRANSCRIPT_ITEM_CHARS)}`);
+function promptHead(c: PromptCtx): string {
+  const roster = ['You (Zach)', ...c.members.map((m) => `${m.name} (@${m.id})`)].join(', ');
+  const lead = c.directed ? '' : ` Lead: ${c.lead.name} (@${c.lead.id}).`;
+  const { context, discussion } = discussionBlock(c.room.messages, c.trigger, nameFor(c.members));
   return [
-    header(ctx), `Follow-up round ${round}. Original message from You:\n${original}`,
-    `Replies from other members last round:\n${lines.join('\n') || '(none)'}`,
-    `Reply only if you are adding something new; otherwise reply exactly ${PASS_TOKEN}.`, FOOTER,
-  ].join('\n\n');
+    `[Agent OS group room "${c.room.name}". You are ${c.agent.name} (@${c.agent.id}). Members: ${roster}.${lead}]`,
+    context ? `Earlier in the room:\n${context}` : '',
+    `Zach's message:\n${c.trigger.text}\n\nDiscussion so far:\n${discussion}`,
+  ].filter(Boolean).join('\n\n');
+}
+const TALK = `Write only your own reply, as one message in a group chat: short and conversational, no headings. Hand a point to someone with @id.`;
+
+/** What a member (or the lead) is asked each round. Round 1 is the first reaction; later rounds are a reply-or-PASS check against the whole discussion. */
+export function memberPrompt(c: PromptCtx): string {
+  const isLead = !c.directed && c.agent.id === c.lead.id && c.members.length > 1;
+  const body = c.round === 1
+    ? `It is round 1. Give your own take on Zach's message. The others are answering at the same time and have not seen your reply yet.`
+    : `It is round ${c.round}. You have now seen what everyone said. Reply if you can add something: build on a point, disagree with someone, answer a question, or hand something to a member with @id. If you have nothing new to add, reply exactly ${PASS_TOKEN}.`;
+  const lead = isLead
+    ? c.round === 1
+      ? ` You are the lead: you moderate this discussion. For now just give your take.`
+      : ` You are the lead: you moderate this discussion. Steer it by addressing members with @id when someone should dig in. When the discussion has converged, post the final answer for Zach: start your reply with ${FINAL_MARK} and write the answer in full, folding in the members' points and any disagreement that remains. Do not post ${FINAL_MARK} while members are still mid-exchange.`
+    : '';
+  return [promptHead(c), `${body}${lead}`, TALK].join('\n\n');
+}
+
+/** The discussion went quiet: the lead posts the answer. */
+export function wrapUpPrompt(c: PromptCtx): string {
+  return [promptHead(c), `The discussion has gone quiet. WRAP-UP: post the final answer for Zach now. Start your reply with ${FINAL_MARK}, then write the answer in full, folding in the members' points and noting any disagreement that remains.`].join('\n\n');
 }
 
 export interface RoomTransport {
   /** One agent turn on that agent's dedicated room session. Resolve with the reply text, or null when it passed / produced nothing. */
   turn(agentId: string, prompt: string, signal: AbortSignal): Promise<string | null>;
-  /** Best effort: cancel that agent's in-flight run on the Gateway (Stop, or a member timeout). Never throws. */
+  /** Best effort: cancel that agent's in-flight run on the Gateway (Stop). Never throws. */
   abort?(agentId: string): void;
 }
 export interface RunHooks {
   append(msg: Omit<RoomMessage, 'id' | 'ts'>): RoomMessage;
   state(patch: Partial<RoomRunState>): void;
 }
+export interface DiscussionOpts { maxRounds?: number }
 
-/** One Zach message -> bounded rounds of agent turns. Never throws for an agent failure: it becomes a system note and the turn is spent. */
-export async function runRound(room: Room, members: RoomMember[], trigger: RoomMessage, transport: RoomTransport, hooks: RunHooks, signal: AbortSignal): Promise<RoomRunState['stopReason']> {
-  const order = members.map((m) => m.id);
+/** One Zach message -> an open discussion. Never throws for an agent failure: it becomes a system note and the turn is spent. */
+export async function runDiscussion(room: Room, members: RoomMember[], trigger: RoomMessage, transport: RoomTransport, hooks: RunHooks, signal: AbortSignal, opts: DiscussionOpts = {}): Promise<RoomRunState['stopReason']> {
+  if (!members.length) return 'complete';
+  const maxRounds = opts.maxRounds ?? MAX_DISCUSSION_ROUNDS;
+  const lead = members.find((m) => m.id === room.captain) ?? members[0];
   const byId = new Map(members.map((m) => [m.id, m]));
+  const order = members.map((m) => m.id);
+  const mentionedByZach = room.mentionGating ? parseMentions(trigger.text, members) : null;
+  const directed = !!mentionedByZach?.length;
+  const open = !directed && members.length > 1;
   let turnsUsed = 0;
-  let targets = selectResponders(trigger.text, members, room.mentionGating);
-  let digest: RoomMessage[] = [];
-  for (let round = 1; round <= room.maxRounds; round++) {
-    const replies: RoomMessage[] = [];
-    const mentioned = new Set<string>();
-    hooks.state({ round });
-    for (const id of targets) {
+  const active = new Set<string>();
+  const publish = () => hooks.state({ turnsUsed, active: [...active] });
+
+  /** One turn. A failure becomes a system note and counts as a pass; Stop propagates as 'cancelled'. */
+  async function ask(agentId: string, prompt: string, round: number): Promise<string | null> {
+    const agent = byId.get(agentId)!;
+    turnsUsed++; active.add(agentId); publish();
+    const onAbort = () => transport.abort?.(agentId); // Stop reaches the Gateway run, not just this loop
+    signal.addEventListener('abort', onAbort, { once: true });
+    try { return await transport.turn(agentId, prompt, signal); } catch (e) {
+      if (signal.aborted) throw new Error('cancelled');
+      hooks.append({ from: 'system', text: `${agent.name} did not answer: ${(e as Error).message}`, round });
+      return null;
+    } finally { signal.removeEventListener('abort', onAbort); active.delete(agentId); publish(); }
+  }
+  const ctxFor = (agentId: string, round: number): PromptCtx => ({ room, members, agent: byId.get(agentId)!, lead, trigger, round, directed });
+  const priorTexts = () => room.messages.filter((m) => m.from !== 'system' && m.id !== trigger.id).map((m) => m.text);
+
+  /** The lead's closing answer. */
+  async function wrapUp(round: number): Promise<void> {
+    const reply = await ask(lead.id, wrapUpPrompt(ctxFor(lead.id, round)), round);
+    if (isPass(reply)) { hooks.append({ from: 'system', text: `${lead.name} could not wrap up the discussion.`, round }); return; }
+    hooks.append({ from: lead.id, text: parseFinal(reply!).text, round, final: true });
+  }
+
+  try {
+    let targets = directed ? mentionedByZach! : order;
+    for (let round = 1; round <= maxRounds; round++) {
+      hooks.state({ round });
       if (signal.aborted) return 'cancelled';
-      const agent = byId.get(id)!;
-      turnsUsed++;
-      hooks.state({ turnsUsed, current: id });
-      // Prompt history = the room as it stands, minus the triggering message (passed separately), so later agents see earlier replies.
-      const ctx: PromptCtx = { room, members, agent, history: room.messages.filter((m) => m.id !== trigger.id) };
-      const prompt = round === 1 ? firstRoundPrompt(ctx, trigger.text) : followUpPrompt(ctx, trigger.text, round, digest);
-      let reply: string | null = null;
-      try { reply = await transport.turn(id, prompt, signal); } catch (e) {
-        if (signal.aborted) return 'cancelled';
-        hooks.append({ from: 'system', text: `${agent.name} did not answer: ${(e as Error).message}`, round });
+      const others = targets.filter((id) => !(open && id === lead.id));
+      // Everyone but the lead answers at once; each bubble lands as soon as that agent finishes. The lead then answers having read them.
+      const posted: Array<{ id: string; text: string; fresh: boolean }> = [];
+      const prior = priorTexts();
+      await Promise.all(others.map(async (id) => {
+        const reply = await ask(id, memberPrompt(ctxFor(id, round)), round);
+        if (isPass(reply)) return;
+        const text = parseFinal(reply!).text; // only the lead's FINAL means anything; strip a stray marker from a member
+        hooks.append({ from: id, text, round });
+        posted.push({ id, text, fresh: !addsNothingNew(text, prior) });
+      }));
+      if (signal.aborted) return 'cancelled';
+
+      let leadSteered = false;
+      if (open && targets.includes(lead.id)) {
+        const reply = await ask(lead.id, memberPrompt(ctxFor(lead.id, round)), round);
+        if (!isPass(reply)) {
+          const f = parseFinal(reply!);
+          if (f.final && round >= 2) { hooks.append({ from: lead.id, text: f.text, round, final: true }); return 'complete'; }
+          hooks.append({ from: lead.id, text: f.text, round });
+          leadSteered = (parseMentions(f.text, members.filter((m) => m.id !== lead.id))?.length ?? 0) > 0;
+        }
+      }
+      if (signal.aborted) return 'cancelled';
+
+      if (directed) {
+        const mentioned = new Set<string>();
+        for (const p of posted) for (const m of parseMentions(p.text, members.filter((x) => x.id !== p.id)) ?? []) mentioned.add(m);
+        const next = new Set([...posted.map((p) => p.id), ...mentioned]);
+        targets = order.filter((id) => next.has(id));
+        if (!posted.length) return 'passed';
+        if (!mentioned.size) return 'complete'; // answered, nobody was handed anything
         continue;
       }
-      if (isPass(reply)) continue;
-      replies.push(hooks.append({ from: id, text: reply!.trim(), round }));
-      for (const m of parseMentions(reply!, members.filter((x) => x.id !== id)) ?? []) mentioned.add(m);
+      if (!open) return 'complete'; // a one-member room: one reply
+      const quiet = !posted.some((p) => p.fresh) && !leadSteered;
+      if (quiet || round === maxRounds) { await wrapUp(round); return 'complete'; }
+      targets = order;
     }
-    hooks.state({ current: undefined });
-    if (!replies.length) return round === 1 && !turnsUsed ? 'complete' : 'passed';
-    const next = new Set([...replies.map((r) => r.from), ...mentioned]);
-    targets = order.filter((id) => next.has(id));
-    digest = replies;
-    if (round === room.maxRounds) {
-      if (!targets.length || room.maxRounds === 1) return 'complete'; // a single-round room has no follow-up to cut off
-      hooks.append({ from: 'system', text: `Stopped: round cap reached (${room.maxRounds} rounds).`, round });
-      return 'maxRounds';
-    }
+    return 'complete';
+  } catch (e) {
+    if (signal.aborted) return 'cancelled';
+    throw e;
   }
-  return 'complete';
 }

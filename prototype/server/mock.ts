@@ -1,7 +1,7 @@
 // Synthetic fleet: ~60 agents in 7 teams (CoS at the root), ~10 events/s, spawn/finish churn, rotating "needs you".
 import { COS_ID, TEAM_PALETTE, type Agent, type Delta, type EventKind, type FleetEvent, type HistoryItem, type Snapshot, type Team } from '../shared/types.ts';
 import { parseInterSession, shortSession } from '../shared/a2a.ts';
-import { RICH_MD, scriptedReply } from '../shared/scripted.ts';
+import { RICH_MD, scriptedReply, triggerText } from '../shared/scripted.ts';
 import { createRoomsService, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
 
@@ -226,11 +226,11 @@ export function createMockSource(): Source {
     async ensureSession() { /* nothing to create */ },
     async turn(agentId, _roomId, prompt, signal) {
       // "hang" in Zach's message makes the member `forge` never reply (until Stop aborts it): the no-timeout scenario.
-      if (agentId === 'forge' && /Original message from You:\n[^\n]*\bhang\b/i.test(prompt)) {
+      if (agentId === 'forge' && /\bhang\b/i.test(triggerText(prompt))) {
         await new Promise<void>((_res, reject) => { if (signal.aborted) reject(new Error('cancelled')); signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }); });
       }
-      // "slow" in Zach's message stretches each turn so the live council statuses can be watched (and Stop tried).
-      const ms = /Original message from You:\n[^\n]*\bslow\b/i.test(prompt) ? 2500 : 250;
+      // "slow" in Zach's message stretches each turn so the typing bubbles can be watched (and Stop tried).
+      const ms = /\bslow\b/i.test(triggerText(prompt)) ? 2500 : 250;
       await new Promise<void>((resolve, reject) => {
         const t = setTimeout(resolve, ms);
         signal.addEventListener('abort', () => { clearTimeout(t); reject(new Error('cancelled')); }, { once: true });

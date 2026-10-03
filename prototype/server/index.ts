@@ -5,9 +5,9 @@
 //   GET /api/history?source=..&key=<sessionKey>
 //   POST /api/send?source=..   {key, message}  ("Message agent": one Gateway sessions.send; needs header x-agent-os-send: 1)
 //   GET  /api/rooms            rooms + the live agent list (PHI excluded)      GET /api/rooms/:id   one room with its thread and run state
-//   POST /api/rooms {name, members, maxRounds?, maxSteps?}   create             POST /api/rooms/:id {name?, addMembers?, removeMembers?, archived?, maxRounds?, maxSteps?}
-//   POST /api/rooms/:id/send {message}   one bounded run: council (default: captain plan -> parallel work -> critique -> synthesis; @mention bypasses it) or round-table
-//   POST /api/rooms/:id/stop   aborts every in-flight member run (chat.abort, room sessions only)      update also takes {captain?, mode?}
+//   POST /api/rooms {name, members, captain?}   create             POST /api/rooms/:id {name?, addMembers?, removeMembers?, archived?, captain?}
+//   POST /api/rooms/:id/send {message}   starts an open discussion: every member replies, then rounds of reply-or-PASS; the lead (captain) moderates and posts the final answer
+//   POST /api/rooms/:id/stop   aborts every in-flight member run (chat.abort, room sessions only)
 //   Room writes use the same guard as /api/send (JSON + x-agent-os-send: 1, same body cap).
 // Every payload passes through redactDeep() before it is written.
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
