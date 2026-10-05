@@ -1,4 +1,5 @@
-import type { EventKind } from '../../shared/types';
+import type { Agent, AgentStatus, EventKind } from '../../shared/types';
+import { creatureClass, creatureKey, creatureKeyFor } from './creature';
 import { openNeedsOf } from '../../shared/activity';
 import type { FleetEvent } from '../contract';
 import type { ShellState, Filter } from '../store';
@@ -83,10 +84,21 @@ export function avatarHue(id: string) {
   for (const c of id) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   return AVATAR_HUES[h % AVATAR_HUES.length];
 }
-/** Round avatar: the agent's emoji if it has one, else its initial. */
-export function avatarHtml(id: string, name: string, emoji?: string, cls = '') {
-  const label = emoji || (name.trim()[0] ?? '?').toUpperCase();
-  return `<span class="avatar ${cls}" style="--hue:${avatarHue(id)}" title="${esc(name)}">${esc(label)}</span>`;
+/**
+ * Avatar for an agent: its animated creature (`status` picks the expression: active hops, idle sleeps, needs shows "!", error is dizzy and red; none = the default animation).
+ * `id` is an agent id or a session key; `You` / `zach` is Zach's creature. An agent with no creature gets a plain blob in `hue` (the team colour).
+ */
+export function avatarHtml(id: string, name: string, _emoji?: string, cls = '', opts: { status?: AgentStatus; hue?: string } = {}) {
+  const key = creatureKey(id);
+  const label = `title="${esc(name)}" role="img" aria-label="${esc(name)}"`;
+  if (key) return `<span class="avatar cr ${creatureClass(key, opts.status)} ${cls}" ${label}></span>`;
+  return `<span class="avatar blob ${cls}" style="--hue:${opts.hue ?? avatarHue(id)}" ${label}></span>`;
+}
+/** Avatar for a fleet agent: its own creature, else its parent's, else a blob in its team colour; its status picks the expression. */
+export function avatarForAgent(s: ShellState, a: Agent, cls = '') {
+  const key = creatureKeyFor(a, (id) => s.agentsAll.get(id));
+  const hue = s.teamsById.get(a.team)?.hue;
+  return avatarHtml(key || a.id, a.agentName ?? a.name, undefined, cls, { status: a.status, ...(hue ? { hue } : {}) });
 }
 
 export function svg(name: keyof typeof ICONS, size = 16) {
