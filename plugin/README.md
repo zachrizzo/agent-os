@@ -27,7 +27,7 @@ Keep browser imports on the browser-safe `control-ui` and `feature-contract` SDK
 
 The tab bar has a **Talk to Voice** button. It opens `agent:voice:main` and presses that session's composer mic with a plain click, which is the composer's tap path (Talk can only start from the Voice session). It refuses to click if the composer has a draft (a tap would send it) or if `talk.catalog` says realtime isn't ready, skips the dictation-only twin button, and shows a toast if Talk doesn't start. Leaving the Voice view ends Talk, so the Voice session header gets **Stop voice · Agent OS**, which presses Stop and returns to this tab. Code: `src/voice.ts`.
 
-Try it without the Gateway: `node harness/serve.mjs 5299`, then open `http://127.0.0.1:5299/` (mock host; no audio). `node harness/check.mjs` runs six scenarios (desktop, narrow layout, out-of-order catalog, realtime unavailable, draft present, no mic) in WebKit and Chromium against a mock composer modelled on the 2026.9.7 bundle. `node harness/shoot.mjs <outdir>` runs the click-through in WebKit (`... chromium` for Chromium).
+Try it without the Gateway: `node harness/serve.mjs 5299`, then open `http://127.0.0.1:5299/` (mock host; no audio). `node harness/check.mjs` runs six voice scenarios plus the fleet, rooms, markdown, theme and Docs scenarios (desktop, narrow layout, out-of-order catalog, realtime unavailable, draft present, no mic) in WebKit and Chromium against a mock composer modelled on the 2026.9.7 bundle. `node harness/shoot.mjs <outdir>` runs the click-through in WebKit (`... chromium` for Chromium).
 
 ## Light / dark theme
 
@@ -87,6 +87,26 @@ Still no cap: nothing below stops a discussion by itself. A long run **pauses** 
 New routes (same guard as `/api/send`): `POST /api/rooms/:id/continue|end|wrapup|pin`; the update body also takes `notes`, `responderMode`, `pauseAfterPosts`, `pauseAfterTokens`, `speakFilter`. The plugin proxy whitelist (`ROOMS_WRITE` in `src/index.ts`) and the harness proxy were widened to match, so the plugin must be rebuilt and reloaded with the data server.
 
 Proof: `node harness/rooms-v2-proof.mjs <outdir> [port=19470]` runs every item on a throwaway Gateway with the stub model (ports 19470-19473, temp HOME) through the real UI; screenshots in `harness/screens/rooms-v2/`. Unit: `cd prototype && npm test` (now includes `src/ui/*.test.ts`).
+
+## Docs (rendered Markdown viewer)
+
+The **Docs** button in the top bar opens a read-only viewer for the Markdown files in the workspace (`~/.openclaw/workspace`: `reports/`, `memory/`, `MEMORY.md`, `USER.md`, `AGENTS.md`, ...). It exists because the Control UI's Files panel shows `.md` files only as raw text, with no way to see them rendered.
+
+- **Rendered / Raw.** The toggle at the top right of the document switches between the two. Rendered is the default and uses the same sanitising renderer as the rooms (`shared/markdown.ts`: marked + DOMPurify): headings, GFM tables, task lists (read-only), block quotes, links (http(s)/mailto only, new tab), code blocks with a **Copy** button. Raw HTML, scripts, event handlers, `javascript:` links and images are never rendered (images show as nothing, HTML as literal text). Colours come from the theme tokens, so it follows light/dark.
+- **List.** Files grouped by folder, newest first, with a filter box. The reload buttons re-read the list or the open file (nothing polls).
+- **Deep link.** `.../agent-os/?file=reports/phi-gateway-setup.md` opens straight into Docs with that file. A path that is not a workspace-relative `.md`/`.markdown` path is ignored. Esc closes the view.
+- **Relative links** between documents are not followed (the shared renderer allows only absolute and `#` links).
+
+Data server (`prototype/server/docs.ts`, `GET /api/docs` and `GET /api/docs/file?path=reports/x.md`), fail-closed and read-only:
+
+- One root only: `~/.openclaw/workspace` (`AGENT_OS_DOCS_ROOT` overrides it for tests; `--mock` serves `prototype/server/fixtures/docs`, never the real workspace).
+- `path` is relative to the root and must end in `.md`/`.markdown` (415 otherwise). Absolute paths, `..`, `.` and empty segments, backslashes, NUL, and any segment starting with `.` (`.git`, `.env`, ...) are refused with 400.
+- No symlink anywhere on the path, realpath must stay inside the root, and the file must have exactly one hard link (a hard link can point at a file outside the root). The file is opened with `O_NOFOLLOW` and re-checked on the descriptor. Anything that fails these looks like a plain 404.
+- 256 KiB cap (413); the list is capped at 3000 files and 8 levels, skips dot-directories and `node_modules`.
+- PHI: a directory named `phi`, `phi-*`, `openclaw-phi` or `workspace-phi` is never listed or read, at any depth, and nothing outside the workspace root is reachable at all (`~/.openclaw-phi` is not under it). A *file* named `phi-gateway-setup.md` is an ordinary document.
+- Same guard as the writes: the `x-agent-os-send: 1` header is required (a cross-origin page cannot add it without a preflight, and the server sends no CORS headers), plus the localhost Host check. The plugin proxy adds the header itself and answers the preflight for `GET`. Responses pass through the same secret redaction as everything else the data server returns.
+
+Tests: `prototype/server/docs.test.ts` (traversal, absolute and odd paths, extension, size, symlink file/dir, hard link, PHI directories, missing root, and the HTTP guard against the real server in mock mode). Harness: `docsChecks` in `harness/check.mjs` (rendered + raw in light and dark, contrast, hostile input, deep link).
 
 ## Group rooms
 

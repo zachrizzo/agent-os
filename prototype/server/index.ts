@@ -12,18 +12,24 @@
 //   POST /api/rooms/:id/continue   releases a soft pause (a long run pauses, never stops)     POST /api/rooms/:id/end   soft stop: turns in flight finish, nothing new starts
 //   POST /api/rooms/:id/wrapup   asks the lead to summarize, as a normal message              POST /api/rooms/:id/pin {messageId, pinned}   pin a message as a decision
 //   A send while a discussion is running is queued and joins at the next round boundary. The update body also takes notes, responderMode, pauseAfterPosts, pauseAfterTokens, speakFilter.
+//   GET  /api/docs                list of .md/.markdown files under the workspace      GET /api/docs/file?path=reports/x.md   one file (256 KiB cap)
+//   Docs reads are read-only, allowlisted to ONE root (server/docs.ts) and need the same x-agent-os-send header as the writes.
 //   Room writes use the same guard as /api/send (JSON + x-agent-os-send: 1, same body cap).
 // Every payload passes through redactDeep() before it is written.
+import { fileURLToPath } from 'node:url';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createLiveSource } from './live.ts';
 import { createMockSource } from './mock.ts';
 import { redactDeep } from './redact.ts';
+import { DocsError, createDocsService, defaultDocsRoot } from './docs.ts';
 import { RoomError, ROOM_ID_RE } from './rooms.ts';
 import type { Source } from './source.ts';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.AGENT_OS_API_PORT ?? 5198);
 const DEFAULT_SOURCE: 'mock' | 'live' = process.argv.includes('--mock') ? 'mock' : 'live';
+// Docs root: the main workspace only (AGENT_OS_DOCS_ROOT for a throwaway root; the mock server serves a fixture folder, never the real workspace).
+const docs = createDocsService({ root: process.env.AGENT_OS_DOCS_ROOT ?? (process.argv.includes('--mock') ? fileURLToPath(new URL('./fixtures/docs', import.meta.url)) : defaultDocsRoot()) });
 const ALLOWED_HOSTS = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/; // blocks DNS-rebinding reads
 
 const sources = new Map<string, Source>();
@@ -72,6 +78,19 @@ async function send(req: IncomingMessage, res: ServerResponse, src: string | nul
   }
 }
 
+/** GET /api/docs and /api/docs/file?path=: the same header guard as the writes (a cross-origin page cannot add it without a preflight, and there is no CORS here). */
+function docsApi(req: IncomingMessage, res: ServerResponse, url: URL) {
+  if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
+  if (req.headers['x-agent-os-send'] !== '1') return json(res, 403, { error: 'forbidden' });
+  try {
+    if (url.pathname === '/api/docs') return json(res, 200, docs.list());
+    return json(res, 200, docs.read(url.searchParams.get('path')));
+  } catch (e) {
+    if (e instanceof DocsError) return json(res, e.status, { error: e.message });
+    json(res, 500, { error: 'could not read docs' });
+  }
+}
+
 // /api/rooms[/:id[/send|/stop|/end|/continue|/wrapup|/pin]]: reads are GET, writes share the /api/send guard.
 const ROOMS_PATH = /^\/api\/rooms(?:\/([^/]+)(?:\/(send|stop|end|continue|wrapup|pin))?)?$/;
 async function roomsApi(req: IncomingMessage, res: ServerResponse, url: URL, src: string | null) {
@@ -109,6 +128,7 @@ const server = createServer(async (req, res) => {
   const src = url.searchParams.get('source');
   if (req.method === 'POST' && url.pathname === '/api/send') return send(req, res, src);
   if (ROOMS_PATH.test(url.pathname)) return roomsApi(req, res, url, src);
+  if (url.pathname === '/api/docs' || url.pathname === '/api/docs/file') return docsApi(req, res, url);
   if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
   try {
     if (url.pathname === '/api/config') return json(res, 200, { defaultSource: DEFAULT_SOURCE, sources: ['live', 'mock'] });
