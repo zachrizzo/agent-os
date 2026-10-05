@@ -258,7 +258,7 @@ export function similarity(a: string, b: string): number {
 }
 export interface LoopHit { kind: 'repeat' | 'ring'; agents: string[] }
 const REPEAT_SIM = 0.9;
-const RING_SIM = 0.5;
+const RING_SIM = 0.7;
 const RING_CYCLES = 3;
 /**
  * Bot posts since Zach last spoke, in order. `repeat`: a member (among posts from `fromIndex` on) says what it already said. `ring`: the last 3 laps of an A→B→C→A cycle,
