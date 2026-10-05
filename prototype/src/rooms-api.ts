@@ -24,6 +24,10 @@ export function createRoomsApi(source: Source) {
     update: (id: string, b: Record<string, unknown>) => call<RoomView>(`rooms/${id}`, b),
     send: (id: string, message: string) => call<RoomView>(`rooms/${id}/send`, { message }),
     stop: (id: string) => call<RoomView>(`rooms/${id}/stop`, {}),
+    end: (id: string) => call<RoomView>(`rooms/${id}/end`, {}),
+    resume: (id: string) => call<RoomView>(`rooms/${id}/continue`, {}),
+    wrapUp: (id: string) => call<RoomView>(`rooms/${id}/wrapup`, {}),
+    pin: (id: string, messageId: string, pinned: boolean) => call<RoomView>(`rooms/${id}/pin`, { messageId, pinned }),
   };
 }
 export type RoomsApi = ReturnType<typeof createRoomsApi>;

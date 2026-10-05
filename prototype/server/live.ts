@@ -10,7 +10,8 @@ import { parseInterSession, shortSession } from '../shared/a2a.ts';
 import { attentionEvent, deriveSessionEvents, mergeEvents, sessionMetaOf, spawnEvent, openNeedsOf, type RawMessage } from '../shared/activity.ts';
 import { classifySession, isRunning } from '../shared/liveness.ts';
 import { BOARDS, normalizeCard, type BoardCard } from '../shared/board.ts';
-import { isExcludedAgent } from '../shared/rooms.ts';
+import { isExcludedAgent, judgeSessionKey, type TurnProgress, type TurnResult } from '../shared/rooms.ts';
+import { toolInFlight, usageFromMessages } from '../shared/turn-usage.ts';
 import { redact } from './redact.ts';
 import { createRoomsService, isRoomKey, roomSessionKey, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
@@ -20,6 +21,7 @@ const SEND_METHOD = 'sessions.send';
 const CREATE_METHOD = 'sessions.create'; // only for dedicated room sessions (agent:<id>:room-<roomId>), see call()
 const ABORT_METHOD = 'chat.abort'; // Stop / member timeout: only for dedicated room sessions, see call()
 const ROOM_POLL_MS = 1200;
+const JUDGE_MODEL = process.env.AGENT_OS_JUDGE_MODEL ?? 'anthropic/claude-haiku-4-5'; // the speak filter's small model (opt-in per room)
 const agentOfKey = (key: unknown) => String(key ?? '').match(/^agent:([^:]+):/)?.[1] ?? '';
 const MAX_MESSAGE_CHARS = 4000;
 const HIST_PER_POLL = 2; // chat.history reads per poll (single-flight CLI; main's history is ~3 MB)
@@ -360,29 +362,44 @@ export function createLiveSource(): Source {
     async abort(agentId, roomId) {
       await call(ABORT_METHOD, { sessionKey: roomSessionKey(agentId, roomId) }, 15_000);
     },
-    async turn(agentId, roomId, prompt, signal) {
-      const key = roomSessionKey(agentId, roomId);
-      const seqOf = (m: any) => Number(m?.__openclaw?.seq ?? 0);
-      const peek = async () => { const h = await call('chat.history', { sessionKey: key, limit: 60 }, 15_000); return { msgs: (h.messages ?? []) as any[], active: Boolean(h.sessionInfo?.hasActiveRun) }; };
-      const base = Math.max(0, ...(await peek()).msgs.map(seqOf));
-      await call(SEND_METHOD, { key, message: prompt, idempotencyKey: randomUUID() }, 20_000);
-      let sawUser = false;
-      let quiet = 0;
-      for (;;) { // no deadline: a reply, an error, or Stop (signal) ends it
-        if (signal.aborted) throw new Error('cancelled');
-        await new Promise((r) => setTimeout(r, ROOM_POLL_MS));
-        const { msgs, active } = await peek();
-        const fresh = msgs.filter((m) => seqOf(m) > base);
-        sawUser ||= fresh.some((m) => m.role === 'user');
-        const text = (m: any) => (typeof m.content === 'string' ? m.content : Array.isArray(m.content) ? m.content.filter((c: any) => c?.type === 'text').map((c: any) => c.text).join('\n') : '');
-        const replies = fresh.filter((m) => m.role === 'assistant' && text(m).trim());
-        if (sawUser && !active) {
-          if (replies.length) return redact(text(replies[replies.length - 1]).trim());
-          if (++quiet >= 3) throw new Error('the run ended without a reply (model unavailable?)');
-        } else quiet = 0;
+    async turn(agentId, roomId, prompt, signal, progress) {
+      return turnOn(roomSessionKey(agentId, roomId), prompt, signal, progress);
+    },
+    /** The speak filter's call: a dedicated session on a small model (sessions.create `model`). Any failure throws and the room lets everyone speak. */
+    async judge(roomId, agentId, prompt, signal) {
+      const key = judgeSessionKey(agentId, roomId);
+      if (!createdRoomSessions.has(key)) {
+        try { await call(CREATE_METHOD, { key, label: `Room judge ${roomId}`, model: JUDGE_MODEL }, 20_000); } catch (e) {
+          try { await call('chat.history', { sessionKey: key, limit: 1 }, 10_000); } catch { throw e; }
+        }
+        createdRoomSessions.add(key);
       }
+      return (await turnOn(key, prompt, signal)).text;
     },
   };
+  /** One turn on a room session: send, poll the transcript until the run is idle, return the last reply with the turn's usage (when the Gateway reports it). */
+  async function turnOn(key: string, prompt: string, signal: AbortSignal, progress?: (p: TurnProgress) => void): Promise<Extract<TurnResult, object>> {
+    const seqOf = (m: any) => Number(m?.__openclaw?.seq ?? 0);
+    const peek = async () => { const h = await call('chat.history', { sessionKey: key, limit: 60 }, 15_000); return { msgs: (h.messages ?? []) as any[], active: Boolean(h.sessionInfo?.hasActiveRun) }; };
+    const base = Math.max(0, ...(await peek()).msgs.map(seqOf));
+    await call(SEND_METHOD, { key, message: prompt, idempotencyKey: randomUUID() }, 20_000);
+    let sawUser = false;
+    let quiet = 0;
+    for (;;) { // no deadline: a reply, an error, or Stop (signal) ends it
+      if (signal.aborted) throw new Error('cancelled');
+      await new Promise((r) => setTimeout(r, ROOM_POLL_MS));
+      const { msgs, active } = await peek();
+      const fresh = msgs.filter((m) => seqOf(m) > base);
+      sawUser ||= fresh.some((m) => m.role === 'user');
+      const text = (m: any) => (typeof m.content === 'string' ? m.content : Array.isArray(m.content) ? m.content.filter((c: any) => c?.type === 'text').map((c: any) => c.text).join('\n') : '');
+      const replies = fresh.filter((m) => m.role === 'assistant' && text(m).trim());
+      if (sawUser && active) progress?.({ tool: toolInFlight(fresh) });
+      if (sawUser && !active) {
+        if (replies.length) return { text: redact(text(replies[replies.length - 1]).trim()), usage: usageFromMessages(fresh) };
+        if (++quiet >= 3) throw new Error('the run ended without a reply (model unavailable?)');
+      } else quiet = 0;
+    }
+  }
   const roomsFile = process.env.AGENT_OS_ROOMS_FILE ?? `${process.env.HOME ?? ''}/.openclaw/agent-os/rooms.json`;
   const rooms = createRoomsService({ gateway: roomGateway, file: roomsFile });
 

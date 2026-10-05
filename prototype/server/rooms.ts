@@ -5,8 +5,8 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
-  MAX_MEMBERS, MAX_MESSAGE_CHARS, MAX_ROOMS, MAX_ROOM_NAME, MAX_STORED_MESSAGES, ROOM_KEY_RE, YOU, isExcludedAgent, migrateRoom, normalizeSettings, resolveCaptain, roomSessionKey, runDiscussion,
-  type Room, type RoomMember, type RoomMessage, type RoomRunState, type RoomSettings, type RoomTransport,
+  MAX_MEMBERS, MAX_MESSAGE_CHARS, MAX_ROOMS, MAX_ROOM_NAME, MAX_STORED_MESSAGES, RESPONDER_MODES, ROOM_KEY_RE, YOU, addUsage, emptyUsage, isExcludedAgent, migrateRoom, normalizeSettings, resolveCaptain, roomSessionKey, runDiscussion, selectResponders,
+  type Room, type RoomMember, type RoomMessage, type RoomRunState, type RoomSettings, type RoomTransport, type TurnProgress, type TurnResult,
 } from '../shared/rooms.ts';
 
 export interface RoomAgent { id: string; name: string; emoji?: string }
@@ -15,8 +15,10 @@ export interface RoomGateway {
   listAgents(): Promise<RoomAgent[]>;
   /** Idempotent: make sure the dedicated room session exists. */
   ensureSession(agentId: string, roomId: string, label: string): Promise<void>;
-  /** One turn on that session: send `prompt`, wait for the run to finish, return the reply text (null if none). There is no deadline: it ends with a reply, an error, or the signal (Stop). */
-  turn(agentId: string, roomId: string, prompt: string, signal: AbortSignal): Promise<string | null>;
+  /** One turn on that session: send `prompt`, wait for the run to finish, return the reply text (null if none), with the turn's token usage when the Gateway reports it. `progress` reports the tool the agent is using. There is no deadline: it ends with a reply, an error, or the signal (Stop). */
+  turn(agentId: string, roomId: string, prompt: string, signal: AbortSignal, progress?: (p: TurnProgress) => void): Promise<TurnResult>;
+  /** Optional: one small-model call for the room's speak filter, on a dedicated judge session. Resolve with the raw reply text; throw or return null when unavailable (everyone then speaks). */
+  judge?(roomId: string, agentId: string, prompt: string, signal: AbortSignal): Promise<string | null>;
   /** Cancel that room session's in-flight run (Stop). Best effort. */
   abort?(agentId: string, roomId: string): Promise<void>;
 }
@@ -28,21 +30,41 @@ export { roomSessionKey, ROOM_KEY_RE };
 export function isRoomKey(key: string) { const m = ROOM_KEY_RE.exec(key); return !!m && !isExcludedAgent(m[1]); }
 
 export interface RoomView { room: Room; members: Array<RoomAgent>; run: RoomRunState | null }
-export interface RoomSummary { id: string; name: string; members: string[]; archived: boolean; updatedAt: number; last?: { from: string; text: string; ts: number }; running: boolean; captain: string }
+export interface RoomSummary { id: string; name: string; members: string[]; archived: boolean; updatedAt: number; last?: { from: string; text: string; ts: number }; running: boolean; paused: boolean; captain: string }
+
+export const MAX_NOTES_CHARS = 4000;
+export const MAX_QUEUED = 5;
+export const MAX_PINNED = 20;
+const SETTING_KEYS = ['mentionGating', 'responderMode', 'pauseAfterPosts', 'pauseAfterTokens', 'speakFilter'] as const;
+type RunEntry = { state: RoomRunState; abort: AbortController; done: Promise<void>; /** set while paused: releases the soft pause */ resume?: () => void; /** "End now" was asked */ ending: boolean };
 
 export function createRoomsService(opts: { gateway: RoomGateway; file?: string; agentTtlMs?: number }) {
   const { gateway } = opts;
   const rooms = new Map<string, Room>();
-  const runs = new Map<string, { state: RoomRunState; abort: AbortController; done: Promise<void> }>();
+  const runs = new Map<string, RunEntry>();
   const lastRuns = new Map<string, RoomRunState>();
   let agentCache: { at: number; list: RoomAgent[] } | null = null;
   let seq = 0;
 
   if (opts.file) {
     try {
-      const parsed = JSON.parse(readFileSync(opts.file, 'utf8')) as { rooms?: Room[] };
+      const parsed = JSON.parse(readFileSync(opts.file, 'utf8')) as { rooms?: Room[]; runs?: Record<string, RoomRunState> };
       // Older files (captain-led council, version 1-2): migrateRoom drops the retired pipeline fields in memory; the file is rewritten on the room's next save.
       for (const r of parsed.rooms ?? []) if (ROOM_ID_RE.test(r.id) && Array.isArray(r.members)) rooms.set(r.id, migrateRoom(r));
+      let dirty = false;
+      for (const r of rooms.values()) {
+        const st = parsed.runs?.[r.id];
+        const wasLive = !!st && (st.status === 'running' || st.status === 'paused');
+        // A restart drops the in-memory run. Show it as interrupted and never replay it: its tools may already have had side effects.
+        if (st && typeof st === 'object') lastRuns.set(r.id, wasLive ? { ...st, status: 'interrupted', stopReason: 'interrupted', active: [], activity: [], pause: undefined } : st);
+        const lost = r.messages.filter((m) => m.queued);
+        for (const m of lost) delete m.queued;
+        if (wasLive || lost.length) {
+          r.messages.push({ id: `m${Date.now().toString(36)}${(seq++).toString(36)}`, ts: Date.now(), from: 'system', text: `${wasLive ? 'The last discussion was interrupted by a restart and was not replayed.' : ''}${lost.length ? `${wasLive ? ' ' : ''}${lost.length} queued message${lost.length === 1 ? ' was' : 's were'} never delivered to the agents: send ${lost.length === 1 ? 'it' : 'them'} again.` : ''}` });
+          dirty = true;
+        }
+      }
+      if (dirty) setTimeout(() => persist(), 0);
     } catch { /* first run or unreadable: start empty */ }
   }
   function persist() {
@@ -50,7 +72,9 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
     try {
       mkdirSync(dirname(opts.file), { recursive: true });
       const tmp = `${opts.file}.${process.pid}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ version: 3, rooms: [...rooms.values()] }, null, 1), { mode: 0o600 });
+      const states: Record<string, RoomRunState> = {};
+      for (const id of rooms.keys()) { const st = runs.get(id)?.state ?? lastRuns.get(id); if (st) states[id] = st; }
+      writeFileSync(tmp, JSON.stringify({ version: 4, rooms: [...rooms.values()], runs: states }, null, 1), { mode: 0o600 });
       chmodSync(tmp, 0o600);
       renameSync(tmp, opts.file);
     } catch (e) { console.warn('[agent-os rooms] could not persist:', (e as Error).message); }
@@ -90,7 +114,11 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
   const add = (r: Room, m: Omit<RoomMessage, 'id' | 'ts'>): RoomMessage => {
     const msg = { ...m, id: `m${Date.now().toString(36)}${(seq++).toString(36)}`, ts: Date.now() };
     r.messages.push(msg);
-    if (r.messages.length > MAX_STORED_MESSAGES) r.messages.splice(0, r.messages.length - MAX_STORED_MESSAGES);
+    while (r.messages.length > MAX_STORED_MESSAGES) { // pinned decisions and queued messages outlive the cap
+      const at = r.messages.findIndex((x) => !x.pinned && !x.queued);
+      if (at < 0) break;
+      r.messages.splice(at, 1);
+    }
     touch(r);
     persist();
     return msg;
@@ -98,7 +126,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
 
   const summary = (r: Room): RoomSummary => {
     const last = [...r.messages].reverse().find((m) => m.from !== 'system');
-    return { id: r.id, name: r.name, members: r.members, archived: r.archived, updatedAt: r.updatedAt, running: runs.has(r.id), captain: r.captain, ...(last ? { last: { from: last.from, text: last.text.slice(0, 120), ts: last.ts } } : {}) };
+    return { id: r.id, name: r.name, members: r.members, archived: r.archived, updatedAt: r.updatedAt, running: runs.has(r.id), paused: runs.get(r.id)?.state.status === 'paused', captain: r.captain, ...(last ? { last: { from: last.from, text: last.text.slice(0, 120), ts: last.ts } } : {}) };
   };
 
   return {
@@ -119,8 +147,10 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       persist();
       return this.get(room.id);
     },
-    async update(id: string, patch: { name?: unknown; addMembers?: unknown; removeMembers?: unknown; archived?: unknown; captain?: unknown } & Partial<RoomSettings>): Promise<RoomView> {
+    async update(id: string, patch: { name?: unknown; addMembers?: unknown; removeMembers?: unknown; archived?: unknown; captain?: unknown; notes?: unknown } & Partial<RoomSettings>): Promise<RoomView> {
       const r = mustGet(id);
+      if (patch.responderMode !== undefined && !RESPONDER_MODES.includes(patch.responderMode)) throw new RoomError(400, `responderMode must be one of: ${RESPONDER_MODES.join(', ')}`);
+      if (patch.notes !== undefined && (typeof patch.notes !== 'string' || patch.notes.length > MAX_NOTES_CHARS)) throw new RoomError(400, `notes must be text of at most ${MAX_NOTES_CHARS} characters`);
       if (runs.has(id) && (patch.addMembers || patch.removeMembers)) throw new RoomError(409, 'room is busy: stop the run before changing members');
       if (patch.name !== undefined) r.name = cleanName(patch.name);
       if (patch.addMembers !== undefined) r.members = await validMembers([...r.members, ...(Array.isArray(patch.addMembers) ? patch.addMembers : [patch.addMembers])]);
@@ -134,7 +164,9 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
         r.captain = patch.captain;
       }
       r.captain = resolveCaptain(r.captain, r.members); // members changed: the lead stays a member (rfc-lead, else the first)
-      if (typeof patch.mentionGating === 'boolean') r.mentionGating = patch.mentionGating;
+      const set = Object.fromEntries(SETTING_KEYS.filter((k) => patch[k] !== undefined).map((k) => [k, patch[k]]));
+      if (Object.keys(set).length) Object.assign(r, normalizeSettings({ ...r, ...set })); // the running discussion reads the pause limits and the speak filter live
+      if (typeof patch.notes === 'string') r.notes = patch.notes.trim();
       if (typeof patch.archived === 'boolean') {
         if (patch.archived) runs.get(id)?.abort.abort();
         r.archived = patch.archived;
@@ -143,7 +175,10 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       persist();
       return this.get(id);
     },
-    /** Adds Zach's message and starts the discussion in the background; returns at once. Poll get() for replies. */
+    /**
+     * Adds Zach's message. Idle room: starts the discussion in the background and returns at once (poll get() for replies). Busy room: the message is queued (shown as
+     * queued, hidden from the agents) and joins at the next round boundary; a soft-paused run wakes up because Zach wrote.
+     */
     async send(id: string, text: unknown): Promise<RoomView> {
       const r = mustGet(id);
       const msg = String(text ?? '').trim();
@@ -151,38 +186,120 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       if (msg.length > MAX_MESSAGE_CHARS) throw new RoomError(400, `message too long (max ${MAX_MESSAGE_CHARS} chars)`);
       if (r.archived) throw new RoomError(409, 'room is archived');
       if (!r.members.length) throw new RoomError(400, 'add at least one agent to the room first');
-      if (runs.has(id)) throw new RoomError(409, 'room is busy: agents are still answering the last message');
+      const entry = runs.get(id);
+      if (entry) {
+        if (r.messages.filter((m) => m.queued).length >= MAX_QUEUED) throw new RoomError(409, `${MAX_QUEUED} messages are already queued: wait for the agents or press Stop`);
+        add(r, { from: YOU, text: msg, queued: true });
+        entry.resume?.();
+        return this.get(id);
+      }
       const list = await agents();
-      const members: RoomMember[] = r.members.filter((m) => !isExcludedAgent(m)).map((m) => ({ id: m, name: info(list, m).name }));
       const trigger = add(r, { from: YOU, text: msg });
-      const abort = new AbortController();
-      const state: RoomRunState = { id: `run${trigger.id}`, status: 'running', round: 1, turnsUsed: 0, active: [] };
-      const transport: RoomTransport = {
-        async turn(agentId, prompt, signal) {
-          await gateway.ensureSession(agentId, id, `Room: ${r.name}`);
-          return gateway.turn(agentId, id, prompt, signal);
-        },
-        abort(agentId) { void gateway.abort?.(agentId, id).catch(() => undefined); },
-      };
-      const hooks = { append: (m: Omit<RoomMessage, 'id' | 'ts'>) => add(r, m), state: (p: Partial<RoomRunState>) => Object.assign(state, p) };
-      const flow = runDiscussion(r, members, trigger, transport, hooks, abort.signal);
-      const done = flow
-        .then((reason) => { state.stopReason = reason; state.status = reason === 'cancelled' ? 'stopped' : 'done'; }, (e) => {
-          state.stopReason = 'cancelled'; state.status = 'stopped';
-          add(r, { from: 'system', text: `Run failed: ${(e as Error).message}` });
-        })
-        .finally(() => { state.active = []; lastRuns.set(id, { ...state }); runs.delete(id); touch(r); persist(); });
-      runs.set(id, { state, abort, done });
+      const members: RoomMember[] = r.members.filter((m) => !isExcludedAgent(m)).map((m) => ({ id: m, name: info(list, m).name }));
+      if (!selectResponders(msg, members, r.mentionGating, r.responderMode, r.captain).length) {
+        add(r, { from: 'system', text: 'Nobody was addressed. This room only answers @mentions: mention an agent, or @all.' });
+        return this.get(id);
+      }
+      startRun(r, trigger, members);
       return this.get(id);
     },
+    /** "Ask lead to summarize": a normal message to the lead, consistent with a discussion that has no special wrap-up phase. */
+    async wrapUp(id: string): Promise<RoomView> {
+      const r = mustGet(id);
+      if (!r.captain) throw new RoomError(400, 'the room has no lead');
+      return this.send(id, `@${r.captain} Please wrap up: summarize where the discussion landed, the decisions made, and what is still open.`);
+    },
+    /** Hard stop: aborts every in-flight member run. */
     async stop(id: string): Promise<RoomView> {
       mustGet(id);
       runs.get(id)?.abort.abort();
       return this.get(id);
     },
-    /** Test hook: resolves when the room's current run finished. */
-    async idle(id: string) { await runs.get(id)?.done; },
+    /** Soft stop ("End now"): turns already in flight finish and post; nothing new starts. Also releases a soft pause. */
+    async end(id: string): Promise<RoomView> {
+      mustGet(id);
+      const e = runs.get(id);
+      if (e) { e.ending = true; e.resume?.(); }
+      return this.get(id);
+    },
+    /** The Continue button: release a soft pause (no cap: the run carries on until the agents pass or Zach stops it). */
+    async resume(id: string): Promise<RoomView> {
+      mustGet(id);
+      runs.get(id)?.resume?.();
+      return this.get(id);
+    },
+    /** Pin a message as a decision (or unpin it). Pinned messages are quoted to every member and survive the transcript cap. */
+    async pin(id: string, messageId: unknown, pinned: unknown): Promise<RoomView> {
+      const r = mustGet(id);
+      const m = typeof messageId === 'string' ? r.messages.find((x) => x.id === messageId && x.from !== 'system') : undefined;
+      if (!m) throw new RoomError(404, 'unknown message');
+      const on = pinned !== false;
+      if (on && !m.pinned && r.messages.filter((x) => x.pinned).length >= MAX_PINNED) throw new RoomError(409, `at most ${MAX_PINNED} pinned decisions: unpin one first`);
+      if (on) m.pinned = true; else delete m.pinned;
+      touch(r);
+      persist();
+      return this.get(id);
+    },
+    /** Test hook: resolves when the room's current run (and any run it chains into) finished. */
+    async idle(id: string) { for (let e = runs.get(id); e; e = runs.get(id)) await e.done; },
     close() { for (const r of runs.values()) r.abort.abort(); },
   };
+
+  /** One discussion run for `trigger` (already in the thread). Chains into the next queued message if the run ends with one still waiting. */
+  function startRun(r: Room, trigger: RoomMessage, members: RoomMember[]) {
+    const id = r.id;
+    delete trigger.queued;
+    const abort = new AbortController();
+    const state: RoomRunState = { id: `run${trigger.id}`, status: 'running', round: 1, turnsUsed: 0, active: [], activity: [], posts: 0, usage: emptyUsage(), filtered: 0 };
+    const entry: RunEntry = { state, abort, done: Promise.resolve(), ending: false };
+    const transport: RoomTransport = {
+      async turn(agentId, prompt, signal, progress) {
+        await gateway.ensureSession(agentId, id, `Room: ${r.name}`);
+        return gateway.turn(agentId, id, prompt, signal, progress);
+      },
+      abort(agentId) { void gateway.abort?.(agentId, id).catch(() => undefined); },
+      ...(gateway.judge ? { judge: (prompt: string, signal: AbortSignal) => gateway.judge!(id, r.captain, prompt, signal) } : {}),
+    };
+    const hooks = {
+      append: (m: Omit<RoomMessage, 'id' | 'ts'>) => add(r, m),
+      state: (p: Partial<RoomRunState>) => { Object.assign(state, p); if (p.status || 'pause' in p) persist(); },
+      waitForContinue: (signal: AbortSignal) => new Promise<void>((resolve) => {
+        entry.resume = () => { entry.resume = undefined; resolve(); };
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      }),
+      takeQueued: () => {
+        const q = r.messages.filter((m) => m.queued);
+        for (const m of q) delete m.queued;
+        if (q.length) { touch(r); persist(); }
+        return q;
+      },
+      ended: () => entry.ending,
+      usage: (_agent: string, u: Parameters<typeof addUsage>[1]) => { r.usage = addUsage(r.usage ?? emptyUsage(), u); },
+    };
+    const flow = runDiscussion(r, members, trigger, transport, hooks, abort.signal);
+    entry.done = flow
+      .then((reason) => { state.stopReason = reason; state.status = reason === 'cancelled' ? 'stopped' : 'done'; }, (e) => {
+        state.stopReason = 'cancelled'; state.status = 'stopped';
+        add(r, { from: 'system', text: `Run failed: ${(e as Error).message}` });
+      })
+      .finally(() => {
+        state.active = []; state.activity = []; delete state.pause; entry.resume = undefined;
+        // Messages still queued: a stopped or ended run drops them (with a note); otherwise (a message that raced the run's last boundary) they start the next run.
+        const waiting = r.messages.filter((m) => m.queued);
+        let next: RoomMessage | undefined;
+        if (waiting.length) {
+          if (state.stopReason === 'cancelled' || state.stopReason === 'ended') {
+            for (const m of waiting) delete m.queued;
+            add(r, { from: 'system', text: `${waiting.length} queued message${waiting.length === 1 ? ' was' : 's were'} not sent to the agents because the discussion was ${state.stopReason === 'ended' ? 'ended' : 'stopped'}.` });
+          } else next = waiting[0];
+        }
+        lastRuns.set(id, { ...state }); runs.delete(id); touch(r); persist();
+        if (next && !r.archived) {
+          const list = r.members.filter((m) => !isExcludedAgent(m)).map((m) => ({ id: m, name: info(agentCache?.list ?? [], m).name }));
+          startRun(r, next, list);
+        }
+      });
+    runs.set(id, entry);
+  }
 }
 export type RoomsService = ReturnType<typeof createRoomsService>;

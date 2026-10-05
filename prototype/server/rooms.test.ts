@@ -65,7 +65,7 @@ test('a message starts an open discussion: member bubbles in the thread, a secon
   // reload: same thread from disk
   const svc2 = createRoomsService({ gateway: gw, file });
   assert.deepEqual((await svc2.get(room.id)).room.messages, v.room.messages);
-  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 3);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 4);
   svc.close(); svc2.close(); rmSync(dir, { recursive: true });
 });
 
@@ -133,7 +133,7 @@ test('old rooms.json (captain-led council, with mode/steps/councils and the reti
   assert.equal(readFileSync(file, 'utf8'), raw, 'load does not rewrite the file');
   await svc.update('rc1cabea9', { name: 'RFC Council' });
   const saved = JSON.parse(readFileSync(file, 'utf8'));
-  assert.equal(saved.version, 3);
+  assert.equal(saved.version, 4);
   assert.ok(saved.rooms.every((r: any) => !('mode' in r) && !('councils' in r) && !('maxSteps' in r)));
   svc.close(); rmSync(dir, { recursive: true });
 });

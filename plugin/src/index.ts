@@ -6,7 +6,7 @@ import { defineFeaturePlugin } from "openclaw/plugin-sdk/feature-plugin";
 import { contract } from "./contract.js";
 
 // Serves the built Agent OS app at /agent-os/ on the Gateway origin and proxies its /agent-os/api/* calls to
-// the local data server (:5198): GETs for reads, plus the guarded writes POST /api/send ("Message agent") and POST /api/rooms[/:id[/send|/stop]] (group rooms).
+// the local data server (:5198): GETs for reads, plus the guarded writes POST /api/send ("Message agent") and POST /api/rooms[/:id[/send|/stop|/end|/continue|/wrapup|/pin]] (group rooms).
 // The Control UI tab frames it sandboxed (opaque origin), so responses carry permissive CORS.
 const ROUTE = "/agent-os";
 const API = { host: "127.0.0.1", port: 5198 };
@@ -16,7 +16,7 @@ const TYPES: Record<string, string> = {
   ".woff2": "font/woff2", ".woff": "font/woff", ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json",
 };
 const SEND_PATH = "/api/send";
-const ROOMS_WRITE = /^\/api\/rooms(\/r[0-9a-f]{8}(\/(send|stop))?)?$/; // the only other write route; the data server applies the same header/body guard
+const ROOMS_WRITE = /^\/api\/rooms(\/r[0-9a-f]{8}(\/(send|stop|end|continue|wrapup|pin))?)?$/; // the only other write route; the data server applies the same header/body guard
 const SEND_BODY_MAX = 16_384;
 const cors = { "Access-Control-Allow-Origin": "*", "Cross-Origin-Resource-Policy": "cross-origin", "X-Content-Type-Options": "nosniff" };
 

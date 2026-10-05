@@ -21,10 +21,13 @@ test('gating: no mention = everyone, mention = only those, gating off = everyone
   assert.deepEqual(selectResponders('@bravo status?', M, false), ['alpha', 'bravo', 'forge-coder']);
 });
 
-test('settings: only mention gating; the pipeline settings are gone', () => {
-  assert.deepEqual(normalizeSettings(undefined), { mentionGating: true });
-  assert.deepEqual(normalizeSettings({ mentionGating: false }), { mentionGating: false });
-  assert.deepEqual(normalizeSettings({ maxSteps: 3, mode: 'council', maxRounds: 4 } as never), { mentionGating: true });
+const DEFAULTS = { mentionGating: true, responderMode: 'everyone', pauseAfterPosts: 24, pauseAfterTokens: 0, speakFilter: false };
+test('settings: mention gating, responder mode, soft-pause limits and the opt-in speak filter; the pipeline settings are gone', () => {
+  assert.deepEqual(normalizeSettings(undefined), DEFAULTS);
+  assert.deepEqual(normalizeSettings({ mentionGating: false }), { ...DEFAULTS, mentionGating: false });
+  assert.deepEqual(normalizeSettings({ maxSteps: 3, mode: 'council', maxRounds: 4 } as never), DEFAULTS);
+  assert.deepEqual(normalizeSettings({ responderMode: 'lead', pauseAfterPosts: 0, pauseAfterTokens: 5000, speakFilter: true }), { ...DEFAULTS, responderMode: 'lead', pauseAfterPosts: 0, pauseAfterTokens: 5000, speakFilter: true });
+  assert.deepEqual(normalizeSettings({ responderMode: 'bogus', pauseAfterPosts: -4, speakFilter: 'yes' } as never), { ...DEFAULTS, pauseAfterPosts: 0 }, 'bad values fall back; the speak filter is on only for a real true');
 });
 
 test('phi is excluded, near-misses are not', () => {
@@ -50,7 +53,7 @@ test('migrateRoom: retired pipeline fields dropped, the council and final flags 
 // ---- the discussion loop, against a scripted transport
 
 function setup(text: string, members = M, captain = 'alpha', extra: Partial<Room> = {}) {
-  const room: Room = { id: 'r00000001', name: 'Test', members: members.map((m) => m.id), captain, mentionGating: true, archived: false, createdAt: 0, updatedAt: 0, messages: [], ...extra };
+  const room: Room = { id: 'r00000001', name: 'Test', members: members.map((m) => m.id), captain, ...normalizeSettings(undefined), archived: false, createdAt: 0, updatedAt: 0, messages: [], ...extra };
   let n = 0;
   const hooks = {
     append(m: Omit<RoomMessage, 'id' | 'ts'>) { const msg = { ...m, id: `m${n++}`, ts: n }; room.messages.push(msg); return msg; },
