@@ -25,7 +25,16 @@ http.createServer((req, res) => {
     const agent = /You are (.+?) \(@([\w-]+)\)\./.exec(prompt)?.[2] ?? null;
     const rec = { at: Date.now(), end: 0, aborted: false, model: j.model, agent, role: /Council role: ([A-Z-]+)\./.exec(prompt)?.[1] ?? null, room: /\[Agent OS group room/.test(prompt), head: prompt.slice(0, 140) };
     seen.push(rec);
-    const reply = /\[Agent OS group room/.test(prompt) ? scriptedReply(prompt) : "ok";
+    // The speak filter's judge (rooms v2, opt-in): speak = the candidates someone @mentioned in the discussion; "judgefail" in the prompt returns junk (everyone then speaks).
+    const judge = /You are a quiet moderator for a group chat/.test(prompt);
+    const judgeReply = () => {
+      if (/judgefail/i.test(prompt)) return "sorry, no idea";
+      const cands = [...(/Candidates: ([^\n]*)/.exec(prompt)?.[1] ?? "").matchAll(/\(@([\w-]+)\)/g)].map((m) => m[1]);
+      const disc = (prompt.split("Discussion so far")[1] ?? "").split("Candidates:")[0]; // the replies only, not the candidate list after them
+      return JSON.stringify({ speak: cands.filter((id) => new RegExp(`@${id}\\b`).test(disc)) });
+    };
+    rec.judge = judge;
+    const reply = judge ? judgeReply() : /\[Agent OS group room/.test(prompt) ? scriptedReply(prompt) : "ok";
     const delay = Number(new RegExp(`\\[\\[delay:${agent}=(\\d+)\\]\\]`).exec(prompt)?.[1] ?? 0);
     let gone = false;
     res.on("close", () => { if (!res.writableEnded) { gone = true; rec.aborted = true; rec.end = Date.now(); } });

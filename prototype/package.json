@@ -10,7 +10,7 @@
     "dev:web": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test shared/*.test.ts server/*.test.ts"
+    "test": "node --import tsx --test shared/*.test.ts server/*.test.ts src/ui/*.test.ts"
   },
   "devDependencies": {
     "@types/jsdom": "30.0.0",

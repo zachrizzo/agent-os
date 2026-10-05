@@ -9,6 +9,9 @@
 //   POST /api/rooms {name, members, captain?}   create             POST /api/rooms/:id {name?, addMembers?, removeMembers?, archived?, captain?}
 //   POST /api/rooms/:id/send {message}   starts an open discussion: every member replies, then rounds of reply-or-PASS; the lead (captain) moderates; it ends when a whole round is PASS or on Stop
 //   POST /api/rooms/:id/stop   aborts every in-flight member run (chat.abort, room sessions only)
+//   POST /api/rooms/:id/continue   releases a soft pause (a long run pauses, never stops)     POST /api/rooms/:id/end   soft stop: turns in flight finish, nothing new starts
+//   POST /api/rooms/:id/wrapup   asks the lead to summarize, as a normal message              POST /api/rooms/:id/pin {messageId, pinned}   pin a message as a decision
+//   A send while a discussion is running is queued and joins at the next round boundary. The update body also takes notes, responderMode, pauseAfterPosts, pauseAfterTokens, speakFilter.
 //   Room writes use the same guard as /api/send (JSON + x-agent-os-send: 1, same body cap).
 // Every payload passes through redactDeep() before it is written.
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -69,8 +72,8 @@ async function send(req: IncomingMessage, res: ServerResponse, src: string | nul
   }
 }
 
-// /api/rooms[/:id[/send|/stop]]: reads are GET, writes share the /api/send guard.
-const ROOMS_PATH = /^\/api\/rooms(?:\/([^/]+)(?:\/(send|stop))?)?$/;
+// /api/rooms[/:id[/send|/stop|/end|/continue|/wrapup|/pin]]: reads are GET, writes share the /api/send guard.
+const ROOMS_PATH = /^\/api\/rooms(?:\/([^/]+)(?:\/(send|stop|end|continue|wrapup|pin))?)?$/;
 async function roomsApi(req: IncomingMessage, res: ServerResponse, url: URL, src: string | null) {
   const m = ROOMS_PATH.exec(url.pathname)!;
   const [, id, action] = m;
@@ -89,6 +92,10 @@ async function roomsApi(req: IncomingMessage, res: ServerResponse, url: URL, src
     if (!id) return json(res, 200, await rooms.create(body as never));
     if (action === 'send') return json(res, 200, await rooms.send(id, body.message));
     if (action === 'stop') return json(res, 200, await rooms.stop(id));
+    if (action === 'end') return json(res, 200, await rooms.end(id));
+    if (action === 'continue') return json(res, 200, await rooms.resume(id));
+    if (action === 'wrapup') return json(res, 200, await rooms.wrapUp(id));
+    if (action === 'pin') return json(res, 200, await rooms.pin(id, body.messageId, body.pinned));
     return json(res, 200, await rooms.update(id, body as never));
   } catch (e) {
     if (e instanceof RoomError) return json(res, e.status, { error: e.message });

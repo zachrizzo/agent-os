@@ -222,25 +222,51 @@ export function createMockSource(): Source {
     return { role: 'user', ts, sender: shortSession(from), text: p.body, a2a: { from, ...(p.tool ? { tool: p.tool } : {}), routing: p.routing } };
   }
 
+  const flaky = new Map<string, number>(); // attempts per room|agent|message, for the failure scenarios
   const gateway: RoomGateway = {
     async listAgents() { return MOCK_ROSTER; },
     async ensureSession() { /* nothing to create */ },
-    async turn(agentId, _roomId, prompt, signal) {
+    async turn(agentId, roomId, prompt, signal, progress) {
+      // Failure scenarios (Zach's message): "flaky" = research gets a 429 on its first try, then works; "authfail" = research always gets a 401; "down" = everyone is overloaded (503) forever.
+      const asked = triggerText(prompt);
+      const tries = (flaky.set(`${roomId}|${agentId}|${asked}`, (flaky.get(`${roomId}|${agentId}|${asked}`) ?? 0) + 1), flaky.get(`${roomId}|${agentId}|${asked}`)!);
+      if (/\bflaky\b/i.test(asked) && agentId === 'research' && tries === 1) throw new Error('429 rate limit exceeded, retry shortly');
+      if (/\bauthfail\b/i.test(asked) && agentId === 'research') throw new Error('401 unauthorized: invalid api key');
+      if (/\bdown\b/i.test(asked)) throw new Error('503 service unavailable (overloaded)');
+      // "late" = spark ignores Stop and answers 3s later anyway (a Gateway run that keeps going after the abort).
+      if (/\blate\b/i.test(asked) && agentId === 'spark') {
+        await new Promise<void>((resolve) => setTimeout(resolve, 3000));
+        const text = scriptedReply(prompt);
+        return { text, usage: { inputTokens: 100, outputTokens: Math.ceil(text.length / 4), costUsd: 0.001 } };
+      }
       // "hang" in Zach's message makes the member `forge` never reply (until Stop aborts it): the no-timeout scenario.
       if (agentId === 'forge' && /\bhang\b/i.test(triggerText(prompt))) {
         await new Promise<void>((_res, reject) => { if (signal.aborted) reject(new Error('cancelled')); signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }); });
       }
       // "slow" in Zach's message stretches each turn so the typing bubbles can be watched (and Stop tried).
       const ms = /\bslow\b/i.test(triggerText(prompt)) ? 2500 : 250;
+      // "tools" shows the member using a tool for the second half of its turn (the participants strip).
+      const tools = /\btools\b/i.test(triggerText(prompt));
+      const tool = tools ? setTimeout(() => progress?.({ tool: agentId === 'forge' ? 'exec' : 'web_search' }), ms / 2) : undefined;
       await new Promise<void>((resolve, reject) => {
         const t = setTimeout(resolve, ms);
         signal.addEventListener('abort', () => { clearTimeout(t); reject(new Error('cancelled')); }, { once: true });
-      });
+      }).finally(() => clearTimeout(tool));
       if (signal.aborted) throw new Error('cancelled');
-      return scriptedReply(prompt);
+      const text = scriptedReply(prompt);
+      const inputTokens = Math.ceil(prompt.length / 4), outputTokens = Math.ceil(text.length / 4);
+      return { text, usage: { inputTokens, outputTokens, costUsd: (inputTokens * 3 + outputTokens * 15) / 1e6 } };
+    },
+    // The speak filter's stand-in: a candidate speaks only when someone @mentioned them in the discussion ("judgefail" in Zach's message returns junk: everyone speaks).
+    async judge(_roomId, _agentId, prompt) {
+      if (/judgefail/i.test(prompt)) return 'sorry, no idea';
+      const cands = [...(/Candidates: ([^\n]*)/.exec(prompt)?.[1] ?? '').matchAll(/\(@([\w-]+)\)/g)].map((m) => m[1]);
+      const disc = (prompt.split('Discussion so far')[1] ?? '').split('Candidates:')[0]; // the replies only, not the candidate list after them
+      return JSON.stringify({ speak: cands.filter((id) => new RegExp(`@${id}\\b`).test(disc)) });
     },
   };
-  const rooms = createRoomsService({ gateway }); // in-memory: mock mode never writes the real rooms file
+  // In-memory by default: mock mode never touches the real rooms file. AGENT_OS_MOCK_ROOMS_FILE (a throwaway path, for the restart proof) opts in to persistence.
+  const rooms = createRoomsService({ gateway, ...(process.env.AGENT_OS_MOCK_ROOMS_FILE ? { file: process.env.AGENT_OS_MOCK_ROOMS_FILE } : {}) });
 
   return {
     rooms,

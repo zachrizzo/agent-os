@@ -4,8 +4,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { scriptedReply } from '../shared/scripted.ts';
-import { createRoomsService, type RoomAgent, type RoomGateway } from './rooms.ts';
+import { scriptedReply, triggerText } from '../shared/scripted.ts';
+import { createRoomsService, listAgentsWithFallback, parseAgentList, type RoomAgent, type RoomGateway } from './rooms.ts';
 
 const AGENTS: RoomAgent[] = [{ id: 'rfc-lead', name: 'RFC Lead' }, { id: 'rfc-skeptic', name: 'RFC Skeptic' }, { id: 'rfc-scribe', name: 'RFC Scribe' }, { id: 'phi', name: 'PHI' }];
 function fakeGateway(delays: Record<string, number> = {}) {
@@ -65,7 +65,7 @@ test('a message starts an open discussion: member bubbles in the thread, a secon
   // reload: same thread from disk
   const svc2 = createRoomsService({ gateway: gw, file });
   assert.deepEqual((await svc2.get(room.id)).room.messages, v.room.messages);
-  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 3);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 4);
   svc.close(); svc2.close(); rmSync(dir, { recursive: true });
 });
 
@@ -133,7 +133,7 @@ test('old rooms.json (captain-led council, with mode/steps/councils and the reti
   assert.equal(readFileSync(file, 'utf8'), raw, 'load does not rewrite the file');
   await svc.update('rc1cabea9', { name: 'RFC Council' });
   const saved = JSON.parse(readFileSync(file, 'utf8'));
-  assert.equal(saved.version, 3);
+  assert.equal(saved.version, 4);
   assert.ok(saved.rooms.every((r: any) => !('mode' in r) && !('councils' in r) && !('maxSteps' in r)));
   svc.close(); rmSync(dir, { recursive: true });
 });
@@ -149,5 +149,361 @@ test('a member that never replies is never timed out; Stop ends it', async () =>
   await svc.idle(room.id);
   assert.equal((await svc.get(room.id)).run?.status, 'stopped');
   assert.ok(aborted.includes('rfc-scribe'));
+  svc.close();
+});
+
+// ---- rooms v2 service behavior
+
+const nap = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function until(fn: () => Promise<boolean> | boolean, ms = 3000) { const t0 = Date.now(); while (!(await fn())) { if (Date.now() - t0 > ms) throw new Error('timed out waiting'); await nap(10); } }
+
+test('a message sent while a discussion runs is queued (flagged, hidden from agents), joins at the next round boundary, and is answered; no second run is started', async () => {
+  const prompts: string[] = [];
+  const base = fakeGateway({ 'rfc-skeptic': 60 });
+  const gw: RoomGateway = { ...base.gw, async turn(a, r, p, s, pr) { prompts.push(p); return base.gw.turn(a, r, p, s, pr); } };
+  const svc = createRoomsService({ gateway: gw });
+  const { room } = await svc.create({ name: 'Q', members: ['rfc-lead', 'rfc-skeptic'] });
+  await svc.send(room.id, 'first question');
+  await nap(20);
+  const v = await svc.send(room.id, 'and what about cost?'); // busy: queued, not a 409
+  const queued = v.room.messages.find((m) => m.text === 'and what about cost?')!;
+  assert.equal(queued.queued, true);
+  assert.equal(v.run?.status, 'running');
+  await svc.idle(room.id);
+  const after = (await svc.get(room.id)).room;
+  assert.ok(!after.messages.some((m) => m.queued), 'the flag is cleared once it joined');
+  const round1 = prompts.filter((p) => /It is round 1\./.test(p));
+  assert.ok(round1.length && round1.every((p) => !/what about cost/.test(p)));
+  assert.ok(prompts.some((p) => /You: and what about cost\?/.test(p)), 'a later round shows it');
+  assert.equal((await svc.get(room.id)).run?.status, 'done');
+  for (let i = 0; i < 5; i++) await svc.send(room.id, `more ${i}`).catch(() => undefined); // starts a new run, then queues
+  await svc.stop(room.id); await svc.idle(room.id);
+  svc.close();
+});
+
+test('too many queued messages are refused; Stop drops the queued ones with a note (not replayed, not silently lost)', async () => {
+  const { gw } = fakeGateway({ 'rfc-lead': 3_600_000 });
+  const svc = createRoomsService({ gateway: gw });
+  const { room } = await svc.create({ name: 'Q', members: ['rfc-lead', 'rfc-skeptic'] });
+  await svc.send(room.id, 'start');
+  for (let i = 0; i < 5; i++) await svc.send(room.id, `q${i}`);
+  await assert.rejects(svc.send(room.id, 'q5'), /already queued/);
+  await svc.stop(room.id);
+  await svc.idle(room.id);
+  const v = await svc.get(room.id);
+  assert.ok(!v.room.messages.some((m) => m.queued));
+  assert.ok(v.room.messages.some((m) => m.from === 'system' && /5 queued messages were not sent/.test(m.text)));
+  assert.equal(v.run?.status, 'stopped');
+  svc.close();
+});
+
+test('soft pause end to end: a repeating room pauses (never stops), the room stays busy, Continue carries on, and Stop ends a pause', async () => {
+  const { gw } = fakeGateway();
+  const svc = createRoomsService({ gateway: gw });
+  const { room } = await svc.create({ name: 'P', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'] });
+  await svc.send(room.id, 'pingpong'); // every member @mentions the next one with the same words every round
+  await until(async () => (await svc.get(room.id)).run?.status === 'paused');
+  let v = await svc.get(room.id);
+  assert.equal(v.run?.pause?.reason, 'repeat');
+  assert.equal((await svc.list()).rooms.find((r) => r.id === room.id)?.paused, true);
+  assert.equal(v.run?.active.length, 0);
+  const posts = v.room.messages.length;
+  await nap(60);
+  assert.equal((await svc.get(room.id)).room.messages.length, posts, 'nothing is said while paused');
+  await svc.resume(room.id);
+  await until(async () => (await svc.get(room.id)).room.messages.length > posts);
+  assert.ok(['running', 'paused'].includes((await svc.get(room.id)).run!.status));
+  await until(async () => (await svc.get(room.id)).run?.status === 'paused'); // it pauses again on the next repeat: still no stop
+  await svc.stop(room.id);
+  await svc.idle(room.id);
+  v = await svc.get(room.id);
+  assert.equal(v.run?.status, 'stopped');
+  assert.equal(v.run?.pause, undefined);
+  svc.close();
+});
+
+test('writing while paused releases the pause and the message joins; End now while paused ends the run softly', async () => {
+  const { gw } = fakeGateway();
+  const svc = createRoomsService({ gateway: gw });
+  const { room } = await svc.create({ name: 'P', members: ['rfc-lead', 'rfc-skeptic'] });
+  await svc.update(room.id, { pauseAfterPosts: 1 });
+  await svc.send(room.id, 'hello');
+  await until(async () => (await svc.get(room.id)).run?.status === 'paused');
+  await svc.send(room.id, 'actually, focus on cost');
+  await until(async () => (await svc.get(room.id)).room.messages.some((m) => m.text === 'actually, focus on cost' && !m.queued));
+  await until(async () => (await svc.get(room.id)).run?.status === 'paused'); // the next round pauses again (limit 1)
+  await svc.end(room.id);
+  await svc.idle(room.id);
+  const v = await svc.get(room.id);
+  assert.equal(v.run?.status, 'done');
+  assert.equal(v.run?.stopReason, 'ended');
+  svc.close();
+});
+
+test('usage: each run totals turns/tokens/cost, the room keeps a running total across runs, estimated when the Gateway reports nothing', async () => {
+  const base = fakeGateway();
+  const gw: RoomGateway = { ...base.gw, async turn(a, r, p, s) { const text = (await base.gw.turn(a, r, p, s)) as string; return a === 'rfc-skeptic' ? { text, usage: { inputTokens: 400, outputTokens: 40, costUsd: 0.02 } } : text; } };
+  const svc = createRoomsService({ gateway: gw });
+  const { room } = await svc.create({ name: 'U', members: ['rfc-lead', 'rfc-skeptic'] });
+  await svc.send(room.id, 'one');
+  await svc.idle(room.id);
+  const first = await svc.get(room.id);
+  assert.ok(first.run!.usage!.turns >= 2);
+  assert.ok(first.run!.usage!.inputTokens >= 400 && first.run!.usage!.costUsd >= 0.02);
+  assert.equal(first.run!.usage!.estimated, true, 'the lead reported no usage: flagged as estimated');
+  assert.ok(first.run!.lastSpeaker);
+  const total1 = first.room.usage!.turns;
+  assert.equal(total1, first.run!.usage!.turns);
+  await svc.send(room.id, 'two');
+  await svc.idle(room.id);
+  const second = await svc.get(room.id);
+  assert.ok(second.room.usage!.turns > total1 && second.room.usage!.turns > second.run!.usage!.turns, 'the room total spans both runs');
+  svc.close();
+});
+
+test('run state persists; after a restart a run that was running or paused shows as interrupted, is never replayed, and its queued messages are reported', async () => {
+  const dir = tmp();
+  const file = join(dir, 'rooms.json');
+  const room = { id: 'r00000001', name: 'Old', members: ['rfc-lead', 'rfc-skeptic'], captain: 'rfc-lead', mentionGating: true, archived: false, createdAt: 1, updatedAt: 1,
+    messages: [{ id: 'm1', ts: 1, from: 'you', text: 'q' }, { id: 'm2', ts: 2, from: 'rfc-lead', text: 'a' }, { id: 'm3', ts: 3, from: 'you', text: 'follow-up', queued: true }] };
+  const other = { ...room, id: 'r00000002', name: 'Done', messages: [{ id: 'm1', ts: 1, from: 'you', text: 'q' }] };
+  writeFileSync(file, JSON.stringify({ version: 4, rooms: [room, other], runs: {
+    r00000001: { id: 'runm1', status: 'paused', round: 3, turnsUsed: 7, active: [], pause: { reason: 'posts', detail: 'x', at: 1 }, usage: { turns: 7, inputTokens: 10, outputTokens: 5, costUsd: 0, estimated: true } },
+    r00000002: { id: 'runm1', status: 'done', round: 2, turnsUsed: 2, active: [], stopReason: 'passed' },
+  } }));
+  const fg = fakeGateway();
+  const svc = createRoomsService({ gateway: fg.gw, file });
+  const v = await svc.get('r00000001');
+  assert.equal(v.run?.status, 'interrupted');
+  assert.equal(v.run?.stopReason, 'interrupted');
+  assert.equal(v.run?.pause, undefined);
+  assert.equal(v.run?.turnsUsed, 7, 'what the run had spent is kept');
+  assert.ok(!v.room.messages.some((m) => m.queued));
+  const note = v.room.messages.filter((m) => m.from === 'system').map((m) => m.text).join(' ');
+  assert.match(note, /interrupted by a restart and was not replayed/);
+  assert.match(note, /1 queued message was never delivered/);
+  assert.equal((await svc.get('r00000002')).run?.status, 'done');
+  assert.equal((await svc.get('r00000002')).room.messages.length, 1, 'a finished run adds no note');
+  await nap(30);
+  assert.equal(fg.log.length, 0, 'nothing was replayed: no agent was asked');
+  assert.equal((await svc.list()).rooms.find((r) => r.id === 'r00000001')?.running, false);
+  const saved = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(saved.runs.r00000001.status, 'interrupted');
+  svc.close();
+  const again = createRoomsService({ gateway: fakeGateway().gw, file }); // a second restart does not add a second note
+  assert.equal((await again.get('r00000001')).room.messages.filter((m) => m.from === 'system').length, 1);
+  again.close(); rmSync(dir, { recursive: true });
+});
+
+test('live run state is written to rooms.json as it changes (so a crash mid-run is detectable)', async () => {
+  const dir = tmp();
+  const file = join(dir, 'rooms.json');
+  const svc = createRoomsService({ gateway: fakeGateway({ 'rfc-lead': 400 }).gw, file });
+  const { room } = await svc.create({ name: 'W', members: ['rfc-lead', 'rfc-skeptic'] });
+  await svc.send(room.id, 'x');
+  await nap(60);
+  const mid = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(mid.runs[room.id].status, 'running');
+  await svc.idle(room.id);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).runs[room.id].status, 'done');
+  svc.close(); rmSync(dir, { recursive: true });
+});
+
+test('responder modes via the service: lead-first answers alone, mentions-only adds a note and starts nothing, bad modes are 400, settings clamp', async () => {
+  const fg = fakeGateway();
+  const svc = createRoomsService({ gateway: fg.gw });
+  const { room } = await svc.create({ name: 'M', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'], responderMode: 'lead' });
+  assert.equal(room.responderMode, 'lead');
+  await svc.send(room.id, 'where are we?');
+  await svc.idle(room.id);
+  assert.deepEqual([...new Set(fg.log.map((l) => l.agent))], ['rfc-lead'], 'only the lead was asked');
+  await assert.rejects(svc.update(room.id, { responderMode: 'loud' } as never), /responderMode must be one of/);
+  const m = await svc.update(room.id, { responderMode: 'mentions', pauseAfterPosts: 9999, pauseAfterTokens: 1234.9, speakFilter: true });
+  assert.equal(m.room.responderMode, 'mentions');
+  assert.equal(m.room.pauseAfterPosts, 500);
+  assert.equal(m.room.pauseAfterTokens, 1234);
+  assert.equal(m.room.speakFilter, true);
+  const before = fg.log.length;
+  const v = await svc.send(room.id, 'anyone there?');
+  assert.equal(v.run?.status, 'done'); // the earlier run's state; no new run
+  assert.equal(fg.log.length, before);
+  assert.ok(v.room.messages.some((x) => x.from === 'system' && /only answers @mentions/.test(x.text)));
+  await svc.send(room.id, '@rfc-skeptic your view?');
+  await svc.idle(room.id);
+  assert.ok(fg.log.slice(before).every((l) => l.agent === 'rfc-skeptic'));
+  svc.close();
+});
+
+test('notes and pins: notes are saved and capped, pinned messages survive the transcript cap and reach every prompt', async () => {
+  const prompts: string[] = [];
+  const base = fakeGateway();
+  const gw: RoomGateway = { ...base.gw, async turn(a, r, p, s, pr) { prompts.push(p); return base.gw.turn(a, r, p, s, pr); } };
+  const svc = createRoomsService({ gateway: gw });
+  const { room } = await svc.create({ name: 'N', members: ['rfc-lead', 'rfc-skeptic'] });
+  await svc.update(room.id, { notes: '  Budget is 5k.  ' });
+  assert.equal((await svc.get(room.id)).room.notes, 'Budget is 5k.');
+  await assert.rejects(svc.update(room.id, { notes: 'x'.repeat(4001) }), /notes must be text/);
+  await svc.send(room.id, 'kick off');
+  await svc.idle(room.id);
+  const reply = (await svc.get(room.id)).room.messages.find((m) => m.from === 'rfc-skeptic')!;
+  await svc.pin(room.id, reply.id, true);
+  assert.equal((await svc.get(room.id)).room.messages.find((m) => m.id === reply.id)?.pinned, true);
+  await assert.rejects(svc.pin(room.id, 'nope', true), /unknown message/);
+  prompts.length = 0;
+  await svc.send(room.id, 'next');
+  await svc.idle(room.id);
+  assert.ok(prompts.length && prompts.every((p) => /Room notes \(kept by Zach\):\nBudget is 5k\./.test(p) && /Pinned decisions:\n- RFC Skeptic:/.test(p)));
+  // flood the room past the cap: the pinned message is kept
+  for (let i = 0; i < 410; i++) { await svc.send(room.id, `noise ${i}`); await svc.stop(room.id); await svc.idle(room.id); if (i > 3) break; }
+  const huge = await svc.get(room.id);
+  assert.ok(huge.room.messages.some((m) => m.id === reply.id && m.pinned));
+  await svc.pin(room.id, reply.id, false);
+  assert.ok(!(await svc.get(room.id)).room.messages.find((m) => m.id === reply.id)?.pinned);
+  svc.close();
+});
+
+test('wrap up: a normal @lead message (no special phase); End now never aborts the gateway runs', async () => {
+  const fg = fakeGateway();
+  const svc = createRoomsService({ gateway: fg.gw });
+  const { room } = await svc.create({ name: 'W', members: ['rfc-lead', 'rfc-skeptic'] });
+  await svc.send(room.id, 'start');
+  await svc.idle(room.id);
+  const before = fg.log.length;
+  const v = await svc.wrapUp(room.id);
+  assert.match(v.room.messages.at(-1)!.text, /^@rfc-lead Please wrap up/);
+  await svc.idle(room.id);
+  assert.ok(fg.log.slice(before).every((l) => l.agent === 'rfc-lead'), 'only the lead answers a wrap-up');
+  await svc.send(room.id, 'again');
+  await nap(5);
+  await svc.end(room.id);
+  await svc.idle(room.id);
+  assert.deepEqual(fg.aborted, [], 'a soft end lets turns finish instead of aborting them');
+  svc.close();
+});
+
+test('speak filter via the service: opt-in, uses the gateway judge when present; a throwing judge lets everyone speak', async () => {
+  const base = fakeGateway();
+  let judged = 0;
+  let broken = false;
+  const gw: RoomGateway = { ...base.gw, async judge() { judged++; if (broken) throw new Error('model down'); return '{"speak":[]}'; } };
+  const svc = createRoomsService({ gateway: gw });
+  const { room } = await svc.create({ name: 'F', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'] });
+  await svc.send(room.id, 'plain');
+  await svc.idle(room.id);
+  assert.equal(judged, 0, 'off by default');
+  const rounds = (log: typeof base.log) => Math.max(...log.map((l) => l.round));
+  assert.equal(rounds(base.log), 3);
+  await svc.update(room.id, { speakFilter: true });
+  base.log.length = 0;
+  await svc.send(room.id, 'filtered');
+  await svc.idle(room.id);
+  assert.equal(rounds(base.log), 1);
+  assert.ok(judged >= 1);
+  assert.ok((await svc.get(room.id)).run!.filtered! >= 1);
+  broken = true; base.log.length = 0;
+  await svc.send(room.id, 'filtered but the judge is down');
+  await svc.idle(room.id);
+  assert.equal(rounds(base.log), 3, 'fails open');
+  svc.close();
+});
+
+test('two sends in the same tick start one run (the second is queued); the run is on disk the moment it starts', async () => {
+  const dir = tmp();
+  const file = join(dir, 'rooms.json');
+  const fg = fakeGateway({ 'rfc-lead': 80, 'rfc-skeptic': 80 });
+  const svc = createRoomsService({ gateway: fg.gw, file });
+  const { room } = await svc.create({ name: 'R', members: ['rfc-lead', 'rfc-skeptic'] });
+  const [a, b] = await Promise.all([svc.send(room.id, 'one'), svc.send(room.id, 'two')]);
+  assert.equal(a.run?.status, 'running');
+  assert.equal(b.room.messages.filter((m) => m.from === 'you' && m.queued).length, 1, 'the second message was queued behind the first run');
+  const onDisk = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(onDisk.runs[room.id].status, 'running', 'persisted before any agent replied');
+  await svc.idle(room.id);
+  assert.equal(new Set(fg.log.filter((l) => l.round === 1).map((l) => l.agent)).size, 2);
+  const v = await svc.get(room.id);
+  assert.ok(!v.room.messages.some((m) => m.queued));
+  assert.equal(v.run?.status, 'done');
+  svc.close(); rmSync(dir, { recursive: true });
+});
+
+test('Stop records a cutoff: a reply that arrives late from the stopped run is dropped (with a note), and the next message runs normally', async () => {
+  const late: Array<() => void> = [];
+  const gw: RoomGateway = {
+    async listAgents() { return AGENTS; },
+    async ensureSession() {},
+    // rfc-skeptic ignores the abort signal and answers only when released: a Gateway run that keeps going after Stop.
+    async turn(agent, _room, prompt, signal) {
+      if (agent === 'rfc-skeptic' && /stuck/.test(triggerText(prompt))) { await new Promise<void>((res) => late.push(res)); return 'Late reply from the stopped run'; }
+      await new Promise<void>((res, rej) => { const t = setTimeout(res, 10); signal.addEventListener('abort', () => { clearTimeout(t); rej(new Error('cancelled')); }, { once: true }); });
+      return scriptedReply(prompt);
+    },
+  };
+  const svc = createRoomsService({ gateway: gw });
+  const { room } = await svc.create({ name: 'Cutoff', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'] });
+  await svc.send(room.id, 'stuck question');
+  await new Promise((r) => setTimeout(r, 60));
+  const runId = (await svc.get(room.id)).run!.id;
+  await svc.stop(room.id);
+  const stopped = await svc.get(room.id);
+  assert.ok(stopped.run!.cutoffAt, 'the cutoff time is on the run');
+  assert.equal(late.length, 1);
+  assert.equal((await svc.get(room.id)).run?.status, 'running', 'the agent that ignores Stop is still out; its run waits for it');
+  late[0](); // ...and now that agent answers anyway
+  await svc.idle(room.id);
+  const v = await svc.get(room.id);
+  assert.equal(v.run?.status, 'stopped');
+  assert.equal(v.run?.dropped, 1);
+  assert.ok(!v.room.messages.some((m) => /Late reply from the stopped run/.test(m.text)), 'the late reply never reached the thread');
+  assert.ok(v.room.messages.some((m) => m.from === 'system' && /Stopped: 1 late reply .* was dropped \(rfc-skeptic\)/.test(m.text)));
+  // a new message starts a new run (new run id) and its replies are kept
+  await svc.send(room.id, 'fresh question');
+  await svc.idle(room.id);
+  const v2 = await svc.get(room.id);
+  assert.notEqual(v2.run!.id, runId);
+  assert.ok(v2.room.messages.some((m) => m.from === 'rfc-skeptic' && /fresh question/.test(m.text)));
+  svc.close();
+});
+
+test('rate limits are retried through the service with the configured backoff, and a failed run is not reported as passed', async () => {
+  let tries = 0;
+  const gw: RoomGateway = {
+    async listAgents() { return AGENTS; },
+    async ensureSession() {},
+    async turn(agent, _room, prompt) {
+      if (/flaky/.test(prompt) && agent === 'rfc-skeptic' && ++tries === 1) throw new Error('429 rate limit exceeded');
+      if (/dead/.test(prompt)) throw new Error('503 service unavailable');
+      return scriptedReply(prompt);
+    },
+  };
+  const svc = createRoomsService({ gateway: gw, retry: { retryDelayMs: () => 1 } });
+  const { room } = await svc.create({ name: 'Retry', members: ['rfc-lead', 'rfc-skeptic'] });
+  await svc.send(room.id, 'flaky one');
+  await svc.idle(room.id);
+  let v = await svc.get(room.id);
+  assert.equal(v.run?.stopReason, 'passed');
+  assert.ok(v.room.messages.some((m) => m.from === 'rfc-skeptic'));
+  assert.ok(!v.room.messages.some((m) => m.from === 'system'), 'a retry that worked leaves no failure note');
+  await svc.send(room.id, 'dead one');
+  await svc.idle(room.id);
+  v = await svc.get(room.id);
+  assert.equal(v.run?.stopReason, 'failed');
+  assert.equal(v.run?.status, 'done');
+  assert.ok(v.room.messages.some((m) => m.from === 'system' && /could not answer \(overloaded, still failing after 2 retries\)/.test(m.text)));
+  svc.close();
+});
+
+test('listing agents falls back to `openclaw agents list --json` when the Gateway call fails; phi is excluded and errors are not echoed', async () => {
+  const cli = [{ id: 'main', identityName: 'Chief of Staff', identityEmoji: '🧭', identityAvatarUrl: 'data:image/png;base64,AAAA' }, { id: 'phi', identityName: 'PHI Gateway' }, { id: 'spark', identityName: 'Spark' }, { id: 'spark' }, { name: 'no id' }];
+  const down = async () => { throw new Error('gateway closed (1006): secret-token-abc'); };
+  assert.deepEqual(parseAgentList(cli), [{ id: 'main', name: 'Chief of Staff', emoji: '🧭' }, { id: 'spark', name: 'Spark' }]);
+  assert.deepEqual(await listAgentsWithFallback(down, async () => cli), parseAgentList(cli));
+  assert.deepEqual(await listAgentsWithFallback(async () => ({ agents: [] }), async () => cli), parseAgentList(cli), 'an empty Gateway answer also falls back');
+  const gw = await listAgentsWithFallback(async () => ({ agents: [{ id: 'forge', identity: { name: 'Forge', emoji: '🔨' } }, { id: 'phi-prod' }] }), async () => { throw new Error('not used'); });
+  assert.deepEqual(gw, [{ id: 'forge', name: 'Forge', emoji: '🔨' }], 'the Gateway shape still works, phi-* is dropped');
+  await assert.rejects(listAgentsWithFallback(down, async () => { throw new Error('stderr: token=xyz'); }), (e: Error) => e.message === 'could not list agents');
+  // end to end: a room can be created from the fallback list
+  const svc = createRoomsService({ gateway: { ...fakeGateway().gw, listAgents: () => listAgentsWithFallback(down, async () => cli) } });
+  assert.deepEqual((await svc.list()).agents.map((a) => a.id), ['main', 'spark']);
+  assert.equal((await svc.create({ name: 'X', members: ['main', 'spark'] })).room.members.length, 2);
   svc.close();
 });

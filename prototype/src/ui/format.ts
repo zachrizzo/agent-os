@@ -107,6 +107,7 @@ export const ICONS = {
   menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   crown: '<path d="m3 7 4.5 4L12 4l4.5 7L21 7l-2 12H5L3 7Z"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  pin: '<path d="M12 17v5M9 3h6l-1 6 3 3H7l3-3-1-6Z"/>',
   more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
   chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z"/>',
   dots: '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
