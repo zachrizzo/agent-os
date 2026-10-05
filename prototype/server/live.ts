@@ -13,7 +13,7 @@ import { BOARDS, normalizeCard, type BoardCard } from '../shared/board.ts';
 import { isExcludedAgent, judgeSessionKey, type TurnProgress, type TurnResult } from '../shared/rooms.ts';
 import { toolInFlight, usageFromMessages } from '../shared/turn-usage.ts';
 import { redact } from './redact.ts';
-import { createRoomsService, isRoomKey, roomSessionKey, type RoomAgent, type RoomGateway } from './rooms.ts';
+import { createRoomsService, isRoomKey, listAgentsWithFallback, roomSessionKey, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
 
 const READ_METHODS = new Set(['sessions.list', 'agents.list', 'chat.history', 'usage.cost', 'workboard.cards.list']);
@@ -60,6 +60,14 @@ function call(method: string, params: Record<string, unknown> = {}, timeoutMs = 
   chain = p.catch(() => undefined);
   return p;
 }
+
+/** `openclaw agents list --json`: the fallback when the Gateway's agents.list response is too big for `gateway call`. Output includes avatar data URLs, so the buffer is generous; stderr is never echoed. */
+const agentsViaCli = () => new Promise<unknown>((resolve, reject) => {
+  execFile(OPENCLAW, ['agents', 'list', '--json'], { maxBuffer: 64 * 1024 * 1024, timeout: 30_000, env: CHILD_ENV }, (err, stdout) => {
+    if (err) return reject(new Error('agents list failed'));
+    try { resolve(JSON.parse(stdout)); } catch { reject(new Error('agents list: bad JSON')); }
+  });
+});
 
 // ---------- text helpers ----------
 const oneLine = (s: unknown) => redact(String(s ?? '').replace(/[`*#>]+/g, '').replace(/\s+/g, ' ').trim());
@@ -346,10 +354,7 @@ export function createLiveSource(): Source {
   // ---------- group rooms ----------
   const createdRoomSessions = new Set<string>();
   const roomGateway: RoomGateway = {
-    async listAgents(): Promise<RoomAgent[]> {
-      const r = await call('agents.list');
-      return (r.agents ?? []).filter((a: any) => a?.id).map((a: any) => ({ id: String(a.id), name: String(a.identity?.name ?? a.name ?? a.id), ...(a.identity?.emoji ? { emoji: String(a.identity.emoji) } : {}) }));
-    },
+    listAgents: (): Promise<RoomAgent[]> => listAgentsWithFallback(() => call('agents.list'), agentsViaCli),
     async ensureSession(agentId, roomId, label) {
       const key = roomSessionKey(agentId, roomId);
       if (createdRoomSessions.has(key)) return;

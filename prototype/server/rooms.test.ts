@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { scriptedReply, triggerText } from '../shared/scripted.ts';
-import { createRoomsService, type RoomAgent, type RoomGateway } from './rooms.ts';
+import { createRoomsService, listAgentsWithFallback, parseAgentList, type RoomAgent, type RoomGateway } from './rooms.ts';
 
 const AGENTS: RoomAgent[] = [{ id: 'rfc-lead', name: 'RFC Lead' }, { id: 'rfc-skeptic', name: 'RFC Skeptic' }, { id: 'rfc-scribe', name: 'RFC Scribe' }, { id: 'phi', name: 'PHI' }];
 function fakeGateway(delays: Record<string, number> = {}) {
@@ -489,5 +489,21 @@ test('rate limits are retried through the service with the configured backoff, a
   assert.equal(v.run?.stopReason, 'failed');
   assert.equal(v.run?.status, 'done');
   assert.ok(v.room.messages.some((m) => m.from === 'system' && /could not answer \(overloaded, still failing after 2 retries\)/.test(m.text)));
+  svc.close();
+});
+
+test('listing agents falls back to `openclaw agents list --json` when the Gateway call fails; phi is excluded and errors are not echoed', async () => {
+  const cli = [{ id: 'main', identityName: 'Chief of Staff', identityEmoji: '🧭', identityAvatarUrl: 'data:image/png;base64,AAAA' }, { id: 'phi', identityName: 'PHI Gateway' }, { id: 'spark', identityName: 'Spark' }, { id: 'spark' }, { name: 'no id' }];
+  const down = async () => { throw new Error('gateway closed (1006): secret-token-abc'); };
+  assert.deepEqual(parseAgentList(cli), [{ id: 'main', name: 'Chief of Staff', emoji: '🧭' }, { id: 'spark', name: 'Spark' }]);
+  assert.deepEqual(await listAgentsWithFallback(down, async () => cli), parseAgentList(cli));
+  assert.deepEqual(await listAgentsWithFallback(async () => ({ agents: [] }), async () => cli), parseAgentList(cli), 'an empty Gateway answer also falls back');
+  const gw = await listAgentsWithFallback(async () => ({ agents: [{ id: 'forge', identity: { name: 'Forge', emoji: '🔨' } }, { id: 'phi-prod' }] }), async () => { throw new Error('not used'); });
+  assert.deepEqual(gw, [{ id: 'forge', name: 'Forge', emoji: '🔨' }], 'the Gateway shape still works, phi-* is dropped');
+  await assert.rejects(listAgentsWithFallback(down, async () => { throw new Error('stderr: token=xyz'); }), (e: Error) => e.message === 'could not list agents');
+  // end to end: a room can be created from the fallback list
+  const svc = createRoomsService({ gateway: { ...fakeGateway().gw, listAgents: () => listAgentsWithFallback(down, async () => cli) } });
+  assert.deepEqual((await svc.list()).agents.map((a) => a.id), ['main', 'spark']);
+  assert.equal((await svc.create({ name: 'X', members: ['main', 'spark'] })).room.members.length, 2);
   svc.close();
 });

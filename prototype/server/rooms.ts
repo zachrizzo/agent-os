@@ -23,6 +23,25 @@ export interface RoomGateway {
   abort?(agentId: string, roomId: string): Promise<void>;
 }
 
+/** Agents from either shape: the Gateway's `agents.list` ({ agents: [{ id, identity: { name, emoji } }] }) or `openclaw agents list --json` ([{ id, identityName, identityEmoji }]). The PHI agent is never returned. */
+export function parseAgentList(raw: unknown): RoomAgent[] {
+  const rows: any[] = Array.isArray(raw) ? raw : Array.isArray((raw as any)?.agents) ? (raw as any).agents : [];
+  const out: RoomAgent[] = [];
+  for (const a of rows) {
+    const id = typeof a?.id === 'string' ? a.id.trim() : '';
+    if (!id || isExcludedAgent(id) || out.some((x) => x.id === id)) continue;
+    const name = String(a.identity?.name ?? a.identityName ?? a.name ?? id);
+    const emoji = a.identity?.emoji ?? a.identityEmoji;
+    out.push({ id, name, ...(emoji ? { emoji: String(emoji) } : {}) });
+  }
+  return out;
+}
+/** The Gateway call first; when it fails (a large response can close the CLI's socket with a 1006 while the Gateway log shows success), the CLI's own agent list. Neither error text is passed on. */
+export async function listAgentsWithFallback(primary: () => Promise<unknown>, fallback: () => Promise<unknown>): Promise<RoomAgent[]> {
+  try { const list = parseAgentList(await primary()); if (list.length) return list; } catch { /* fall through */ }
+  try { return parseAgentList(await fallback()); } catch { throw new Error('could not list agents'); }
+}
+
 export class RoomError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 
 export const ROOM_ID_RE = /^r[0-9a-f]{8}$/;
