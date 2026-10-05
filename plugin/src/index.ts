@@ -6,7 +6,7 @@ import { defineFeaturePlugin } from "openclaw/plugin-sdk/feature-plugin";
 import { contract } from "./contract.js";
 
 // Serves the built Agent OS app at /agent-os/ on the Gateway origin and proxies its /agent-os/api/* calls to
-// the local data server (:5198): GETs for reads, plus the guarded writes POST /api/send ("Message agent") and POST /api/rooms[/:id[/send|/stop|/end|/continue|/wrapup|/pin]] (group rooms).
+// the local data server (:5198): GETs for reads (docs reads go through proxyDocs, which adds the guard header), plus the guarded writes POST /api/send ("Message agent") and POST /api/rooms[/:id[/send|/stop|/end|/continue|/wrapup|/pin]] (group rooms).
 // The Control UI tab frames it sandboxed (opaque origin), so responses carry permissive CORS.
 const ROUTE = "/agent-os";
 const API = { host: "127.0.0.1", port: 5198 };
@@ -17,6 +17,7 @@ const TYPES: Record<string, string> = {
 };
 const SEND_PATH = "/api/send";
 const ROOMS_WRITE = /^\/api\/rooms(\/r[0-9a-f]{8}(\/(send|stop|end|continue|wrapup|pin))?)?$/; // the only other write route; the data server applies the same header/body guard
+const DOCS_PATH = /^\/api\/docs(\/file)?$/; // read-only Markdown viewer; the data server needs the x-agent-os-send header, which this proxy adds (the browser's own copy of it only forces a preflight, answered below)
 const SEND_BODY_MAX = 16_384;
 const cors = { "Access-Control-Allow-Origin": "*", "Cross-Origin-Resource-Policy": "cross-origin", "X-Content-Type-Options": "nosniff" };
 
@@ -61,6 +62,24 @@ function proxyWrite(req: IncomingMessage, res: ServerResponse, url: URL, rel: st
   return true;
 }
 
+function proxyDocs(req: IncomingMessage, res: ServerResponse, url: URL, rel: string): boolean {
+  const head = { ...cors, "cache-control": "no-store", "content-type": "application/json" };
+  if (!sendOriginOk(req)) { res.writeHead(403, head); res.end('{"error":"forbidden origin"}'); return true; }
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, { ...cors, "access-control-allow-methods": "GET", "access-control-allow-headers": "content-type, x-agent-os-send", "access-control-max-age": "600" });
+    res.end();
+    return true;
+  }
+  if (req.method !== "GET") { res.writeHead(405, head); res.end('{"error":"method not allowed"}'); return true; }
+  const up = request({ ...API, path: rel + url.search, method: "GET", headers: { accept: "application/json", "x-agent-os-send": "1" } }, (r) => {
+    res.writeHead(r.statusCode ?? 502, { ...head, "content-type": r.headers["content-type"] ?? "application/json" });
+    r.pipe(res);
+  });
+  up.on("error", () => { if (!res.headersSent) res.writeHead(502, head); res.end('{"error":"agent-os data server unavailable"}'); });
+  up.end();
+  return true;
+}
+
 export default defineFeaturePlugin({
   contract,
   name: "Agent OS",
@@ -74,6 +93,7 @@ export default defineFeaturePlugin({
         const url = new URL(req.url ?? "/", "http://gateway");
         let rel = url.pathname.slice(ROUTE.length) || "/";
         if ((rel === SEND_PATH || ROOMS_WRITE.test(rel)) && (req.method === "POST" || req.method === "OPTIONS")) return proxyWrite(req, res, url, rel);
+        if (DOCS_PATH.test(rel)) return proxyDocs(req, res, url, rel);
         if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405, cors); res.end(); return true; }
         if (rel.startsWith("/api/")) {
           const up = request({ ...API, path: rel + url.search, method: "GET", headers: { accept: req.headers.accept ?? "*/*" } }, (r) => {

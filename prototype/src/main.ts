@@ -12,10 +12,12 @@ import { createStore, resolveSource } from './store';
 import { mountBoard } from './ui/board';
 import { mountActivity } from './ui/activity';
 import { mountCenter, mountPlaceholder } from './ui/center';
+import { mountDocs } from './ui/docs';
 import { mountDrawer } from './ui/drawer';
 import { mountRail } from './ui/rail';
 import { mountRooms } from './ui/rooms';
 import { mountTopbar } from './ui/topbar';
+import { fileParam } from '../shared/docs';
 import { initTheme } from './theme';
 
 // The map renderer lives in src/map/index.ts (owned separately). A glob import keeps the shell
@@ -41,16 +43,19 @@ async function boot() {
   let roomCount = 0;
   const rooms = mountRooms($('rooms'), store, (n) => { roomCount = n; renderTop.setRooms(n, rooms.isOpen()); }, createHostBridge());
   const board = mountBoard($('board'), store);
+  const docs = mountDocs($('docs'), store);
   const renderTop = mountTopbar($('topbar'), store, {
     onNeeds: () => activity.showNeeds(),
     onMenu: () => app.classList.toggle('rail-open'),
-    onRooms: () => { board.hide(); renderTop.setBoard(false); rooms.toggle(); renderTop.setRooms(roomCount, rooms.isOpen()); },
-    onBoard: () => { rooms.hide(); renderTop.setRooms(roomCount, false); board.toggle(); renderTop.setBoard(board.isOpen()); },
+    onRooms: () => { board.hide(); renderTop.setBoard(false); docs.hide(); renderTop.setDocs(false); rooms.toggle(); renderTop.setRooms(roomCount, rooms.isOpen()); },
+    onBoard: () => { rooms.hide(); renderTop.setRooms(roomCount, false); docs.hide(); renderTop.setDocs(false); board.toggle(); renderTop.setBoard(board.isOpen()); },
+    onDocs: () => { rooms.hide(); renderTop.setRooms(roomCount, false); board.hide(); renderTop.setBoard(false); docs.toggle(); renderTop.setDocs(docs.isOpen()); },
   });
   window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || drawer.isOpen()) return;
     if (rooms.isOpen()) { rooms.hide(); renderTop.setRooms(roomCount, false); }
     else if (board.isOpen()) { board.hide(); renderTop.setBoard(false); }
+    else if (docs.isOpen()) { docs.hide(); renderTop.setDocs(false); }
   });
 
   store.subscribe(() => {
@@ -82,6 +87,9 @@ async function boot() {
 
   store.connect();
   void rooms.prime();
+  // Deep link: ?file=reports/x.md opens straight into Docs.
+  const deepFile = fileParam(location.search);
+  if (deepFile) { rooms.hide(); board.hide(); renderTop.setRooms(roomCount, false); renderTop.setBoard(false); docs.show(); renderTop.setDocs(true); void docs.openFile(deepFile); }
   // Paint loading/skeleton state immediately.
   store.setQuery('');
   renderTop(store.get()); renderRail(store.get()); center.update(store.get()); activity.update(store.get());

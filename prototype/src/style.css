@@ -572,7 +572,7 @@ button.who-btn:hover { background: color-mix(in srgb, var(--fg) 6%, transparent)
 .rm-st.tool i { background: var(--accent); box-shadow: 0 0 7px var(--accent); animation: pulse 1.1s ease-in-out infinite; }
 .rm-st.waiting i { background: var(--amber); }
 .rm-st.paused i { background: var(--amber); }
-.rm-st.idle { opacity: 0.65; }
+.rm-st.idle i { opacity: 0.55; } /* the dot dims; the text keeps its contrast */
 .rm-banner { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 10px; font-size: 12.5px; border: 1px solid color-mix(in srgb, var(--amber) 40%, transparent); background: color-mix(in srgb, var(--amber) 9%, transparent); }
 .rm-banner.interrupted { border-color: color-mix(in srgb, var(--red) 40%, transparent); background: color-mix(in srgb, var(--red) 8%, transparent); }
 .rm-btxt { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
@@ -663,3 +663,47 @@ button.who-btn:hover { background: color-mix(in srgb, var(--fg) 6%, transparent)
 /* Topbar room for the Board button: icon-only Board/Rooms below 1180px, and the meters give way instead of overlapping the buttons. */
 .meters { overflow: hidden; }
 @media (max-width: 1180px) { .board-btn span, .rooms-btn:not(.board-btn) span { display: none; } }
+
+/* ---------- Docs: read-only Markdown viewer (src/ui/docs.ts); colours come from the theme tokens ---------- */
+#docs { grid-row: 2; grid-column: 1 / -1; z-index: 12; background: var(--bg); border-top: 1px solid var(--line); min-height: 0; overflow: hidden; }
+.dc-wrap { display: grid; grid-template-columns: 300px minmax(0, 1fr); height: 100%; min-height: 0; }
+.dc-list { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); background: var(--bg-1); }
+.dc-lhead { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px 6px 16px; }
+.dc-lhead h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.dc-icon { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; color: var(--muted); border: 1px solid transparent; }
+.dc-icon:hover { color: var(--fg); border-color: var(--line-2); background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.dc-search { display: flex; align-items: center; gap: 7px; margin: 4px 12px 8px; padding: 0 9px; height: 30px; border-radius: 8px; border: 1px solid var(--line-2); color: var(--muted); background: var(--bg); }
+.dc-search:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.dc-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--fg); font: inherit; font-size: 12.5px; }
+.dc-files { flex: 1; min-height: 0; overflow-y: auto; padding: 0 8px 14px; }
+.dc-group h3 { display: flex; justify-content: space-between; align-items: baseline; margin: 12px 8px 4px; font: 600 10.5px var(--mono); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.dc-group h3 b { font-weight: 500; }
+.dc-file { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 7px; text-align: left; color: var(--fg-2); font-size: 12.5px; }
+.dc-file span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dc-file small { flex: none; font-size: 10.5px; color: var(--faint); }
+.dc-file:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); color: var(--fg); }
+.dc-file.on { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--fg); }
+.dc-note { padding: 14px 10px; font-size: 12px; color: var(--muted); }
+.dc-note.err, .dc-empty.err span { color: var(--red); }
+.dc-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.dc-bar { display: flex; align-items: center; gap: 10px; padding: 10px 18px; border-bottom: 1px solid var(--line); }
+.dc-bar .grow { flex: 1; }
+.dc-title { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.dc-title h2 { margin: 0; font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dc-title .muted { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dc-toggle { display: inline-flex; padding: 2px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--bg-1); }
+.dc-toggle button { height: 26px; padding: 0 13px; border-radius: 7px; font-size: 12px; font-weight: 500; color: var(--muted); }
+.dc-toggle button:hover { color: var(--fg); }
+.dc-toggle button[aria-pressed=true] { color: var(--fg); background: color-mix(in srgb, var(--accent) 16%, var(--bg)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent); }
+.dc-scroll { flex: 1; min-height: 0; overflow: auto; padding: 22px 28px 40px; }
+.dc-md { max-width: 82ch; font-size: 14px; line-height: 1.65; }
+.dc-md h1 { font-size: 1.7em; padding-bottom: 0.25em; border-bottom: 1px solid var(--line); }
+.dc-md h2 { font-size: 1.35em; padding-bottom: 0.2em; border-bottom: 1px solid var(--line); }
+.dc-md h3 { font-size: 1.12em; }
+.dc-md ul:has(input[type=checkbox]), .dc-md li:has(> input[type=checkbox]) { list-style: none; }
+.dc-md ul:has(input[type=checkbox]) { padding-left: 0.4em; }
+.dc-raw { margin: 0; max-width: 110ch; font: 12.5px/1.6 var(--mono); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 2; }
+.dc-raw code { font: inherit; background: none; border: 0; padding: 0; }
+.dc-empty { margin: auto; max-width: 360px; display: flex; flex-direction: column; gap: 6px; text-align: center; color: var(--muted); font-size: 12.5px; padding: 40px 20px; }
+.dc-empty b { color: var(--fg); font-size: 14px; }
+@media (max-width: 900px) { .dc-wrap { grid-template-columns: 210px minmax(0, 1fr); } .dc-scroll { padding: 16px; } }

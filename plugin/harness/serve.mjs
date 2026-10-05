@@ -27,7 +27,8 @@ createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://harness");
   if (url.pathname.startsWith("/agent-os/api/")) {
     const method = req.method === "POST" && (url.pathname === "/agent-os/api/send" || /^\/agent-os\/api\/rooms(\/r[0-9a-f]{8}(\/(send|stop|end|continue|wrapup|pin))?)?$/.test(url.pathname)) ? "POST" : "GET";
-    const headers = method === "POST" ? { "content-type": req.headers["content-type"] ?? "", "x-agent-os-send": req.headers["x-agent-os-send"] ?? "" } : {};
+    const docs = method === "GET" && /^\/agent-os\/api\/docs(\/file)?$/.test(url.pathname); // like the plugin proxy: docs reads get the guard header added
+    const headers = method === "POST" ? { "content-type": req.headers["content-type"] ?? "", "x-agent-os-send": req.headers["x-agent-os-send"] ?? "" } : docs ? { "x-agent-os-send": "1" } : {};
     const up = request({ host: "127.0.0.1", port: apiPort, path: url.pathname.slice("/agent-os".length) + url.search, method, headers }, (r) => {
       res.writeHead(r.statusCode ?? 502, { ...cors, "content-type": r.headers["content-type"] ?? "application/json" });
       r.pipe(res);

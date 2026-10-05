@@ -16,7 +16,7 @@ function count(s: ShellState, status: string) {
   return n;
 }
 
-export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds: () => void; onMenu: () => void; onRooms: () => void; onBoard: () => void }) {
+export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds: () => void; onMenu: () => void; onRooms: () => void; onBoard: () => void; onDocs: () => void }) {
   el.innerHTML = `
     <button class="icon-btn menu-btn" title="Teams">${svg('menu', 18)}</button>
     <div class="brand">
@@ -32,6 +32,7 @@ export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds:
     <div class="spacer"></div>
     <button class="rooms-btn board-btn" aria-pressed="false" title="Board: Spark and Forge work in four columns (read-only)">${svg('board', 15)}<span>Board</span></button>
     <button class="rooms-btn" aria-pressed="false" title="Group rooms: chat with several agents in one thread">${svg('users', 15)}<span>Rooms</span><b>0</b></button>
+    <button class="rooms-btn docs-btn" aria-pressed="false" title="Docs: read the workspace's Markdown files, rendered">${svg('docs', 15)}<span>Docs</span></button>
     <button class="hist-btn" aria-pressed="false" title="Show finished, aborted and archived sessions"><span>History</span><b>0</b></button>
     <button class="needs-btn" data-zero="1">${svg('warn', 15)}<span>Needs you</span><span class="dotsep">·</span><b>0</b></button>
     <label class="search">
@@ -56,7 +57,9 @@ export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds:
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); input.focus(); input.select(); }
   });
   needsBtn.addEventListener('click', opts.onNeeds);
-  el.querySelector('.rooms-btn:not(.board-btn)')!.addEventListener('click', opts.onRooms);
+  el.querySelector('.rooms-btn:not(.board-btn):not(.docs-btn)')!.addEventListener('click', opts.onRooms);
+  const docsBtn = el.querySelector<HTMLButtonElement>('.docs-btn')!;
+  docsBtn.addEventListener('click', opts.onDocs);
   const boardBtn = el.querySelector<HTMLButtonElement>('.board-btn')!;
   boardBtn.addEventListener('click', opts.onBoard);
   histBtn.addEventListener('click', () => store.setShowHistory(!store.get().showHistory));
@@ -80,7 +83,7 @@ export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds:
     if (moving) raf = requestAnimationFrame(tween);
   }
 
-  const roomsBtn = el.querySelector<HTMLButtonElement>('.rooms-btn:not(.board-btn)')!;
+  const roomsBtn = el.querySelector<HTMLButtonElement>('.rooms-btn:not(.board-btn):not(.docs-btn)')!;
   const setRooms = (count: number, open: boolean) => {
     roomsBtn.querySelector('b')!.textContent = String(count);
     roomsBtn.setAttribute('aria-pressed', String(open));
@@ -102,6 +105,7 @@ export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds:
     if (s.snapshot.error) { err.textContent = 'Source error'; err.title = s.snapshot.error; }
   };
   const setBoard = (open: boolean) => { boardBtn.setAttribute('aria-pressed', String(open)); boardBtn.classList.toggle('on', open); };
-  return Object.assign(render, { setRooms, setBoard });
+  const setDocs = (open: boolean) => { docsBtn.setAttribute('aria-pressed', String(open)); docsBtn.classList.toggle('on', open); };
+  return Object.assign(render, { setRooms, setBoard, setDocs });
 }
 
