@@ -1,16 +1,24 @@
 // Group rooms: create a room, pick agents from the live list, chat with all of them in one thread.
 // Everything is server-side (persisted rooms, the open discussion run); this view only renders the thread and polls while a discussion is in flight.
 import { installMarkdownHandlers, renderInline, renderMarkdown } from '../../shared/markdown';
-import { MAX_MEMBERS, YOU, roomSessionKey } from '../../shared/rooms';
+import { MAX_MEMBERS, YOU, handoffsOf, roomSessionKey, totalTokens, type PauseInfo, type RoomUsage } from '../../shared/rooms';
 import { createRoomsApi, type RoomAgent, type RoomSummary, type RoomView } from '../rooms-api';
 import type { HostBridge } from '../hostbridge';
 import type { ShellStore } from '../store';
-import { avatarHtml, avatarHue, esc, fmtHM, svg } from './format';
+import { avatarHtml, avatarHue, esc, fmtHM, fmtK, svg } from './format';
 
 const POLL_RUNNING_MS = 1200;
 const POLL_IDLE_MS = 5000;
 
 type Mode = { t: 'empty' } | { t: 'create' } | { t: 'room'; id: string };
+
+const MODE_LABEL = { everyone: 'Everyone', mentions: 'Mentions only', lead: 'Lead first' } as const;
+const MODE_HINT = 'Who answers a message that does not @mention anyone: everyone talks it through; only @mentioned agents answer; or the lead answers first and others join when @mentioned or handed a point.';
+const PAUSE_TITLE: Record<PauseInfo['reason'], string> = { posts: 'Paused to check in', tokens: 'Paused at the token ceiling', repeat: 'Paused: an agent repeated itself', ring: 'Paused: a hand-off loop' };
+const money = (n: number) => `$${n.toFixed(n < 1 ? 3 : 2)}`;
+const secs = (since: number) => { const s = Math.max(0, Math.round((Date.now() - since) / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`; };
+const clipTxt = (t: string, n: number) => (t.length > n ? `${t.slice(0, n - 1).trimEnd()}…` : t);
+const usageLine = (u: RoomUsage | undefined, label: string) => u?.turns ? `${label}: ${u.turns} turns, ${totalTokens(u).toLocaleString('en-US')} tokens${u.estimated ? ' (partly estimated)' : ''}${u.costUsd ? `, ${money(u.costUsd)}` : ''}` : '';
 
 export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: number) => void, host?: HostBridge) {
   const api = createRoomsApi(store.source);
@@ -23,6 +31,9 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
   let renaming = false;
   let adding = false;
   let menuOpen = false;
+  let notesOpen = false;
+  let settingsOpen = false;
+  let notesDraft: string | null = null;
   let notice = '';
   let draft = '';
   const picked = new Set<string>();
@@ -54,7 +65,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
   function schedule() {
     clearTimeout(timer);
     if (!open) return;
-    timer = window.setTimeout(refresh, view?.run?.status === 'running' ? POLL_RUNNING_MS : POLL_IDLE_MS);
+    timer = window.setTimeout(refresh, view?.run?.status === 'running' || view?.run?.status === 'paused' ? POLL_RUNNING_MS : POLL_IDLE_MS);
   }
 
   function paintList() {
@@ -96,21 +107,67 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     if (!view) { mainEl.innerHTML = '<div class="rm-blank"><span>Loading…</span></div>'; return; }
     const { room, run } = view;
     const running = run?.status === 'running';
+    const paused = run?.status === 'paused';
+    const live = running || paused; // the room is busy: no member edits; Zach's messages are queued (or wake a pause)
+    const canWrite = !room.archived && room.members.length > 0;
     const nonMembers = agents.filter((a) => !room.members.includes(a.id));
+    const hand = handoffsOf(room.messages, view.members.map((m) => ({ id: m.id, name: m.name })));
     const msgs = room.messages.map((m) => {
       if (m.from === 'system') return `<div class="rm-sys">${esc(m.text)}</div>`;
       const w = who(m.from);
-      return `<div class="rm-msg${m.from === YOU ? ' me' : ''}">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b><time>${fmtHM(m.ts)}</time></div><div class="rm-text md">${mentionize(m.text, room)}</div></div></div>`;
+      const h = hand.get(m.id);
+      const handHtml = h ? `<div class="rm-hand" title="${esc(w.name)} handed this to ${esc(h.to.map((id) => agentOf(id).name).join(', '))} (hop ${h.hop})"><span class="rm-harrow">${svg('arrowRight', 12)}</span>${h.to.map((id) => `<span class="rm-hchip">${avatarHtml(id, agentOf(id).name, agentOf(id).emoji, 'sm')}${esc(agentOf(id).name)}</span>`).join('')}<small>hop ${h.hop}</small></div>` : '';
+      const pin = m.queued ? '' : `<button class="rm-pin${m.pinned ? ' on' : ''}" data-pin="${esc(m.id)}" title="${m.pinned ? 'Unpin this decision' : 'Pin as a decision: every agent sees it'}" aria-label="${m.pinned ? 'Unpin' : 'Pin as a decision'}" aria-pressed="${!!m.pinned}">${svg('pin', 12)}</button>`;
+      return `<div class="rm-msg${m.from === YOU ? ' me' : ''}${m.queued ? ' queued' : ''}${m.pinned ? ' pinned' : ''}" data-msg="${esc(m.id)}">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b>${m.queued ? '<small class="rm-q" title="Written while the agents were talking: it joins at the next round">queued</small>' : ''}${m.pinned ? '<small class="rm-pinned">decision</small>' : ''}<time>${fmtHM(m.ts)}</time>${pin}</div><div class="rm-text md">${mentionize(m.text, room)}</div>${handHtml}</div></div>`;
     }).join('');
     // Agents with a turn in flight show as typing bubbles at the end of the thread, like a group chat.
-    const typing = (run?.status === 'running' ? run.active ?? [] : []).map((id) => {
+    const typing = (running ? run?.active ?? [] : []).map((id) => {
       const w = who(id);
       return `<div class="rm-msg pending" data-typing="${esc(id)}">${w.html}<div class="rm-body"><div class="rm-meta"><b>${esc(w.name)}</b></div><div class="rm-text muted"><span class="rm-typing"><i></i><i></i><i></i></span></div></div></div>`;
     }).join('');
     const names = (run?.active ?? []).map((id) => agentOf(id).name);
     const status = running
-      ? `<span class="rm-typing"><i></i>${names.length ? `${esc(names.slice(0, 3).join(', '))}${names.length > 3 ? ` +${names.length - 3}` : ''} ${names.length === 1 ? 'is' : 'are'} typing…` : 'Discussion in progress…'}</span><button class="rm-ghost" data-act="stop">Stop</button>`
+      ? `<span class="rm-typing"><i></i>${names.length ? `${esc(names.slice(0, 3).join(', '))}${names.length > 3 ? ` +${names.length - 3}` : ''} ${names.length === 1 ? 'is' : 'are'} typing…` : 'Discussion in progress…'}</span><button class="rm-ghost" data-act="end" title="Let the replies in flight land, then finish. Nothing new starts.">End now</button><button class="rm-ghost" data-act="stop" title="Abort every agent run right away">Stop</button>`
       : '';
+    const pauseBanner = paused && run?.pause
+      ? `<div class="rm-banner pause" role="status"><span class="rm-btxt"><b>${svg('pause', 13)} ${esc(PAUSE_TITLE[run.pause.reason])}</b><small>${esc(run.pause.detail)}. Nothing is capped: Continue picks the discussion up where it left off, or write a message to steer it.</small></span><button class="rm-primary sm" data-act="resume">Continue</button><button class="rm-ghost sm" data-act="end" title="Finish now without another round">End now</button><button class="rm-ghost sm" data-act="stop">Stop</button></div>`
+      : run?.status === 'interrupted'
+        ? `<div class="rm-banner interrupted" role="status"><span class="rm-btxt"><b>${svg('warn', 13)} Interrupted by a restart</b><small>The last discussion was cut off and is not replayed (its tools may already have run). Send a message to start again.</small></span></div>`
+        : '';
+    const acts = new Map((run?.activity ?? []).map((a) => [a.id, a]));
+    const stateText = (id: string) => {
+      const a = acts.get(id);
+      if (paused) return ['paused', 'paused'];
+      if (!a) return ['idle', 'idle'];
+      if (a.state === 'tool') return ['tool', `using ${esc(a.tool ?? 'a tool')} · ${secs(a.since)}`];
+      if (a.state === 'waiting') return ['waiting', `waiting on ${esc((a.waitingOn ?? []).map((w) => agentOf(w).name).join(', ') || 'the others')}`];
+      return ['thinking', `thinking · ${secs(a.since)}`];
+    };
+    const strip = live
+      ? `<div class="rm-strip" aria-label="What each agent is doing">${view.members.map((a) => { const [st, txt] = stateText(a.id); return `<span class="rm-st ${st}" data-state="${st}"><i></i><b>${esc(a.name)}</b><small>${txt}</small></span>`; }).join('')}</div>`
+      : '';
+    const u = run?.usage?.turns ? run.usage : undefined;
+    const usageChip = u || room.usage?.turns
+      ? `<span class="rm-usage${run?.usage?.estimated ? ' est' : ''}" data-usage title="${esc([usageLine(run?.usage, 'This discussion'), usageLine(room.usage, 'Whole room'), run?.lastSpeaker ? `Last speaker: ${agentOf(run.lastSpeaker).name}` : '', run?.filtered ? `Speak filter saved ${run.filtered} turn${run.filtered === 1 ? '' : 's'}` : ''].filter(Boolean).join('\n'))}">${svg('chat', 12)}<span>${u ? `${u.turns} turn${u.turns === 1 ? '' : 's'} · ${u.estimated ? '~' : ''}${fmtK(totalTokens(u))} tok${u.costUsd ? ` · ${u.estimated ? '~' : ''}${money(u.costUsd)}` : ''}` : `${room.usage!.turns} turns total`}${run?.lastSpeaker ? ` · last: ${esc(agentOf(run.lastSpeaker).name)}` : ''}${run?.filtered ? ` · ${run.filtered} skipped` : ''}</span></span>`
+      : '';
+    const pinned = room.messages.filter((m) => m.pinned && m.from !== 'system');
+    const notesText = notesDraft ?? room.notes ?? '';
+    const notesPanel = notesOpen
+      ? `<div class="rm-notes">
+          <div class="rm-note-col"><label class="rm-field"><span>Shared notes <small data-notes-count>${notesText.length}/4000 · every agent reads these each turn</small></span><textarea class="rm-notes-in" maxlength="4000" rows="5" placeholder="Goals, constraints, names, anything every agent should keep in mind…" aria-label="Shared room notes">${esc(notesText)}</textarea></label><div class="rm-actions"><button class="rm-primary sm" data-act="notes-save" ${notesDraft === null || notesDraft === (room.notes ?? '') ? 'disabled' : ''}>Save notes</button><button class="rm-ghost sm" data-act="notes-close">Close</button></div></div>
+          <div class="rm-note-col"><div class="rm-field"><span>Decisions <small>${pinned.length} pinned · every agent reads these too</small></span>${pinned.length ? `<ul class="rm-decisions">${pinned.map((m) => `<li><b>${esc(who(m.from).name)}</b><span>${esc(clipTxt(m.text.replace(/\s+/g, ' '), 220))}</span><button data-pin="${esc(m.id)}" title="Unpin" aria-label="Unpin">${svg('close', 11)}</button></li>`).join('')}</ul>` : '<div class="rm-none">Nothing pinned yet. Use the pin on a message to keep it here.</div>'}</div></div>
+        </div>`
+      : '';
+    const settingsPanel = settingsOpen
+      ? `<div class="rm-settings">
+          <label class="rm-set"><span>Pause after</span><input class="rm-set-in" type="number" min="0" max="500" data-set="pauseAfterPosts" value="${room.pauseAfterPosts ?? 24}" aria-label="Pause after this many replies"/><span>replies since you last wrote <small>0 = never pause on count</small></span></label>
+          <label class="rm-set"><span>or after</span><input class="rm-set-in" type="number" min="0" step="1000" data-set="pauseAfterTokens" value="${room.pauseAfterTokens ?? 0}" aria-label="Pause after this many tokens"/><span>tokens <small>0 = off</small></span></label>
+          <label class="rm-set check"><input type="checkbox" data-setbool="speakFilter" ${room.speakFilter ? 'checked' : ''}/><span>Skip turns with nothing to add <small>a small model decides who speaks in later rounds. Off by default; if it fails, everyone speaks.</small></span></label>
+          <div class="rm-hint">A pause is soft: the discussion waits for you and never stops by itself. Repeats and hand-off loops pause it too.</div>
+          <div class="rm-actions"><button class="rm-ghost sm" data-act="settings-close">Close</button></div>
+        </div>`
+      : '';
+    const placeholder = room.archived ? 'Archived room' : running ? 'Queue a message: it joins the discussion at the next round…' : paused ? 'Write to the room: this also resumes the discussion…' : 'Message the room… (@name to address one agent)';
     // The repaint below replaces the whole thread element, which resets scrollTop to 0: read where the user is first.
     const prevTh = mainEl.querySelector<HTMLElement>('.rm-thread');
     let keepTop = 0;
@@ -120,9 +177,16 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
         ${renaming ? `<input class="rm-rename" maxlength="60" value="${esc(room.name)}" aria-label="Room name"/><button class="rm-primary sm" data-act="rename-ok">Save</button><button class="rm-ghost sm" data-act="rename-cancel">Cancel</button>`
           : `<h3>${esc(room.name)}${room.archived ? ' <small class="rm-tag">archived</small>' : ''}</h3>`}
         <span class="grow"></span>
+        ${usageChip}
         <div class="rm-tools">
           <button class="rm-tool${menuOpen ? ' on' : ''}" data-act="more" title="More" aria-label="More" aria-haspopup="menu" aria-expanded="${menuOpen}">${svg('more', 16)}</button>
           ${menuOpen ? `<div class="rm-menu" role="menu">
+            <button role="menuitem" data-act="notes-toggle">Notes &amp; decisions${pinned.length ? ` (${pinned.length})` : ''}</button>
+            <button role="menuitem" data-act="settings-toggle">Room settings</button>
+            <i class="rm-sep" role="separator"></i>
+            <button role="menuitem" data-act="wrapup" ${!canWrite || !room.captain ? 'disabled' : ''} title="Posts a normal message asking the lead to summarize where the discussion landed">Ask lead to summarize</button>
+            <button role="menuitem" data-act="end" ${live ? '' : 'disabled'} title="Let replies in flight land, then finish. Nothing new starts.">End discussion now</button>
+            <i class="rm-sep" role="separator"></i>
             <button role="menuitem" data-act="rename">Rename room</button>
             <button role="menuitem" data-act="archive">${room.archived ? 'Restore room' : 'Archive room'}</button>
             ${host?.has('open-session') && room.captain ? `<i class="rm-sep" role="separator"></i><button role="menuitem" data-act="open-captain" title="Open ${esc(agentOf(room.captain).name)}'s room session in the Control UI chat">${svg('chat', 14)}<span>Open lead's chat</span></button>` : ''}
@@ -130,19 +194,25 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
         </div>
       </header>
       <div class="rm-members">
-        ${view.members.map((a) => `<span class="rm-chip${a.id === room.captain ? ' captain' : ''}" title="${a.id === room.captain ? 'Lead: moderates the discussion' : ''}">${avatarHtml(a.id, a.name, a.emoji, 'sm')}<span>${esc(a.name)}</span>${a.id === room.captain && view!.members.length > 1 ? '<small class="rm-cap">lead</small>' : ''}<button data-remove="${esc(a.id)}" title="Remove ${esc(a.name)}" aria-label="Remove ${esc(a.name)}" ${running ? 'disabled' : ''}>${svg('close', 12)}</button></span>`).join('') || '<span class="muted">No agents in this room.</span>'}
-        ${room.members.length < MAX_MEMBERS && nonMembers.length ? `<button class="rm-add" data-act="add-toggle" ${running ? 'disabled' : ''}>${svg('plus', 12)}<span>Add agent</span></button>` : ''}
+        ${view.members.map((a) => `<span class="rm-chip${a.id === room.captain ? ' captain' : ''}" title="${a.id === room.captain ? 'Lead: moderates the discussion' : ''}">${avatarHtml(a.id, a.name, a.emoji, 'sm')}<span>${esc(a.name)}</span>${a.id === room.captain && view!.members.length > 1 ? '<small class="rm-cap">lead</small>' : ''}<button data-remove="${esc(a.id)}" title="Remove ${esc(a.name)}" aria-label="Remove ${esc(a.name)}" ${live ? 'disabled' : ''}>${svg('close', 12)}</button></span>`).join('') || '<span class="muted">No agents in this room.</span>'}
+        ${room.members.length < MAX_MEMBERS && nonMembers.length ? `<button class="rm-add" data-act="add-toggle" ${live ? 'disabled' : ''}>${svg('plus', 12)}<span>Add agent</span></button>` : ''}
         <span class="grow"></span>
+        <span class="rm-limits" title="${esc(MODE_HINT)}">
+          answers <select data-set="responderMode" class="wide" aria-label="Who answers a message with no @mention">${(Object.keys(MODE_LABEL) as Array<keyof typeof MODE_LABEL>).map((k) => `<option value="${k}" ${(room.responderMode ?? 'everyone') === k ? 'selected' : ''}>${MODE_LABEL[k]}</option>`).join('')}</select></span>
         <span class="rm-limits" title="The lead moderates the discussion. An @mention in your message goes straight to that agent.">
-          lead <select data-set="captain" class="wide" aria-label="Discussion lead" ${running ? 'disabled' : ''}>${view.members.map((a) => `<option value="${esc(a.id)}" ${a.id === room.captain ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></span>
+          lead <select data-set="captain" class="wide" aria-label="Discussion lead" ${live ? 'disabled' : ''}>${view.members.map((a) => `<option value="${esc(a.id)}" ${a.id === room.captain ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></span>
       </div>
+      ${strip}
+      ${settingsPanel}
+      ${notesPanel}
       ${adding ? `<div class="rm-addbox">${agentPicker(new Set(), room.members, 'data-addpick')}<div class="rm-actions"><button class="rm-ghost sm" data-act="add-close">Done</button></div></div>` : ''}
       <div class="rm-thread" tabindex="0">${msgs || typing ? msgs + typing : '<div class="rm-blank small"><span>No messages yet. Ask something: every agent replies and they talk it through together until nobody has more to add. <span class="rm-at">@name</span> goes straight to just that agent.</span></div>'}</div>
       <footer class="rm-compose">
+        ${pauseBanner}
         <div class="rm-status">${status}</div>
         <div class="rm-mentions">${view.members.map((a) => `<button class="rm-mention" data-mention="${esc(a.id)}">@${esc(a.id)}</button>`).join('')}</div>
-        <div class="rm-row2"><textarea rows="1" maxlength="4000" placeholder="${room.archived ? 'Archived room' : running ? 'Agents are answering…' : 'Message the room… (@name to address one agent)'}" ${room.archived || running || !room.members.length ? 'disabled' : ''} aria-label="Message the room">${esc(draft)}</textarea>
-          <button class="cmp-send rm-send" data-act="send" ${room.archived || running || !room.members.length ? 'disabled' : ''}>${svg('send', 15)}<span>Send</span></button></div>
+        <div class="rm-row2"><textarea rows="1" maxlength="4000" placeholder="${placeholder}" ${canWrite ? '' : 'disabled'} aria-label="Message the room">${esc(draft)}</textarea>
+          <button class="cmp-send rm-send" data-act="send" ${canWrite ? '' : 'disabled'}>${svg('send', 15)}<span>${running ? 'Queue' : 'Send'}</span></button></div>
         <div class="cmp-status ${notice ? 'err' : ''}" role="status">${esc(notice)}</div>
       </footer>`;
     const th = mainEl.querySelector<HTMLElement>('.rm-thread')!;
@@ -152,7 +222,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     box?.addEventListener('input', () => { draft = box.value; (mainEl.querySelector<HTMLButtonElement>('[data-act=send]')!).disabled = !draft.trim(); });
     if (box && focusBox) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
     const sendBtn = mainEl.querySelector<HTMLButtonElement>('[data-act=send]');
-    if (sendBtn && !room.archived && !running) sendBtn.disabled = !draft.trim();
+    if (sendBtn && canWrite) sendBtn.disabled = !draft.trim();
   }
   let stick = true;
   let focusBox = false;
@@ -163,6 +233,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     const typing = active && el.contains(active) && (active.matches('textarea, input[type=text], .rm-name-in, .rm-rename') || active.matches('input:not([type=checkbox])'));
     paintList();
     if (typing && mode.t !== 'room') return;
+    if (typing && active.matches('.rm-notes-in, .rm-set-in')) return; // a poll must not eat what is being typed in the notes or a limit field
     if (typing && mode.t === 'room' && active.matches('textarea')) { patchThread(); return; }
     if (typing && active.matches('.rm-rename, .rm-name-in')) return;
     focusBox = false;
@@ -191,9 +262,16 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
   el.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
     const roomBtn = t.closest<HTMLElement>('[data-room]');
-    if (roomBtn) { mode = { t: 'room', id: roomBtn.dataset.room! }; view = null; renaming = adding = false; notice = ''; draft = ''; stick = true; void refresh(); return; }
+    if (roomBtn) { mode = { t: 'room', id: roomBtn.dataset.room! }; view = null; renaming = adding = notesOpen = settingsOpen = false; notesDraft = null; notice = ''; draft = ''; stick = true; void refresh(); return; }
     const rm = t.closest<HTMLElement>('[data-remove]');
     if (rm && mode.t === 'room') { const id = mode.id; void act(() => api.update(id, { removeMembers: [rm.dataset.remove] })); return; }
+    const pin = t.closest<HTMLElement>('[data-pin]');
+    if (pin && mode.t === 'room') {
+      const id = mode.id, mid = pin.dataset.pin!;
+      const on = !view?.room.messages.find((m) => m.id === mid)?.pinned;
+      void act(() => api.pin(id, mid, on));
+      return;
+    }
     const mention = t.closest<HTMLElement>('[data-mention]');
     if (mention) { draft = `${draft}${draft && !/\s$/.test(draft) ? ' ' : ''}@${mention.dataset.mention} `; focusBox = true; paintMain(); return; }
     const a = t.closest<HTMLElement>('[data-act]')?.dataset.act;
@@ -224,6 +302,14 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
       case 'add-toggle': adding = !adding; paintMain(); break;
       case 'add-close': adding = false; paintMain(); break;
       case 'stop': void act(() => api.stop(id)); break;
+      case 'end': void act(() => api.end(id)); break;
+      case 'resume': void act(() => api.resume(id)); break;
+      case 'wrapup': void act(() => api.wrapUp(id)); break;
+      case 'notes-toggle': notesOpen = !notesOpen; notesDraft = null; paintMain(); break;
+      case 'notes-close': notesOpen = false; notesDraft = null; paintMain(); break;
+      case 'notes-save': { const text = notesDraft ?? ''; void act(() => api.update(id, { notes: text }), () => { notesDraft = null; }); break; }
+      case 'settings-toggle': settingsOpen = !settingsOpen; paintMain(); break;
+      case 'settings-close': settingsOpen = false; paintMain(); break;
       case 'send': void submit(); break;
     }
   });
@@ -239,6 +325,10 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     } else if (t.matches('[data-addpick]') && mode.t === 'room') {
       const id = mode.id;
       void act(() => api.update(id, { addMembers: [(t as HTMLInputElement).dataset.addpick] }));
+    } else if (t.matches('[data-setbool]') && mode.t === 'room') {
+      const id = mode.id;
+      const key = (t as HTMLElement).dataset.setbool!;
+      void act(() => api.update(id, { [key]: (t as HTMLInputElement).checked }));
     } else if (t.matches('[data-set]') && mode.t === 'room') {
       const id = mode.id;
       const key = (t as HTMLElement).dataset.set!;
@@ -247,6 +337,12 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
   });
   el.addEventListener('input', (e) => {
     const t = e.target as HTMLInputElement;
+    if (t.matches('.rm-notes-in')) {
+      notesDraft = t.value;
+      el.querySelector('[data-notes-count]')!.textContent = `${t.value.length}/4000 · every agent reads these each turn`;
+      const save = el.querySelector<HTMLButtonElement>('[data-act=notes-save]');
+      if (save) save.disabled = t.value === (view?.room.notes ?? '');
+    }
     if (t.matches('.rm-name-in')) { createName = t.value; el.querySelector<HTMLButtonElement>('[data-act=create]')!.disabled = !(picked.size && createName.trim()); }
   });
   el.addEventListener('keydown', (e) => {

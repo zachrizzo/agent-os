@@ -26,11 +26,11 @@ async function open(host?: Parameters<typeof mountRooms>[3], id = 'a') {
   return { el, rooms };
 }
 
-test('without host actions the menu holds only the room actions', async () => {
+test('without host actions the menu holds only the room actions (notes, settings, wrap up, end, rename, archive)', async () => {
   const { el, rooms } = await open(undefined, 'a');
   el.querySelector<HTMLElement>('[data-act=more]')!.click();
   const items = [...el.querySelectorAll('.rm-menu [role=menuitem]')].map((b) => b.textContent!.trim());
-  assert.deepEqual(items, ['Rename room', 'Archive room']);
+  assert.deepEqual(items, ['Notes & decisions', 'Room settings', 'Ask lead to summarize', 'End discussion now', 'Rename room', 'Archive room']);
   rooms.hide();
 });
 
