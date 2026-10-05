@@ -252,7 +252,8 @@ export function createMockSource(): Source {
       return JSON.stringify({ speak: cands.filter((id) => new RegExp(`@${id}\\b`).test(disc)) });
     },
   };
-  const rooms = createRoomsService({ gateway }); // in-memory: mock mode never writes the real rooms file
+  // In-memory by default: mock mode never touches the real rooms file. AGENT_OS_MOCK_ROOMS_FILE (a throwaway path, for the restart proof) opts in to persistence.
+  const rooms = createRoomsService({ gateway, ...(process.env.AGENT_OS_MOCK_ROOMS_FILE ? { file: process.env.AGENT_OS_MOCK_ROOMS_FILE } : {}) });
 
   return {
     rooms,

@@ -116,8 +116,13 @@ try {
   const turnsSince = async (n) => (await stubStats()).slice(n).filter((s) => s.room && !s.judge);
   const mark = async () => (await stubStats()).length;
 
+  const only = process.env.PROOF_ONLY ? process.env.PROOF_ONLY.split(",") : null; // e.g. PROOF_ONLY=9,10,8 re-runs just those items
+  const want = (k) => !only || only.includes(k);
+  let m0 = 0;
+  let agentsAsked = [];
   // ---- #2 usage chip (+ #7 hand-off chip): a plain message, everyone answers, a second round builds on a member
-  let m0 = await mark();
+  if (want("2")) {
+  m0 = await mark();
   await sendAndSettle("Status check please");
   const v1 = await view();
   const chip = await ui("[data-usage]").first().innerText();
@@ -130,13 +135,15 @@ try {
   const handTxt = hands ? (await ui(".rm-hand").first().innerText()).replace(/\s+/g, " ") : "";
   check("#7 a reply that @mentions a member shows an 'A → B' hand-off chip with its hop", hands >= 1 && /hop 1/i.test(handTxt), handTxt);
   await shot("v2-1-usage-chip-and-handoff.png");
+  }
 
   // ---- #3 responder modes
+  if (want("3")) {
   await ui("[data-set=responderMode]").selectOption("lead");
   await wait(async () => (await view()).room.responderMode === "lead", "mode saved");
   m0 = await mark();
   await sendAndSettle("Where do we stand?");
-  let agentsAsked = [...new Set((await turnsSince(m0)).map((t) => t.agent))];
+  agentsAsked = [...new Set((await turnsSince(m0)).map((t) => t.agent))];
   check("#3 lead-first: an unaddressed message is answered by the lead alone", agentsAsked.join(",") === "alpha", agentsAsked.join(","));
   await ui("[data-set=responderMode]").selectOption("mentions");
   await wait(async () => (await view()).room.responderMode === "mentions", "mode saved");
@@ -152,8 +159,10 @@ try {
   check("#3 mentions-only: an @mention is answered by that agent only", agentsAsked.join(",") === "bravo", agentsAsked.join(","));
   await ui("[data-set=responderMode]").selectOption("everyone");
   await wait(async () => (await view()).room.responderMode === "everyone", "mode saved");
+  }
 
   // ---- #1 soft pause with Continue (and #6 participants strip while it runs)
+  if (want("1")) {
   await openPanel("settings-toggle", "[data-set=pauseAfterPosts]");
   await ui("[data-set=pauseAfterPosts]").fill("3");
   await ui("[data-set=pauseAfterPosts]").press("Tab");
@@ -188,8 +197,10 @@ try {
   await ui("[data-set=pauseAfterPosts]").fill("0");
   await ui("[data-set=pauseAfterPosts]").press("Tab");
   await wait(async () => (await view()).room.pauseAfterPosts === 0, "limit off");
+  }
 
   // ---- #4 follow-up queue
+  if (want("4")) {
   m0 = await mark();
   await type("Quick poll [[delay:bravo=5000]]");
   await untilStatus("running");
@@ -206,8 +217,10 @@ try {
   check("#4 it joined at a round boundary: flag cleared, still one run", !done.room.messages.some((m) => m.queued) && done.run.status === "done");
   const hbQ = roomHist("bravo", ID).messages.filter((m) => m.role === "user").map(textOf);
   check("#4 the agents were shown it (later round) and told to answer it, but round 1 did not contain it", hbQ.some((t) => /It is round [2-9]\./.test(t) && /You: Also: what about cost\?/.test(t) && /Zach has posted again/.test(t)) && !hbQ.some((t) => /It is round 1\./.test(t) && /what about cost/.test(t) && /Quick poll/.test(t) === false && false));
+  }
 
   // ---- #5 notes + pinned decisions
+  if (want("5")) {
   await openPanel("notes-toggle", ".rm-notes-in");
   await ui(".rm-notes-in").fill("Budget is 5k. Never touch prod.");
   await ui("[data-act=notes-save]").click();
@@ -222,8 +235,10 @@ try {
   const ha = roomHist("alpha", ID).messages.filter((m) => m.role === "user").map(textOf).at(-1) ?? "";
   const lastPrompts = roomHist("alpha", ID).messages.filter((m) => m.role === "user").map(textOf);
   check("#5 every agent turn quotes the room notes and the pinned decision", lastPrompts.slice(-2).every((t) => /Room notes \(kept by Zach\):\nBudget is 5k\. Never touch prod\./.test(t) && /Pinned decisions:\n- /.test(t)), ha.slice(0, 80));
+  }
 
   // ---- #9 speak filter (opt-in; off so far: no judge call has happened)
+  if (want("9")) {
   check("#9 off by default: no judge request was made so far", !(await stubStats()).some((s) => s.judge));
   await openPanel("settings-toggle", "[data-setbool=speakFilter]");
   await ui("[data-setbool=speakFilter]").check();
@@ -243,8 +258,10 @@ try {
   await openPanel("settings-toggle", "[data-setbool=speakFilter]"); // turn it back off
   await ui("[data-setbool=speakFilter]").uncheck();
   await wait(async () => (await view()).room.speakFilter === false, "filter off");
+  }
 
   // ---- #10 wrap up + End now
+  if (want("10")) {
   m0 = await mark();
   await ui(".rm-tool").click();
   await ui("[data-act=wrapup]").click();
@@ -264,8 +281,10 @@ try {
   check("#10 End now: in-flight replies landed, no second round started, stop reason 'ended', nothing aborted", ev.run.stopReason === "ended" && ev.run.status === "done" && [...rounds].every((r) => r === 1), `${ev.run.stopReason} rounds=${[...rounds]}`);
   check("#10 End now never aborted a Gateway run", !(await stubStats()).slice(m0).some((s) => s.aborted));
   await shot("v2-8-end-now-and-wrapup.png");
+  }
 
   // ---- #8 interrupted run after a data-server restart (never replayed)
+  if (want("8")) {
   await type("Restart test [[delay:bravo=7000]]");
   await untilStatus("running");
   await sleep(500);
@@ -297,6 +316,8 @@ try {
   await sleep(1500);
   const finalRun = await view();
   check("a new message after the restart starts a fresh run normally", (await (async () => { await type("back again"); await wait(async () => (await status()) === "running" || (await status()) === "done", "fresh run"); await idleRun(); return (await status()) === "done"; })()));
+  }
+
   check("no page errors", errors.length === 0, errors.join("; "));
   await browser.close();
 } catch (e) {
