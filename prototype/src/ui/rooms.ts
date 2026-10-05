@@ -218,7 +218,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     const th = mainEl.querySelector<HTMLElement>('.rm-thread')!;
     th.scrollTop = stick ? th.scrollHeight : keepTop; // follow new messages only when already near the bottom; otherwise stay put
     th.addEventListener('scroll', () => { stick = th.scrollTop + th.clientHeight >= th.scrollHeight - 40; });
-    const box = mainEl.querySelector('textarea');
+    const box = mainEl.querySelector<HTMLTextAreaElement>('.rm-compose textarea');
     box?.addEventListener('input', () => { draft = box.value; (mainEl.querySelector<HTMLButtonElement>('[data-act=send]')!).disabled = !draft.trim(); });
     if (box && focusBox) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
     const sendBtn = mainEl.querySelector<HTMLButtonElement>('[data-act=send]');
@@ -241,10 +241,10 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
   }
   /** While the composer has focus, rebuild around it and put the caret back, so a poll never eats typing. */
   function patchThread() {
-    const box = mainEl.querySelector('textarea');
+    const box = mainEl.querySelector<HTMLTextAreaElement>('.rm-compose textarea');
     if (box) draft = box.value;
     paintMain();
-    const nb = mainEl.querySelector('textarea');
+    const nb = mainEl.querySelector<HTMLTextAreaElement>('.rm-compose textarea');
     if (nb) { nb.focus(); nb.setSelectionRange(nb.value.length, nb.value.length); }
   }
 
@@ -355,7 +355,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
 
   async function submit() {
     if (mode.t !== 'room') return;
-    const box = mainEl.querySelector('textarea');
+    const box = mainEl.querySelector<HTMLTextAreaElement>('.rm-compose textarea');
     const text = (box?.value ?? draft).trim();
     if (!text || busy) return;
     const id = mode.id;

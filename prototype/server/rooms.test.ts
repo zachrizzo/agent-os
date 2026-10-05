@@ -406,3 +406,22 @@ test('speak filter via the service: opt-in, uses the gateway judge when present;
   assert.equal(rounds(base.log), 3, 'fails open');
   svc.close();
 });
+
+test('two sends in the same tick start one run (the second is queued); the run is on disk the moment it starts', async () => {
+  const dir = tmp();
+  const file = join(dir, 'rooms.json');
+  const fg = fakeGateway({ 'rfc-lead': 80, 'rfc-skeptic': 80 });
+  const svc = createRoomsService({ gateway: fg.gw, file });
+  const { room } = await svc.create({ name: 'R', members: ['rfc-lead', 'rfc-skeptic'] });
+  const [a, b] = await Promise.all([svc.send(room.id, 'one'), svc.send(room.id, 'two')]);
+  assert.equal(a.run?.status, 'running');
+  assert.equal(b.room.messages.filter((m) => m.from === 'you' && m.queued).length, 1, 'the second message was queued behind the first run');
+  const onDisk = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(onDisk.runs[room.id].status, 'running', 'persisted before any agent replied');
+  await svc.idle(room.id);
+  assert.equal(new Set(fg.log.filter((l) => l.round === 1).map((l) => l.agent)).size, 2);
+  const v = await svc.get(room.id);
+  assert.ok(!v.room.messages.some((m) => m.queued));
+  assert.equal(v.run?.status, 'done');
+  svc.close(); rmSync(dir, { recursive: true });
+});

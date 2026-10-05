@@ -67,6 +67,25 @@ A message that `@`mentions members is a direct question: only they reply, and re
 
 Not token streaming: the Gateway path waits for each agent's run to finish, so a reply appears as a whole bubble when that agent is done (typing bubbles show who is still working).
 
+## Rooms v2 (soft pause, queue, usage, modes, notes, hand-offs)
+
+Still no cap: nothing below stops a discussion by itself. A long run **pauses** and waits for Zach.
+
+- **Soft pause + Continue.** After `pauseAfterPosts` bot replies (default 24; 0 = off) or `pauseAfterTokens` tokens (default 0 = off) since Zach last wrote, or when a member repeats itself (near-identical to its own earlier reply) or members hand a point round a ring (A→B→C→A for 3 laps), the run holds (`status: paused`, `pause.reason` posts/tokens/repeat/ring). The composer banner offers **Continue**, **End now** and **Stop**; writing a message also releases it. Pauses are counted from Zach's last message or the last Continue. Logic: `runDiscussion`, `detectLoop` in `shared/rooms.ts`.
+- **Usage chip.** Per run and per room: turns, tokens, cost, last speaker. Tokens/cost come from the assistant messages in `chat.history` (`shared/turn-usage.ts`, tolerant of several field spellings); a turn with none is estimated (~4 chars/token) and the chip shows `~`.
+- **Responder modes** (header select, `responderMode`): *Everyone* (default: an unaddressed message goes to all), *Mentions only* (nobody answers until an `@mention`/`@all`; the room says so), *Lead first* (the lead answers alone; others join when `@mentioned` or handed a point). `@mentions` still address members directly in every mode.
+- **Follow-up queue.** A message sent while a discussion runs is stored flagged `queued` (shown dashed, hidden from the agents), joins at the next round boundary (agents are told Zach posted again), and resets the pause counters. At most 5 queued; Stop or End now drops them with a note.
+- **Notes and decisions.** ⋯ → *Notes & decisions*: shared notes (4000 chars) and pinned messages (pin icon on a bubble, max 20) are quoted to every member on every turn, and pinned messages survive the 400-message transcript cap. Only Zach writes them (no control tags).
+- **Participants strip.** While a run is active each member shows thinking / using `<tool>` / waiting on `<names>` / idle with a timer. The tool name is read from the transcript while the Gateway run is active (an assistant tool call with no result yet); it degrades to "thinking" when none is visible.
+- **Hand-off chips.** A reply that `@mentions` members shows `→ Member` chips with a hop count (1 = first hand-off after Zach spoke). Derived from the thread (`handoffsOf`), nothing stored.
+- **Interrupted runs.** `rooms.json` (now `version: 4`) stores the run state next to the rooms. After a data-server restart a run that was running or paused is shown as **interrupted** with a thread note; it is never replayed (its tools may already have run) and queued messages are reported as not delivered.
+- **Speak filter (opt-in, off by default).** ⋯ → *Room settings* → "Skip turns with nothing to add": from round 2, one small-model call (`AGENT_OS_JUDGE_MODEL`, default `anthropic/claude-haiku-4-5`, on a dedicated session `agent:<lead>:room-<id>-judge` created with `sessions.create` `model`) decides who has something new to add. Members who were just `@mentioned` always answer, round 1 is never filtered, a reply that cannot be read or any error lets everyone speak. The chip shows how many turns it saved.
+- **Wrap up / End now** (⋯ menu). *Ask lead to summarize* posts an ordinary `@lead` message. *End discussion now* is a soft stop: replies in flight land, nothing new starts (`stopReason: ended`); **Stop** still aborts the Gateway runs.
+
+New routes (same guard as `/api/send`): `POST /api/rooms/:id/continue|end|wrapup|pin`; the update body also takes `notes`, `responderMode`, `pauseAfterPosts`, `pauseAfterTokens`, `speakFilter`. The plugin proxy whitelist (`ROOMS_WRITE` in `src/index.ts`) and the harness proxy were widened to match, so the plugin must be rebuilt and reloaded with the data server.
+
+Proof: `node harness/rooms-v2-proof.mjs <outdir> [port=19470]` runs every item on a throwaway Gateway with the stub model (ports 19470-19473, temp HOME) through the real UI; screenshots in `harness/screens/rooms-v2/`. Unit: `cd prototype && npm test` (now includes `src/ui/*.test.ts`).
+
 ## Group rooms
 
 Topbar **Rooms**: create a room, pick agents from the live agent list (`agents.list`; the `phi` agent is never listed, joined or messaged), rename it, add/remove members, archive/restore. One thread shows every member with avatar and name; Zach's messages show as **You**. Rooms and threads persist in `~/.openclaw/agent-os/rooms.json` (0600; `AGENT_OS_ROOMS_FILE` overrides, mock mode keeps rooms in memory only).

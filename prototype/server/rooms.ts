@@ -186,6 +186,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       if (msg.length > MAX_MESSAGE_CHARS) throw new RoomError(400, `message too long (max ${MAX_MESSAGE_CHARS} chars)`);
       if (r.archived) throw new RoomError(409, 'room is archived');
       if (!r.members.length) throw new RoomError(400, 'add at least one agent to the room first');
+      const list = await agents(); // the only await: check for a running discussion and start one in the same tick, so two quick sends cannot start two runs
       const entry = runs.get(id);
       if (entry) {
         if (r.messages.filter((m) => m.queued).length >= MAX_QUEUED) throw new RoomError(409, `${MAX_QUEUED} messages are already queued: wait for the agents or press Stop`);
@@ -193,7 +194,6 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
         entry.resume?.();
         return this.get(id);
       }
-      const list = await agents();
       const trigger = add(r, { from: YOU, text: msg });
       const members: RoomMember[] = r.members.filter((m) => !isExcludedAgent(m)).map((m) => ({ id: m, name: info(list, m).name }));
       if (!selectResponders(msg, members, r.mentionGating, r.responderMode, r.captain).length) {
@@ -300,6 +300,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
         }
       });
     runs.set(id, entry);
+    persist(); // a crash before the first reply must still leave a running run on disk, so the restart can show it as interrupted
   }
 }
 export type RoomsService = ReturnType<typeof createRoomsService>;

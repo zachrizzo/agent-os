@@ -99,6 +99,25 @@ test('after a restart the room says the last run was interrupted and not replaye
   rooms.hide();
 });
 
+test('regression: with the notes box open, typing in it never leaks into the composer and Send posts the composer text, not the notes', async () => {
+  resetRoom();
+  run = null;
+  const { el, rooms } = await open();
+  el.querySelector<HTMLElement>('[data-act=more]')!.click();
+  el.querySelector<HTMLElement>('.rm-menu [data-act=notes-toggle]')!.click();
+  const notes = el.querySelector<HTMLTextAreaElement>('.rm-notes-in')!;
+  notes.value = 'Budget is 5k'; notes.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await tick(1300); // a poll repaints the view while the notes box has text
+  const box = el.querySelector<HTMLTextAreaElement>('.rm-compose textarea')!;
+  assert.equal(box.value, '', 'the composer stays empty');
+  box.value = 'hello room'; box.dispatchEvent(new w.Event('input', { bubbles: true }));
+  calls.length = 0;
+  el.querySelector<HTMLElement>('[data-act=send]')!.click(); await tick();
+  assert.deepEqual(calls.map((c) => c[1]), [{ message: 'hello room' }]);
+  assert.equal(el.querySelector<HTMLTextAreaElement>('.rm-notes-in')!.value, 'Budget is 5k', 'the unsaved notes draft survives the repaint');
+  rooms.hide();
+});
+
 test('menu actions and panels: wrap up, end, notes (save + decisions + unpin), settings (mode, limits, opt-in speak filter)', async () => {
   resetRoom();
   run = null;

@@ -248,7 +248,7 @@ export function createMockSource(): Source {
     async judge(_roomId, _agentId, prompt) {
       if (/judgefail/i.test(prompt)) return 'sorry, no idea';
       const cands = [...(/Candidates: ([^\n]*)/.exec(prompt)?.[1] ?? '').matchAll(/\(@([\w-]+)\)/g)].map((m) => m[1]);
-      const disc = prompt.split('Discussion so far')[1] ?? '';
+      const disc = (prompt.split('Discussion so far')[1] ?? '').split('Candidates:')[0]; // the replies only, not the candidate list after them
       return JSON.stringify({ speak: cands.filter((id) => new RegExp(`@${id}\\b`).test(disc)) });
     },
   };
