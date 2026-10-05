@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  discussionBlock, isExcludedAgent, isPass, memberPrompt, migrateRoom, normalizeSettings, parseMentions, runDiscussion, selectResponders,
+  classifyFailure, discussionBlock, isExcludedAgent, isPass, memberPrompt, migrateRoom, normalizeSettings, parseMentions, retryDelayMs, runDiscussion, selectResponders,
   type Room, type RoomMember, type RoomMessage, type RoomRunState, type RoomTransport,
 } from './rooms.ts';
 import { scriptedReply } from './scripted.ts';
@@ -140,19 +140,110 @@ test("an @mention in Zach's message is a direct question: only they reply, hando
   assert.deepEqual(who(h.room), ['you', 'bravo', 'forge-coder']);
 });
 
-test('a failing agent becomes a system note and counts as a pass; Stop cancels', async () => {
-  const t: RoomTransport = { async turn(a, p) { if (a === 'bravo') throw new Error('boom'); return scriptedReply(p); } };
+const FAST = { retryDelayMs: () => 1 };
+const runFast = (s: ReturnType<typeof setup>, t: RoomTransport, members = M) => runDiscussion(s.room, members, s.trigger, t, s.hooks, new AbortController().signal, FAST);
+const sysNotes = (room: Room) => room.messages.filter((m) => m.from === 'system').map((m) => m.text);
+
+test('classifyFailure: rate limit and overload are transient; auth and billing are terminal (billing wins over a 429); timeouts and unknowns are not retried', () => {
+  for (const m of ['429 Too Many Requests', 'rate_limit_error: slow down', 'HTTP 529 overloaded_error', '503 Service Unavailable']) assert.equal(classifyFailure(new Error(m)).kind, 'transient', m);
+  assert.equal(classifyFailure(new Error('429 rate limit')).label, 'rate limit');
+  assert.equal(classifyFailure(new Error('overloaded')).label, 'overloaded');
+  for (const m of ['401 Unauthorized', 'invalid api key', '403 Forbidden', 'OAuth token expired']) assert.deepEqual(classifyFailure(new Error(m)), { kind: 'terminal', label: 'auth' }, m);
+  for (const m of ['402 payment required', 'Your credit balance is too low', '429 insufficient_quota', 'billing hard limit reached']) assert.deepEqual(classifyFailure(new Error(m)), { kind: 'terminal', label: 'billing' }, m);
+  for (const m of ['chat.send failed', 'the run ended without a reply (model unavailable?)', 'ETIMEDOUT', 'socket hang up']) assert.equal(classifyFailure(new Error(m)).kind, 'unknown', m);
+  assert.equal(classifyFailure({ status: 429 }).kind, 'transient');
+  assert.equal(classifyFailure('overloaded').kind, 'transient');
+  assert.equal(classifyFailure(undefined).kind, 'unknown');
+});
+
+test('retry backoff doubles, is capped, and is jittered +-25%', () => {
+  assert.equal(retryDelayMs(0, () => 0.5), 1000);
+  assert.equal(retryDelayMs(1, () => 0.5), 2000);
+  assert.equal(retryDelayMs(10, () => 0.5), 8000);
+  assert.equal(retryDelayMs(0, () => 0), 750);
+  assert.equal(retryDelayMs(0, () => 1), 1250);
+});
+
+test('a transient failure is retried and the member then answers normally: no failure note, no extra post', async () => {
+  const calls: Record<string, number> = {};
+  const t: RoomTransport = { async turn(a, p) { calls[a] = (calls[a] ?? 0) + 1; if (a === 'bravo' && calls[a] <= 2) throw new Error('429 rate limit exceeded'); return scriptedReply(p); } };
   const s = setup('ship?');
-  assert.equal(await run(s, t), 'passed');
-  assert.ok(s.room.messages.some((m) => m.from === 'system' && /Bravo did not answer: boom/.test(m.text)));
+  assert.equal(await runFast(s, t), 'passed');
+  assert.ok(who(s.room).includes('bravo'), 'bravo replied after two retries');
+  assert.deepEqual(sysNotes(s.room), []);
+  assert.equal(calls.bravo > 2, true);
+});
+
+test('a transient failure that keeps failing stops after two retries, shows in the room, and the run is "failed", never "passed"', async () => {
+  let bravo = 0;
+  const t: RoomTransport = { async turn(a) { if (a === 'bravo') { bravo++; throw new Error('529 overloaded'); } return 'PASS'; } };
+  const s = setup('ship?');
+  assert.equal(await runFast(s, t), 'failed');
+  assert.ok(bravo >= 3 && bravo <= 3 * 2, `bravo tried 1 + 2 retries per failed round, got ${bravo}`);
+  assert.ok(sysNotes(s.room).some((n) => /Bravo could not answer \(overloaded, still failing after 2 retries\)/.test(n)), sysNotes(s.room).join(' | '));
+  assert.ok(sysNotes(s.room).some((n) => /Not treated as everyone passing/.test(n)));
+});
+
+test('auth and billing failures are terminal: one try, a note, the member is not asked again, and the run is "failed"', async () => {
+  for (const [msg, label] of [['401 unauthorized: invalid api key', 'auth'], ['402 credit balance is too low', 'billing']]) {
+    let bravo = 0;
+    const t: RoomTransport = { async turn(a, p) { if (a === 'bravo') { bravo++; throw new Error(msg); } return scriptedReply(p); } };
+    const s = setup('ship?');
+    assert.equal(await runFast(s, t), 'failed', msg);
+    assert.equal(bravo, 1, `${label}: never retried, never asked again`);
+    assert.ok(sysNotes(s.room).some((n) => new RegExp(`Bravo could not answer \\(${label} error, not retried\\)`).test(n)), sysNotes(s.room).join(' | '));
+    assert.ok(who(s.room).includes('alpha') && who(s.room).includes('forge-coder'), 'the others still talked');
+  }
+});
+
+test('an unclassified failure is not retried, shows in the room, and is not a pass', async () => {
+  let bravo = 0;
+  const t: RoomTransport = { async turn(a, p) { if (a === 'bravo') { bravo++; throw new Error('boom'); } return scriptedReply(p); } };
+  const s = setup('ship?');
+  assert.equal(await runFast(s, t), 'failed');
+  assert.equal(bravo >= 1, true);
+  assert.ok(sysNotes(s.room).some((n) => /Bravo did not answer: boom/.test(n)));
   const down: RoomTransport = { async turn() { throw new Error('down'); } };
-  assert.equal(await run(setup('ship?'), down), 'passed', 'everyone failing ends the run instead of looping');
+  assert.equal(await runFast(setup('ship?'), down), 'failed', 'everyone failing is not everyone passing');
+});
+
+test('a round where the others PASS but one turn failed does not end the run as "passed"', async () => {
+  const t: RoomTransport = { async turn(a) { if (a === 'bravo') throw new Error('chat.send failed'); return 'PASS'; } };
+  const s = setup('ship?');
+  assert.equal(await runFast(s, t), 'failed');
+  assert.equal(who(s.room).filter((x) => x !== 'you').length, 0);
+  const clean: RoomTransport = { async turn() { return 'PASS'; } };
+  assert.equal(await runFast(setup('ship?'), clean), 'passed', 'with no failure an all-PASS round still ends the run');
+});
+
+test('a failure while the others keep talking does not end the run: the failed member is asked again next round', async () => {
+  let bravo = 0;
+  const t: RoomTransport = { async turn(a, p) { if (a === 'bravo') { bravo++; if (bravo === 1) throw new Error('chat.send failed'); } return scriptedReply(p); } };
+  const s = setup('ship?');
+  assert.equal(await runFast(s, t), 'passed', 'bravo recovered in round 2 and the final round was clean');
+  assert.ok(bravo >= 2);
+});
+
+test('a one-member room whose only turn fails is "failed"', async () => {
+  const t: RoomTransport = { async turn() { throw new Error('chat.send failed'); } };
+  assert.equal(await runFast(setup('hi', [M[0]]), t, [M[0]]), 'failed');
+});
+
+test('Stop cancels, also while a transient failure waits to be retried', async () => {
   const ac = new AbortController();
   const aborted: string[] = [];
   const p = setup('pingpong forever');
   const slow: RoomTransport = { turn: (_a, _p, sig) => new Promise<string>((_res, rej) => { sig.addEventListener('abort', () => rej(new Error('cancelled'))); setTimeout(() => ac.abort(), 5); }), abort: (id) => { aborted.push(id); } };
   assert.equal(await runDiscussion(p.room, M, p.trigger, slow, p.hooks, ac.signal), 'cancelled');
   assert.deepEqual(aborted.sort(), ['bravo', 'forge-coder']);
+
+  const ac2 = new AbortController();
+  const q = setup('ship?', [M[0]]);
+  const limited: RoomTransport = { async turn() { setTimeout(() => ac2.abort(), 20); throw new Error('429 rate limit'); } };
+  const t0 = Date.now();
+  assert.equal(await runDiscussion(q.room, [M[0]], q.trigger, limited, q.hooks, ac2.signal, { retryDelayMs: () => 60_000 }), 'cancelled');
+  assert.ok(Date.now() - t0 < 5000, 'the backoff sleep ended at Stop');
+  assert.deepEqual(sysNotes(q.room), [], 'no failure note after Stop');
 });
 
 test('a one-member room just answers once; the prompt carries the whole thread', async () => {

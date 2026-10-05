@@ -222,10 +222,23 @@ export function createMockSource(): Source {
     return { role: 'user', ts, sender: shortSession(from), text: p.body, a2a: { from, ...(p.tool ? { tool: p.tool } : {}), routing: p.routing } };
   }
 
+  const flaky = new Map<string, number>(); // attempts per room|agent|message, for the failure scenarios
   const gateway: RoomGateway = {
     async listAgents() { return MOCK_ROSTER; },
     async ensureSession() { /* nothing to create */ },
-    async turn(agentId, _roomId, prompt, signal, progress) {
+    async turn(agentId, roomId, prompt, signal, progress) {
+      // Failure scenarios (Zach's message): "flaky" = research gets a 429 on its first try, then works; "authfail" = research always gets a 401; "down" = everyone is overloaded (503) forever.
+      const asked = triggerText(prompt);
+      const tries = (flaky.set(`${roomId}|${agentId}|${asked}`, (flaky.get(`${roomId}|${agentId}|${asked}`) ?? 0) + 1), flaky.get(`${roomId}|${agentId}|${asked}`)!);
+      if (/\bflaky\b/i.test(asked) && agentId === 'research' && tries === 1) throw new Error('429 rate limit exceeded, retry shortly');
+      if (/\bauthfail\b/i.test(asked) && agentId === 'research') throw new Error('401 unauthorized: invalid api key');
+      if (/\bdown\b/i.test(asked)) throw new Error('503 service unavailable (overloaded)');
+      // "late" = spark ignores Stop and answers 3s later anyway (a Gateway run that keeps going after the abort).
+      if (/\blate\b/i.test(asked) && agentId === 'spark') {
+        await new Promise<void>((resolve) => setTimeout(resolve, 3000));
+        const text = scriptedReply(prompt);
+        return { text, usage: { inputTokens: 100, outputTokens: Math.ceil(text.length / 4), costUsd: 0.001 } };
+      }
       // "hang" in Zach's message makes the member `forge` never reply (until Stop aborts it): the no-timeout scenario.
       if (agentId === 'forge' && /\bhang\b/i.test(triggerText(prompt))) {
         await new Promise<void>((_res, reject) => { if (signal.aborted) reject(new Error('cancelled')); signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }); });

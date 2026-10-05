@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { scriptedReply } from '../shared/scripted.ts';
+import { scriptedReply, triggerText } from '../shared/scripted.ts';
 import { createRoomsService, type RoomAgent, type RoomGateway } from './rooms.ts';
 
 const AGENTS: RoomAgent[] = [{ id: 'rfc-lead', name: 'RFC Lead' }, { id: 'rfc-skeptic', name: 'RFC Skeptic' }, { id: 'rfc-scribe', name: 'RFC Scribe' }, { id: 'phi', name: 'PHI' }];
@@ -424,4 +424,70 @@ test('two sends in the same tick start one run (the second is queued); the run i
   assert.ok(!v.room.messages.some((m) => m.queued));
   assert.equal(v.run?.status, 'done');
   svc.close(); rmSync(dir, { recursive: true });
+});
+
+test('Stop records a cutoff: a reply that arrives late from the stopped run is dropped (with a note), and the next message runs normally', async () => {
+  const late: Array<() => void> = [];
+  const gw: RoomGateway = {
+    async listAgents() { return AGENTS; },
+    async ensureSession() {},
+    // rfc-skeptic ignores the abort signal and answers only when released: a Gateway run that keeps going after Stop.
+    async turn(agent, _room, prompt, signal) {
+      if (agent === 'rfc-skeptic' && /stuck/.test(triggerText(prompt))) { await new Promise<void>((res) => late.push(res)); return 'Late reply from the stopped run'; }
+      await new Promise<void>((res, rej) => { const t = setTimeout(res, 10); signal.addEventListener('abort', () => { clearTimeout(t); rej(new Error('cancelled')); }, { once: true }); });
+      return scriptedReply(prompt);
+    },
+  };
+  const svc = createRoomsService({ gateway: gw });
+  const { room } = await svc.create({ name: 'Cutoff', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'] });
+  await svc.send(room.id, 'stuck question');
+  await new Promise((r) => setTimeout(r, 60));
+  const runId = (await svc.get(room.id)).run!.id;
+  await svc.stop(room.id);
+  const stopped = await svc.get(room.id);
+  assert.ok(stopped.run!.cutoffAt, 'the cutoff time is on the run');
+  assert.equal(late.length, 1);
+  assert.equal((await svc.get(room.id)).run?.status, 'running', 'the agent that ignores Stop is still out; its run waits for it');
+  late[0](); // ...and now that agent answers anyway
+  await svc.idle(room.id);
+  const v = await svc.get(room.id);
+  assert.equal(v.run?.status, 'stopped');
+  assert.equal(v.run?.dropped, 1);
+  assert.ok(!v.room.messages.some((m) => /Late reply from the stopped run/.test(m.text)), 'the late reply never reached the thread');
+  assert.ok(v.room.messages.some((m) => m.from === 'system' && /Stopped: 1 late reply .* was dropped \(rfc-skeptic\)/.test(m.text)));
+  // a new message starts a new run (new run id) and its replies are kept
+  await svc.send(room.id, 'fresh question');
+  await svc.idle(room.id);
+  const v2 = await svc.get(room.id);
+  assert.notEqual(v2.run!.id, runId);
+  assert.ok(v2.room.messages.some((m) => m.from === 'rfc-skeptic' && /fresh question/.test(m.text)));
+  svc.close();
+});
+
+test('rate limits are retried through the service with the configured backoff, and a failed run is not reported as passed', async () => {
+  let tries = 0;
+  const gw: RoomGateway = {
+    async listAgents() { return AGENTS; },
+    async ensureSession() {},
+    async turn(agent, _room, prompt) {
+      if (/flaky/.test(prompt) && agent === 'rfc-skeptic' && ++tries === 1) throw new Error('429 rate limit exceeded');
+      if (/dead/.test(prompt)) throw new Error('503 service unavailable');
+      return scriptedReply(prompt);
+    },
+  };
+  const svc = createRoomsService({ gateway: gw, retry: { retryDelayMs: () => 1 } });
+  const { room } = await svc.create({ name: 'Retry', members: ['rfc-lead', 'rfc-skeptic'] });
+  await svc.send(room.id, 'flaky one');
+  await svc.idle(room.id);
+  let v = await svc.get(room.id);
+  assert.equal(v.run?.stopReason, 'passed');
+  assert.ok(v.room.messages.some((m) => m.from === 'rfc-skeptic'));
+  assert.ok(!v.room.messages.some((m) => m.from === 'system'), 'a retry that worked leaves no failure note');
+  await svc.send(room.id, 'dead one');
+  await svc.idle(room.id);
+  v = await svc.get(room.id);
+  assert.equal(v.run?.stopReason, 'failed');
+  assert.equal(v.run?.status, 'done');
+  assert.ok(v.room.messages.some((m) => m.from === 'system' && /could not answer \(overloaded, still failing after 2 retries\)/.test(m.text)));
+  svc.close();
 });

@@ -6,7 +6,7 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'n
 import { dirname } from 'node:path';
 import {
   MAX_MEMBERS, MAX_MESSAGE_CHARS, MAX_ROOMS, MAX_ROOM_NAME, MAX_STORED_MESSAGES, RESPONDER_MODES, ROOM_KEY_RE, YOU, addUsage, emptyUsage, isExcludedAgent, migrateRoom, normalizeSettings, resolveCaptain, roomSessionKey, runDiscussion, selectResponders,
-  type Room, type RoomMember, type RoomMessage, type RoomRunState, type RoomSettings, type RoomTransport, type TurnProgress, type TurnResult,
+  type Room, type RoomMember, type RoomMessage, type RoomRunState, type RoomSettings, type RoomTransport, type RunOptions, type TurnProgress, type TurnResult,
 } from '../shared/rooms.ts';
 
 export interface RoomAgent { id: string; name: string; emoji?: string }
@@ -38,11 +38,13 @@ export const MAX_PINNED = 20;
 const SETTING_KEYS = ['mentionGating', 'responderMode', 'pauseAfterPosts', 'pauseAfterTokens', 'speakFilter'] as const;
 type RunEntry = { state: RoomRunState; abort: AbortController; done: Promise<void>; /** set while paused: releases the soft pause */ resume?: () => void; /** "End now" was asked */ ending: boolean };
 
-export function createRoomsService(opts: { gateway: RoomGateway; file?: string; agentTtlMs?: number }) {
+export function createRoomsService(opts: { gateway: RoomGateway; file?: string; agentTtlMs?: number; /** turn retry policy (tests shorten the backoff) */ retry?: RunOptions }) {
   const { gateway } = opts;
   const rooms = new Map<string, Room>();
   const runs = new Map<string, RunEntry>();
   const lastRuns = new Map<string, RoomRunState>();
+  /** Abort cutoffs: run id -> when Stop was pressed and how many late replies from that run were dropped since. A stopped run's agents may still answer (the Gateway run, or a turn that ignores the signal): those replies must not land in the thread. */
+  const cutoffs = new Map<string, { at: number; dropped: number; from: Set<string>; noteId?: string }>();
   let agentCache: { at: number; list: RoomAgent[] } | null = null;
   let seq = 0;
 
@@ -111,8 +113,11 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
     return out;
   }
   const touch = (r: Room) => { r.updatedAt = Date.now(); };
-  const add = (r: Room, m: Omit<RoomMessage, 'id' | 'ts'>): RoomMessage => {
+  /** `runId`: the run that produced the message. Once that run has a cutoff the message is dropped (returned, never stored). */
+  const add = (r: Room, m: Omit<RoomMessage, 'id' | 'ts'>, runId?: string): RoomMessage => {
     const msg = { ...m, id: `m${Date.now().toString(36)}${(seq++).toString(36)}`, ts: Date.now() };
+    const cut = runId ? cutoffs.get(runId) : undefined;
+    if (cut) { dropLate(r, runId!, cut, m.from); return msg; }
     r.messages.push(msg);
     while (r.messages.length > MAX_STORED_MESSAGES) { // pinned decisions and queued messages outlive the cap
       const at = r.messages.findIndex((x) => !x.pinned && !x.queued);
@@ -123,6 +128,19 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
     persist();
     return msg;
   };
+
+  /** A late reply from a stopped run: not stored. The count goes on the run's state and one note in the thread says so (it may arrive after the run itself has finished). */
+  function dropLate(r: Room, runId: string, cut: { dropped: number; from: Set<string>; noteId?: string }, from: string) {
+    cut.dropped++;
+    if (from !== 'system') cut.from.add(from);
+    for (const st of [runs.get(r.id)?.state, lastRuns.get(r.id)]) if (st?.id === runId) st.dropped = cut.dropped;
+    const text = `Stopped: ${cut.dropped} late repl${cut.dropped === 1 ? 'y' : 'ies'} from the stopped discussion ${cut.dropped === 1 ? 'was' : 'were'} dropped${cut.from.size ? ` (${[...cut.from].join(', ')})` : ''}.`;
+    const note = cut.noteId ? r.messages.find((x) => x.id === cut.noteId) : undefined;
+    if (note) note.text = text;
+    else { const n = { id: `m${Date.now().toString(36)}${(seq++).toString(36)}`, ts: Date.now(), from: 'system', text }; r.messages.push(n); cut.noteId = n.id; }
+    touch(r);
+    persist();
+  }
 
   const summary = (r: Room): RoomSummary => {
     const last = [...r.messages].reverse().find((m) => m.from !== 'system');
@@ -168,7 +186,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       if (Object.keys(set).length) Object.assign(r, normalizeSettings({ ...r, ...set })); // the running discussion reads the pause limits and the speak filter live
       if (typeof patch.notes === 'string') r.notes = patch.notes.trim();
       if (typeof patch.archived === 'boolean') {
-        if (patch.archived) runs.get(id)?.abort.abort();
+        if (patch.archived) stopRun(id);
         r.archived = patch.archived;
       }
       touch(r);
@@ -212,7 +230,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
     /** Hard stop: aborts every in-flight member run. */
     async stop(id: string): Promise<RoomView> {
       mustGet(id);
-      runs.get(id)?.abort.abort();
+      stopRun(id);
       return this.get(id);
     },
     /** Soft stop ("End now"): turns already in flight finish and post; nothing new starts. Also releases a soft pause. */
@@ -242,8 +260,20 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
     },
     /** Test hook: resolves when the room's current run (and any run it chains into) finished. */
     async idle(id: string) { for (let e = runs.get(id); e; e = runs.get(id)) await e.done; },
-    close() { for (const r of runs.values()) r.abort.abort(); },
+    close() { for (const id of [...runs.keys()]) stopRun(id); },
   };
+
+  /** Stop: record the cutoff for the run (so its late replies are dropped), then abort it and its Gateway runs. */
+  function stopRun(roomId: string) {
+    const e = runs.get(roomId);
+    if (!e) return;
+    if (!cutoffs.has(e.state.id)) {
+      cutoffs.set(e.state.id, { at: Date.now(), dropped: 0, from: new Set() });
+      while (cutoffs.size > 100) cutoffs.delete(cutoffs.keys().next().value!);
+    }
+    e.state.cutoffAt = cutoffs.get(e.state.id)!.at;
+    e.abort.abort();
+  }
 
   /** One discussion run for `trigger` (already in the thread). Chains into the next queued message if the run ends with one still waiting. */
   function startRun(r: Room, trigger: RoomMessage, members: RoomMember[]) {
@@ -261,7 +291,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       ...(gateway.judge ? { judge: (prompt: string, signal: AbortSignal) => gateway.judge!(id, r.captain, prompt, signal) } : {}),
     };
     const hooks = {
-      append: (m: Omit<RoomMessage, 'id' | 'ts'>) => add(r, m),
+      append: (m: Omit<RoomMessage, 'id' | 'ts'>) => add(r, m, state.id),
       state: (p: Partial<RoomRunState>) => { Object.assign(state, p); if (p.status || 'pause' in p) persist(); },
       waitForContinue: (signal: AbortSignal) => new Promise<void>((resolve) => {
         entry.resume = () => { entry.resume = undefined; resolve(); };
@@ -276,7 +306,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       ended: () => entry.ending,
       usage: (_agent: string, u: Parameters<typeof addUsage>[1]) => { r.usage = addUsage(r.usage ?? emptyUsage(), u); },
     };
-    const flow = runDiscussion(r, members, trigger, transport, hooks, abort.signal);
+    const flow = runDiscussion(r, members, trigger, transport, hooks, abort.signal, opts.retry);
     entry.done = flow
       .then((reason) => { state.stopReason = reason; state.status = reason === 'cancelled' ? 'stopped' : 'done'; }, (e) => {
         state.stopReason = 'cancelled'; state.status = 'stopped';

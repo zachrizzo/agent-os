@@ -6,6 +6,8 @@
 //   - A message that @mentions members is a direct question: only they reply, and replies that @mention others pull those in.
 //   - Still no cap: a long run does not stop, it PAUSES (soft) after N bot posts / M tokens since Zach last spoke, or when members repeat themselves or hand a point round a ring.
 //     A pause holds the run until Zach clicks Continue (or writes, or Stops). A Zach message during a run is queued and joins at the next round boundary.
+//   - A failed turn is not a PASS: rate limits / overload are retried (twice, jittered backoff), auth and billing errors are terminal, and every failure is shown in the thread.
+//     A run never ends as "everyone passed" when a turn in that round failed: it ends as `failed`.
 
 // Rooms ask for "PASS", not OpenClaw's NO_REPLY: in a direct session the Gateway treats an exact NO_REPLY as a failed turn and re-prompts
 // the agent ("The previous attempt did not produce a user-visible answer"), which would burn a turn and force an answer. NO_REPLY is still accepted as a pass.
@@ -91,7 +93,12 @@ export interface RoomRunState {
   pause?: PauseInfo;
   /** Turns the speak filter saved (members it said had nothing to add). */
   filtered?: number;
-  stopReason?: 'passed' | 'cancelled' | 'complete' | 'ended' | 'interrupted';
+  /** `failed`: the run finished but a member's turn failed (shown in the thread); it is never reported as everyone passing. */
+  stopReason?: 'passed' | 'cancelled' | 'complete' | 'ended' | 'interrupted' | 'failed';
+  /** When Stop was pressed: replies still arriving from this run after that moment are dropped. */
+  cutoffAt?: number;
+  /** Late replies from this stopped run that were dropped instead of joining the thread. */
+  dropped?: number;
 }
 
 export const emptyUsage = (): RoomUsage => ({ turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, estimated: false });
@@ -324,6 +331,35 @@ export function parseJudge(reply: string | null | undefined, candidates: string[
   } catch { return null; }
 }
 
+// ---- failures: transient ones are retried, terminal ones are not, none of them is a PASS
+
+export type FailureKind = 'transient' | 'terminal' | 'unknown';
+export interface Failure { kind: FailureKind; /** short human label, e.g. "rate limit" */ label: string }
+/**
+ * Billing and auth are checked first: a 429 "insufficient_quota" is a billing problem, not a throttle. Only clear provider-side rejections (rate limit, overload) are transient:
+ * a timeout or a dropped connection may follow an accepted send, so retrying could run a turn twice (agents can call tools with side effects). Those stay `unknown` and are not retried.
+ */
+export function classifyFailure(e: unknown): Failure {
+  const o = (e && typeof e === 'object' ? e : {}) as { message?: unknown; status?: unknown; code?: unknown };
+  const t = `${o.status ?? ''} ${o.code ?? ''} ${typeof e === 'string' ? e : o.message ?? ''}`;
+  if (/\b402\b|billing|payment required|credit balance|out of credits|insufficient[_ -]?(quota|funds|credits?)|quota (exceeded|exhausted)|usage limit/i.test(t)) return { kind: 'terminal', label: 'billing' };
+  if (/\b40[13]\b|unauthori[sz]ed|forbidden|authenticat|invalid[_ -]?(api[_ -]?)?(key|token)|permission denied|token (expired|revoked)/i.test(t)) return { kind: 'terminal', label: 'auth' };
+  if (/overloaded|\b529\b|\b503\b|service unavailable/i.test(t)) return { kind: 'transient', label: 'overloaded' };
+  if (/\b429\b|rate[_ -]?limit|too many requests|throttl/i.test(t)) return { kind: 'transient', label: 'rate limit' };
+  return { kind: 'unknown', label: '' };
+}
+export const MAX_TURN_RETRIES = 2;
+const RETRY_BASE_MS = 1000;
+const RETRY_CAP_MS = 8000;
+/** Exponential backoff (1s, 2s, ... capped) with +-25% jitter, so members that hit the same limit do not retry in lockstep. */
+export const retryDelayMs = (attempt: number, rand: () => number = Math.random) => Math.round(Math.min(RETRY_CAP_MS, RETRY_BASE_MS * 2 ** attempt) * (0.75 + rand() * 0.5));
+export interface RunOptions { maxRetries?: number; retryDelayMs?: (attempt: number) => number }
+const sleepUnlessAborted = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
+  const done = () => { clearTimeout(t); signal.removeEventListener('abort', done); resolve(); };
+  const t = setTimeout(done, ms);
+  signal.addEventListener('abort', done, { once: true });
+});
+
 // ---- the run
 
 export type TurnResult = string | null | { text: string | null; usage?: TurnUsage };
@@ -354,8 +390,8 @@ const normalizeTurn = (raw: TurnResult, prompt: string): { text: string | null; 
   return { text, usage: given ?? estimateUsage(prompt, text) };
 };
 
-/** One Zach message -> an open discussion. Never throws for an agent failure: it becomes a system note and counts as a pass. */
-export async function runDiscussion(room: Room, members: RoomMember[], trigger: RoomMessage, transport: RoomTransport, hooks: RunHooks, signal: AbortSignal): Promise<RoomRunState['stopReason']> {
+/** One Zach message -> an open discussion. Never throws for an agent failure: it becomes a system note (after retries, for transient errors) and is NOT a pass. */
+export async function runDiscussion(room: Room, members: RoomMember[], trigger: RoomMessage, transport: RoomTransport, hooks: RunHooks, signal: AbortSignal, opts: RunOptions = {}): Promise<RoomRunState['stopReason']> {
   if (!members.length) return 'complete';
   const lead = members.find((m) => m.id === room.captain) ?? members[0];
   const byId = new Map(members.map((m) => [m.id, m]));
@@ -388,9 +424,13 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
   let prevRoundPosts: Array<{ id: string; text: string }> = [];
   let freshHuman = false; // the round right after a queued Zach message joined: everyone targeted answers it, the filter stays out of it
   const ended = () => hooks.ended?.() === true;
+  const maxRetries = opts.maxRetries ?? MAX_TURN_RETRIES;
+  const backoff = opts.retryDelayMs ?? ((attempt: number) => retryDelayMs(attempt));
+  let failures = 0; // failed turns so far in this run
+  const benched = new Set<string>(); // members whose turn failed terminally (auth/billing): not asked again in this run
 
-  /** One turn. A failure becomes a system note and counts as a pass; Stop propagates as 'cancelled'. */
-  async function ask(agentId: string, prompt: string, round: number): Promise<string | null> {
+  /** One turn. A transient failure is retried; any failure becomes a system note and `ok: false` (never a pass); Stop propagates as 'cancelled'. */
+  async function ask(agentId: string, prompt: string, round: number): Promise<{ ok: boolean; text: string | null }> {
     const agent = byId.get(agentId)!;
     turnsUsed++; active.add(agentId); waiting.delete(agentId);
     activity.set(agentId, { id: agentId, state: 'thinking', since: Date.now() });
@@ -398,22 +438,40 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
     const onAbort = () => transport.abort?.(agentId); // Stop reaches the Gateway run, not just this loop
     signal.addEventListener('abort', onAbort, { once: true });
     try {
-      const turn = normalizeTurn(await transport.turn(agentId, prompt, signal, (p) => {
-        const a = activity.get(agentId);
-        if (!a) return;
-        const tool = p.tool?.trim();
-        if (tool && !(a.state === 'tool' && a.tool === tool)) { a.state = 'tool'; a.tool = tool.slice(0, 60); a.since = Date.now(); publish(); }
-        else if (!tool && a.state === 'tool') { a.state = 'thinking'; delete a.tool; a.since = Date.now(); publish(); }
-      }), prompt);
-      usage = addUsage(usage, turn.usage);
-      sinceTokens += totalTokens(turn.usage);
-      lastSpeaker = agentId;
-      hooks.usage?.(agentId, turn.usage);
-      return turn.text;
-    } catch (e) {
-      if (signal.aborted) throw new Error('cancelled');
-      hooks.append({ from: 'system', text: `${agent.name} did not answer: ${(e as Error).message}`, round });
-      return null;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const turn = normalizeTurn(await transport.turn(agentId, prompt, signal, (p) => {
+            const a = activity.get(agentId);
+            if (!a) return;
+            const tool = p.tool?.trim();
+            if (tool && !(a.state === 'tool' && a.tool === tool)) { a.state = 'tool'; a.tool = tool.slice(0, 60); a.since = Date.now(); publish(); }
+            else if (!tool && a.state === 'tool') { a.state = 'thinking'; delete a.tool; a.since = Date.now(); publish(); }
+          }), prompt);
+          usage = addUsage(usage, turn.usage);
+          sinceTokens += totalTokens(turn.usage);
+          lastSpeaker = agentId;
+          hooks.usage?.(agentId, turn.usage);
+          return { ok: true, text: turn.text };
+        } catch (e) {
+          if (signal.aborted) throw new Error('cancelled');
+          const f = classifyFailure(e);
+          if (f.kind === 'transient' && attempt < maxRetries) {
+            await sleepUnlessAborted(backoff(attempt), signal);
+            if (signal.aborted) throw new Error('cancelled');
+            continue;
+          }
+          failures++;
+          const why = clipText(oneLine((e as Error)?.message ?? String(e)), 300);
+          if (f.kind === 'terminal') benched.add(agentId);
+          hooks.append({
+            from: 'system', round,
+            text: f.kind === 'unknown' ? `${agent.name} did not answer: ${why}`
+              : f.kind === 'terminal' ? `${agent.name} could not answer (${f.label} error, not retried): ${why}`
+              : `${agent.name} could not answer (${f.label}, still failing after ${attempt} ${attempt === 1 ? 'retry' : 'retries'}): ${why}`,
+          });
+          return { ok: false, text: null };
+        }
+      }
     } finally {
       signal.removeEventListener('abort', onAbort); active.delete(agentId); activity.delete(agentId);
       const w = waiting.get(lead.id);
@@ -469,6 +527,9 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
       if (signal.aborted) return 'cancelled';
       if (ended()) return 'ended';
       if (!targets.length) return 'complete'; // mentions-only room and nobody was addressed
+      targets = targets.filter((id) => !benched.has(id));
+      if (!targets.length) return 'failed'; // everyone left to ask failed terminally (auth/billing) earlier in this run
+      const failuresBefore = failures;
       targets = await narrow(targets, round);
       const others = targets.filter((id) => !(open && id === lead.id));
       const leadTurn = open && targets.includes(lead.id);
@@ -477,8 +538,8 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
       const posted: Array<{ id: string; text: string }> = [];
       await Promise.all(others.map(async (id) => {
         const reply = await ask(id, memberPrompt(ctxFor(id, round)), round);
-        if (isPass(reply)) return;
-        const text = reply!.trim();
+        if (!reply.ok || isPass(reply.text)) return;
+        const text = reply.text!.trim();
         hooks.append({ from: id, text, round });
         recordPost(id, text);
         posted.push({ id, text });
@@ -486,8 +547,8 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
       if (signal.aborted) return 'cancelled';
       if (leadTurn && !ended()) {
         const reply = await ask(lead.id, memberPrompt(ctxFor(lead.id, round)), round);
-        if (!isPass(reply)) {
-          const text = reply!.trim();
+        if (reply.ok && !isPass(reply.text)) {
+          const text = reply.text!.trim();
           hooks.append({ from: lead.id, text, round });
           recordPost(lead.id, text);
           posted.push({ id: lead.id, text });
@@ -516,16 +577,21 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
         if (late.length) { join(late); continue; }
       }
 
-      if (!posted.length) return 'passed'; // a whole round of PASS: the discussion is over
+      const troubled = failures > failuresBefore || benched.size > 0; // a turn failed this round, or a member was already benched: not a clean ending
+      if (!posted.length) {
+        if (!troubled) return 'passed'; // a whole round of PASS: the discussion is over
+        hooks.append({ from: 'system', text: `Not treated as everyone passing: ${failures} turn${failures === 1 ? '' : 's'} failed in this discussion (see above). Fix the cause and write again.`, round });
+        return 'failed';
+      }
       if (directed) {
         const mentioned = new Set<string>();
         for (const p of posted) for (const m of parseMentions(p.text, members.filter((x) => x.id !== p.id)) ?? []) mentioned.add(m);
-        if (!mentioned.size) return 'complete'; // answered, nobody was handed anything
+        if (!mentioned.size) return troubled ? 'failed' : 'complete'; // answered, nobody was handed anything
         const next = new Set([...posted.map((p) => p.id), ...mentioned]);
         targets = order.filter((id) => next.has(id));
         continue;
       }
-      if (!open) return 'complete'; // a one-member room: one reply
+      if (!open) return troubled ? 'failed' : 'complete'; // a one-member room: one reply
       targets = order;
     }
   } catch (e) {

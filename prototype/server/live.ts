@@ -392,11 +392,16 @@ export function createLiveSource(): Source {
       const fresh = msgs.filter((m) => seqOf(m) > base);
       sawUser ||= fresh.some((m) => m.role === 'user');
       const text = (m: any) => (typeof m.content === 'string' ? m.content : Array.isArray(m.content) ? m.content.filter((c: any) => c?.type === 'text').map((c: any) => c.text).join('\n') : '');
-      const replies = fresh.filter((m) => m.role === 'assistant' && text(m).trim());
+      // Only assistant text after our own prompt: a late reply from a run that was stopped earlier on this session must not be taken for this turn's answer.
+      const userSeq = Math.min(...fresh.filter((m) => m.role === 'user').map(seqOf));
+      const replies = fresh.filter((m) => m.role === 'assistant' && text(m).trim() && seqOf(m) > userSeq);
       if (sawUser && active) progress?.({ tool: toolInFlight(fresh) });
       if (sawUser && !active) {
         if (replies.length) return { text: redact(text(replies[replies.length - 1]).trim()), usage: usageFromMessages(fresh) };
-        if (++quiet >= 3) throw new Error('the run ended without a reply (model unavailable?)');
+        if (++quiet >= 3) { // the Gateway records a failed model call as an assistant message with an error: surface it so the room can tell a rate limit from an auth failure
+          const err = fresh.filter((m) => m.role === 'assistant' && typeof m.errorMessage === 'string' && m.errorMessage.trim()).map((m) => clip(m.errorMessage, 240)).pop();
+          throw new Error(err ? `the run ended without a reply: ${err}` : 'the run ended without a reply (model unavailable?)');
+        }
       } else quiet = 0;
     }
   }
