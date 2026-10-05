@@ -12,6 +12,7 @@ const INTER_EXPLANATION = "This content was routed by OpenClaw from another sess
 const MOCK_ROSTER: RoomAgent[] = [
   { id: 'main', name: 'Chief of Staff', emoji: '🧭' }, { id: 'forge', name: 'Forge', emoji: '🔨' }, { id: 'spark', name: 'Spark', emoji: '⚡' },
   { id: 'research', name: 'Research', emoji: '🔎' }, { id: 'ops', name: 'Ops' }, { id: 'coo', name: 'COO' }, { id: 'phi', name: 'PHI Gateway' },
+  { id: 'coder', name: 'Coder', emoji: '🧰' }, { id: 'scout', name: 'Scout' }, { id: 'radar', name: 'Radar' }, { id: 'security', name: 'Security' }, // these have creature avatars
 ];
 
 const TEAMS: Array<{ id: string; name: string; lead: string; size: number; workers: string[] }> = [

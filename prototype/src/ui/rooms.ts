@@ -41,9 +41,11 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
   let timer: number | undefined;
   let busy = false;
   const agentOf = (id: string): RoomAgent => agents.find((a) => a.id === id) ?? view?.members.find((a) => a.id === id) ?? { id, name: id };
+  /** A member with a turn in flight hops; everyone else keeps the default animation. */
+  const statusOf = (id: string) => (view?.run?.status === 'running' && view.run.active.includes(id) ? 'active' as const : undefined);
   const who = (id: string): { name: string; html: string } => id === YOU
-    ? { name: 'You', html: `<span class="avatar you" title="You">Y</span>` }
-    : { name: agentOf(id).name, html: avatarHtml(id, agentOf(id).name, agentOf(id).emoji) };
+    ? { name: 'You', html: avatarHtml('zach', 'You') }
+    : { name: agentOf(id).name, html: avatarHtml(id, agentOf(id).name, agentOf(id).emoji, '', { status: statusOf(id) }) };
 
   el.innerHTML = `<div class="rm-wrap"><aside class="rm-list"></aside><section class="rm-main"></section></div>`;
   const listEl = el.querySelector<HTMLElement>('.rm-list')!;
@@ -194,7 +196,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
         </div>
       </header>
       <div class="rm-members">
-        ${view.members.map((a) => `<span class="rm-chip${a.id === room.captain ? ' captain' : ''}" title="${a.id === room.captain ? 'Lead: moderates the discussion' : ''}">${avatarHtml(a.id, a.name, a.emoji, 'sm')}<span>${esc(a.name)}</span>${a.id === room.captain && view!.members.length > 1 ? '<small class="rm-cap">lead</small>' : ''}<button data-remove="${esc(a.id)}" title="Remove ${esc(a.name)}" aria-label="Remove ${esc(a.name)}" ${live ? 'disabled' : ''}>${svg('close', 12)}</button></span>`).join('') || '<span class="muted">No agents in this room.</span>'}
+        ${view.members.map((a) => `<span class="rm-chip${a.id === room.captain ? ' captain' : ''}" title="${a.id === room.captain ? 'Lead: moderates the discussion' : ''}">${avatarHtml(a.id, a.name, a.emoji, 'sm', { status: statusOf(a.id) })}<span>${esc(a.name)}</span>${a.id === room.captain && view!.members.length > 1 ? '<small class="rm-cap">lead</small>' : ''}<button data-remove="${esc(a.id)}" title="Remove ${esc(a.name)}" aria-label="Remove ${esc(a.name)}" ${live ? 'disabled' : ''}>${svg('close', 12)}</button></span>`).join('') || '<span class="muted">No agents in this room.</span>'}
         ${room.members.length < MAX_MEMBERS && nonMembers.length ? `<button class="rm-add" data-act="add-toggle" ${live ? 'disabled' : ''}>${svg('plus', 12)}<span>Add agent</span></button>` : ''}
         <span class="grow"></span>
         <span class="rm-limits" title="${esc(MODE_HINT)}">
