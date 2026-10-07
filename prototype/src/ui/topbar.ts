@@ -1,13 +1,11 @@
-import type { ShellState, ShellStore } from '../store';
-import { fmtK, openNeeds, svg } from './format';
+import type { ShellState, ShellStore, View } from '../store';
+import { openNeeds, svg } from './format';
 
 interface Meter { key: string; label: string; value: (s: ShellState) => number; fmt: (n: number) => string }
 
 const METERS: Meter[] = [
   { key: 'agents', label: 'agents', value: (s) => s.liveCount, fmt: (n) => String(Math.round(n)) },
   { key: 'active', label: 'active', value: (s) => count(s, 'active'), fmt: (n) => String(Math.round(n)) },
-  { key: 'tok', label: 'tok/min', value: (s) => s.snapshot.meters.tokPerMin, fmt: fmtK },
-  { key: 'cost', label: '/hr', value: (s) => s.snapshot.meters.costPerHr, fmt: (n) => `$${n.toFixed(2)}` },
 ];
 
 function count(s: ShellState, status: string) {
@@ -16,13 +14,14 @@ function count(s: ShellState, status: string) {
   return n;
 }
 
-export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds: () => void; onMenu: () => void; onRooms: () => void; onBoard: () => void; onDocs: () => void }) {
+export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds: () => void; onMenu: () => void; onRooms: () => void; onBoard: () => void; onDocs: () => void; onView: (v: View) => void }) {
   el.innerHTML = `
     <button class="icon-btn menu-btn" title="Teams">${svg('menu', 18)}</button>
     <div class="brand">
       <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:color-mix(in srgb, var(--accent) 65%, var(--fg))"/><stop offset="1" style="stop-color:var(--accent)"/></linearGradient></defs><path d="M12 3.2 21 19.6H3Z" fill="none" stroke="url(#bg)" stroke-width="2.3" stroke-linejoin="round"/><path d="M12 10.5 15.6 17H8.4Z" fill="url(#bg)" opacity=".35"/></svg>
       <span>Agent OS</span>
     </div>
+    <div class="view-tabs" role="tablist" aria-label="View"><button role="tab" data-view="work" aria-selected="true" title="Work in flight: one row per ticket or MR">Work</button><button role="tab" data-view="fleet" aria-selected="false" title="Fleet map: every live agent and team">Fleet</button></div>
     <span class="src-pill ${store.source}"><i></i>${store.source === 'live' ? 'LIVE' : 'MOCK'}</span>
     <span class="conn-pill" hidden>${svg('wifiOff', 13)}<span>Reconnecting…</span></span>
     <span class="err-pill" hidden></span>
@@ -64,6 +63,8 @@ export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds:
   boardBtn.addEventListener('click', opts.onBoard);
   histBtn.addEventListener('click', () => store.setShowHistory(!store.get().showHistory));
   el.querySelector('.menu-btn')!.addEventListener('click', opts.onMenu);
+  const tabs = [...el.querySelectorAll<HTMLButtonElement>('.view-tabs button')];
+  for (const b of tabs) b.addEventListener('click', () => opts.onView(b.dataset.view as View));
 
   // Numerals ease toward their target so the bar feels alive without flicker.
   const shown = new Map<string, number>();
@@ -97,6 +98,7 @@ export function mountTopbar(el: HTMLElement, store: ShellStore, opts: { onNeeds:
     const n = openNeeds(s, store.events()).length;
     needsBtn.querySelector('b')!.textContent = String(n);
     needsBtn.dataset.zero = n ? '0' : '1';
+    for (const b of tabs) { const on = b.dataset.view === s.view; b.setAttribute('aria-selected', String(on)); b.classList.toggle('on', on); }
     histBtn.querySelector('b')!.textContent = String(s.historyCount);
     histBtn.setAttribute('aria-pressed', String(s.showHistory));
     histBtn.classList.toggle('on', s.showHistory);

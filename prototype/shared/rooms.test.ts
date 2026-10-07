@@ -15,13 +15,21 @@ test('mentions: by id or display name, case-insensitive, member order; @all mean
   assert.equal(parseMentions('@all status?', M), null);
 });
 
-test('gating: no mention = everyone, mention = only those, gating off = everyone', () => {
-  assert.deepEqual(selectResponders('status?', M, true), ['alpha', 'bravo', 'forge-coder']);
-  assert.deepEqual(selectResponders('@bravo status?', M, true), ['bravo']);
-  assert.deepEqual(selectResponders('@bravo status?', M, false), ['alpha', 'bravo', 'forge-coder']);
+test('gating (everyone mode): no mention = everyone, mention = only those, gating off = everyone', () => {
+  assert.deepEqual(selectResponders('status?', M, true, 'everyone'), ['alpha', 'bravo', 'forge-coder']);
+  assert.deepEqual(selectResponders('@bravo status?', M, true, 'everyone'), ['bravo']);
+  assert.deepEqual(selectResponders('@bravo status?', M, false, 'everyone'), ['alpha', 'bravo', 'forge-coder']);
 });
 
-const DEFAULTS = { mentionGating: true, responderMode: 'everyone', pauseAfterPosts: 24, pauseAfterTokens: 0, speakFilter: false };
+test('quiet mode (the default): a mention picks who answers, otherwise only the lead; @all is everyone; gating off changes nothing', () => {
+  assert.deepEqual(selectResponders('status?', M, true, undefined, 'bravo'), ['bravo']);
+  assert.deepEqual(selectResponders('status?', M, false, 'quiet', 'bravo'), ['bravo']);
+  assert.deepEqual(selectResponders('@forge-coder and @alpha?', M, true, 'quiet', 'bravo'), ['alpha', 'forge-coder']);
+  assert.deepEqual(selectResponders('@all status?', M, true, 'quiet', 'bravo'), ['alpha', 'bravo', 'forge-coder']);
+  assert.deepEqual(selectResponders('status?', M, true, 'quiet', 'gone'), ['alpha']);
+});
+
+const DEFAULTS = { mentionGating: true, responderMode: 'quiet', pauseAfterPosts: 24, pauseAfterTokens: 0, speakFilter: false };
 test('settings: mention gating, responder mode, soft-pause limits and the opt-in speak filter; the pipeline settings are gone', () => {
   assert.deepEqual(normalizeSettings(undefined), DEFAULTS);
   assert.deepEqual(normalizeSettings({ mentionGating: false }), { ...DEFAULTS, mentionGating: false });
@@ -53,7 +61,7 @@ test('migrateRoom: retired pipeline fields dropped, the council and final flags 
 // ---- the discussion loop, against a scripted transport
 
 function setup(text: string, members = M, captain = 'alpha', extra: Partial<Room> = {}) {
-  const room: Room = { id: 'r00000001', name: 'Test', members: members.map((m) => m.id), captain, ...normalizeSettings(undefined), archived: false, createdAt: 0, updatedAt: 0, messages: [], ...extra };
+  const room: Room = { id: 'r00000001', name: 'Test', members: members.map((m) => m.id), captain, ...normalizeSettings({ responderMode: 'everyone' }), archived: false, createdAt: 0, updatedAt: 0, messages: [], ...extra };
   let n = 0;
   const hooks = {
     append(m: Omit<RoomMessage, 'id' | 'ts'>) { const msg = { ...m, id: `m${n++}`, ts: n }; room.messages.push(msg); return msg; },
@@ -260,7 +268,7 @@ test('a one-member room just answers once; the prompt carries the whole thread',
 
 // ---- rooms v2: modes, soft pause, queue, usage, notes, speak filter, end now
 
-import { addUsage, detectLoop, emptyUsage, estimateUsage, handoffsOf, judgePrompt, parseJudge, sharedMemoryBlock, similarity, type RunHooks } from './rooms.ts';
+import { addUsage, contextNote, detectLoop, emptyUsage, estimateUsage, handoffsOf, judgePrompt, parseJudge, sharedMemoryBlock, similarity, type RunHooks } from './rooms.ts';
 import { PASS_TOKEN } from './rooms.ts';
 
 const FRESH = ['The vendor quote doubled since last year.', 'A pilot with one team limits the blast radius.', 'Audits begin in March, so timing is tight.', 'Nobody owns the rollback if the pilot fails.', 'Exclude the legacy import path from scope.', 'We need a staging copy of production data.',
@@ -498,4 +506,52 @@ test('judge prompt and parser: ids by name or @id, junk and wrong shapes are nul
   assert.deepEqual(parseJudge('Sure!\n{"speak":["@Bravo","nope"]}', ['alpha', 'bravo']), ['bravo']);
   assert.deepEqual(parseJudge('{"speak":[]}', ['alpha']), []);
   for (const bad of ['', null, 'plain text', '{"speak":"alpha"}', '{"speak":[1]}', '{bad json}']) assert.equal(parseJudge(bad, ['alpha']), null, String(bad));
+});
+
+test('quiet room: with nobody mentioned only the lead answers, once, and without Continue the run ends after that round', async () => {
+  const s = setup('Where are we?', M, 'bravo', { responderMode: 'quiet' });
+  const asked: string[] = [];
+  const reason = await run(s, { async turn(a, p) { asked.push(a); return scriptedReply(p); } });
+  assert.equal(reason, 'complete');
+  assert.deepEqual(asked, ['bravo']);
+  assert.deepEqual(who(s.room), ['you', 'bravo']);
+});
+
+test('quiet room: only @mentioned members answer, then it pauses for Continue; Continue runs one more round for the members handed a point', async () => {
+  const s = setup('@alpha what do you think?', M, 'bravo', { responderMode: 'quiet' });
+  const asked: string[][] = [];
+  let round = 0;
+  const reasons: string[] = [];
+  const reason = await runH(s, {
+    async turn(a) {
+      asked[round] = [...(asked[round] ?? []), a];
+      if (round === 0) return 'Looks fine. @forge-coder can you check the migration?';
+      return a === 'forge-coder' && round === 1 ? 'Migration checked.' : PASS_TOKEN;
+    },
+  }, { waitForContinue: async () => { reasons.push(s.state.pause?.reason ?? ''); round++; }, state: (p) => { Object.assign(s.state, p); } });
+  assert.deepEqual(asked[0], ['alpha']);
+  assert.deepEqual(asked[1], ['forge-coder'], 'Continue asks only the member that was handed the point');
+  assert.deepEqual(reasons[0], 'round');
+  assert.equal(reasons.length, 2, 'every round with a reply waits for Continue');
+  assert.deepEqual(who(s.room), ['you', 'alpha', 'forge-coder']);
+  assert.equal(reason, 'passed');
+});
+
+test('quiet room: no lead moderation prompt and no open-discussion rounds', async () => {
+  const s = setup('status?', M, 'alpha', { responderMode: 'quiet' });
+  const prompts: string[] = [];
+  await run(s, { async turn(_a, p) { prompts.push(p); return 'ok'; } });
+  assert.equal(prompts.length, 1);
+  assert.ok(!/You are the lead/.test(prompts[0]));
+});
+
+test('context note: purpose (or the name), members, lead, the quiet rule and the file pointers', () => {
+  const note = contextNote({ room: { id: 'r00000001', name: 'Rollout', purpose: 'Decide the AIPIT-6435 rollout', captain: 'bravo', responderMode: 'quiet' }, members: M, files: ['~/.openclaw/teams/agent-service/MEMORY.md'] });
+  assert.match(note, /Room: "Rollout" \(r00000001\)\. Purpose: Decide the AIPIT-6435 rollout/);
+  assert.match(note, /Room members: Zach, Alpha \(@alpha\), Bravo \(@bravo\), Forge Coder \(@forge-coder\)\. The lead is Bravo \(@bravo\)\./);
+  assert.match(note, /Only members Zach @mentions answer/);
+  assert.match(note, /- ~\/\.openclaw\/teams\/agent-service\/MEMORY\.md/);
+  assert.match(contextNote({ room: { id: 'r00000001', name: 'Rollout', captain: 'bravo' }, members: M, files: [] }), /Purpose: Rollout\n/);
+  assert.ok(!/Relevant files/.test(contextNote({ room: { id: 'r00000001', name: 'x', captain: '' }, members: M, files: [] })));
+  assert.ok(!/^Members: |Lead: /m.test(note), 'does not look like the per-turn room header');
 });

@@ -2,10 +2,11 @@
 // (live.ts, via sessions.create/sessions.send/chat.history on the CLI path the data server already uses) or a scripted fake (mock.ts).
 // Each member talks through its own dedicated session agent:<id>:room-<roomId>, never its main session.
 import { randomBytes } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import {
-  MAX_MEMBERS, MAX_MESSAGE_CHARS, MAX_ROOMS, MAX_ROOM_NAME, MAX_STORED_MESSAGES, RESPONDER_MODES, ROOM_KEY_RE, YOU, addUsage, emptyUsage, isExcludedAgent, migrateRoom, normalizeSettings, resolveCaptain, roomSessionKey, runDiscussion, selectResponders,
+  DEFAULT_RESPONDER_MODE, MAX_MEMBERS, MAX_MESSAGE_CHARS, MAX_PURPOSE_CHARS, MAX_ROOMS, MAX_ROOM_NAME, MAX_STORED_MESSAGES, RESPONDER_MODES, ROOM_KEY_RE, YOU, addUsage, contextNote, emptyUsage, isExcludedAgent, migrateRoom, normalizeSettings, resolveCaptain, roomSessionKey, runDiscussion, selectResponders,
   type Room, type RoomMember, type RoomMessage, type RoomRunState, type RoomSettings, type RoomTransport, type RunOptions, type TurnProgress, type TurnResult,
 } from '../shared/rooms.ts';
 
@@ -55,9 +56,24 @@ export const MAX_NOTES_CHARS = 4000;
 export const MAX_QUEUED = 5;
 export const MAX_PINNED = 20;
 const SETTING_KEYS = ['mentionGating', 'responderMode', 'pauseAfterPosts', 'pauseAfterTokens', 'speakFilter'] as const;
+const ROLE_SUFFIX = /-(lead|coder|reviewer|simplifier|qa)$/;
+
+export function defaultContextFiles(memberIds: string[], home = homedir()): string[] {
+  const out: string[] = [];
+  const tilde = (p: string) => (p.startsWith(home) ? `~${p.slice(home.length)}` : p);
+  const add = (p: string) => { if (!/phi/i.test(p) && existsSync(p) && !out.includes(tilde(p))) out.push(tilde(p)); };
+  add(join(home, '.openclaw', 'workspace', 'MEMORY.md'));
+  for (const id of memberIds) {
+    const team = ROLE_SUFFIX.test(id) ? id.replace(ROLE_SUFFIX, '') : '';
+    if (team) add(join(home, '.openclaw', 'teams', team, 'MEMORY.md'));
+  }
+  return out;
+}
+
 type RunEntry = { state: RoomRunState; abort: AbortController; done: Promise<void>; /** set while paused: releases the soft pause */ resume?: () => void; /** "End now" was asked */ ending: boolean };
 
-export function createRoomsService(opts: { gateway: RoomGateway; file?: string; agentTtlMs?: number; /** turn retry policy (tests shorten the backoff) */ retry?: RunOptions }) {
+export function createRoomsService(opts: { gateway: RoomGateway; file?: string; agentTtlMs?: number; /** turn retry policy (tests shorten the backoff) */ retry?: RunOptions; contextFiles?: (memberIds: string[]) => string[] }) {
+  const filesFor = opts.contextFiles ?? ((ids: string[]) => defaultContextFiles(ids));
   const { gateway } = opts;
   const rooms = new Map<string, Room>();
   const runs = new Map<string, RunEntry>();
@@ -69,10 +85,11 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
 
   if (opts.file) {
     try {
-      const parsed = JSON.parse(readFileSync(opts.file, 'utf8')) as { rooms?: Room[]; runs?: Record<string, RoomRunState> };
+      const parsed = JSON.parse(readFileSync(opts.file, 'utf8')) as { version?: number; rooms?: Room[]; runs?: Record<string, RoomRunState> };
       // Older files (captain-led council, version 1-2): migrateRoom drops the retired pipeline fields in memory; the file is rewritten on the room's next save.
       for (const r of parsed.rooms ?? []) if (ROOM_ID_RE.test(r.id) && Array.isArray(r.members)) rooms.set(r.id, migrateRoom(r));
       let dirty = false;
+      if ((parsed.version ?? 0) < 5) for (const r of rooms.values()) r.responderMode = DEFAULT_RESPONDER_MODE;
       for (const r of rooms.values()) {
         const st = parsed.runs?.[r.id];
         const wasLive = !!st && (st.status === 'running' || st.status === 'paused');
@@ -95,7 +112,7 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       const tmp = `${opts.file}.${process.pid}.tmp`;
       const states: Record<string, RoomRunState> = {};
       for (const id of rooms.keys()) { const st = runs.get(id)?.state ?? lastRuns.get(id); if (st) states[id] = st; }
-      writeFileSync(tmp, JSON.stringify({ version: 4, rooms: [...rooms.values()], runs: states }, null, 1), { mode: 0o600 });
+      writeFileSync(tmp, JSON.stringify({ version: 5, rooms: [...rooms.values()], runs: states }, null, 1), { mode: 0o600 });
       chmodSync(tmp, 0o600);
       renameSync(tmp, opts.file);
     } catch (e) { console.warn('[agent-os rooms] could not persist:', (e as Error).message); }
@@ -114,6 +131,10 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
     if (!r) throw new RoomError(404, 'unknown room');
     return r;
   }
+  const cleanPurpose = (v: unknown) => {
+    if (typeof v !== 'string' || v.length > MAX_PURPOSE_CHARS * 4) throw new RoomError(400, `purpose must be text of at most ${MAX_PURPOSE_CHARS} characters`);
+    return v.replace(/\s+/g, ' ').trim().slice(0, MAX_PURPOSE_CHARS);
+  };
   const cleanName = (v: unknown) => {
     const n = typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : '';
     if (!n) throw new RoomError(400, 'room name is required');
@@ -175,21 +196,24 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
       const list = await agents().catch(() => [] as RoomAgent[]);
       return { room: r, members: r.members.map((m) => info(list, m)), run: runs.get(id)?.state ?? lastRuns.get(id) ?? null };
     },
-    async create(body: { name?: unknown; members?: unknown; captain?: unknown } & Partial<RoomSettings>): Promise<RoomView> {
+    async create(body: { name?: unknown; members?: unknown; captain?: unknown; purpose?: unknown } & Partial<RoomSettings>): Promise<RoomView> {
       if (rooms.size >= MAX_ROOMS) throw new RoomError(400, `at most ${MAX_ROOMS} rooms`);
       const members = await validMembers(body.members ?? []);
+      const purpose = body.purpose === undefined ? '' : cleanPurpose(body.purpose);
       const now = Date.now();
-      const room: Room = { id: `r${randomBytes(4).toString('hex')}`, name: cleanName(body.name), members, captain: resolveCaptain(body.captain, members), archived: false, createdAt: now, updatedAt: now, messages: [], ...normalizeSettings(body) };
+      const room: Room = { id: `r${randomBytes(4).toString('hex')}`, name: cleanName(body.name), members, captain: resolveCaptain(body.captain, members), archived: false, createdAt: now, updatedAt: now, messages: [], ...normalizeSettings(body), ...(purpose ? { purpose } : {}) };
       rooms.set(room.id, room);
       persist();
       return this.get(room.id);
     },
-    async update(id: string, patch: { name?: unknown; addMembers?: unknown; removeMembers?: unknown; archived?: unknown; captain?: unknown; notes?: unknown } & Partial<RoomSettings>): Promise<RoomView> {
+    async update(id: string, patch: { name?: unknown; addMembers?: unknown; removeMembers?: unknown; archived?: unknown; captain?: unknown; notes?: unknown; purpose?: unknown } & Partial<RoomSettings>): Promise<RoomView> {
       const r = mustGet(id);
       if (patch.responderMode !== undefined && !RESPONDER_MODES.includes(patch.responderMode)) throw new RoomError(400, `responderMode must be one of: ${RESPONDER_MODES.join(', ')}`);
       if (patch.notes !== undefined && (typeof patch.notes !== 'string' || patch.notes.length > MAX_NOTES_CHARS)) throw new RoomError(400, `notes must be text of at most ${MAX_NOTES_CHARS} characters`);
       if (runs.has(id) && (patch.addMembers || patch.removeMembers)) throw new RoomError(409, 'room is busy: stop the run before changing members');
+      const purpose = patch.purpose === undefined ? undefined : cleanPurpose(patch.purpose);
       if (patch.name !== undefined) r.name = cleanName(patch.name);
+      if (purpose !== undefined) { if (purpose) r.purpose = purpose; else delete r.purpose; }
       if (patch.addMembers !== undefined) r.members = await validMembers([...r.members, ...(Array.isArray(patch.addMembers) ? patch.addMembers : [patch.addMembers])]);
       if (patch.removeMembers !== undefined) {
         const drop = new Set(Array.isArray(patch.removeMembers) ? patch.removeMembers : [patch.removeMembers]);
@@ -304,7 +328,11 @@ export function createRoomsService(opts: { gateway: RoomGateway; file?: string; 
     const transport: RoomTransport = {
       async turn(agentId, prompt, signal, progress) {
         await gateway.ensureSession(agentId, id, `Room: ${r.name}`);
-        return gateway.turn(agentId, id, prompt, signal, progress);
+        const fresh = !(r.primed ?? []).includes(agentId);
+        const note = fresh ? contextNote({ room: r, members, files: filesFor(r.members) }) : '';
+        const result = await gateway.turn(agentId, id, note ? `${note}\n\n${prompt}` : prompt, signal, progress);
+        if (fresh) { r.primed = [...(r.primed ?? []), agentId]; persist(); }
+        return result;
       },
       abort(agentId) { void gateway.abort?.(agentId, id).catch(() => undefined); },
       ...(gateway.judge ? { judge: (prompt: string, signal: AbortSignal) => gateway.judge!(id, r.captain, prompt, signal) } : {}),

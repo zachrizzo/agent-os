@@ -6,6 +6,8 @@ import type { Agent, Delta, FleetEvent, Selection, Snapshot, State, Store, Team,
 
 export type Source = 'live' | 'mock';
 export type Filter = 'all' | 'needs' | 'blocked' | 'handoffs' | 'approvals' | 'system';
+export type View = 'work' | 'fleet';
+export interface SendResult { to: string; relayed: boolean; agent: string }
 
 export interface ShellState extends State {
   loaded: boolean;        // first snapshot received
@@ -13,6 +15,8 @@ export interface ShellState extends State {
   query: string;
   filter: Filter;
   showHistory: boolean;   // History toggle: reveal retired (finished/aborted/archived/stale) sessions
+  view: View;
+  showAllWork: boolean;
   liveCount: number;      // live agents; the headline "agents" number
   historyCount: number;   // retired sessions the toggle would reveal (or is revealing)
   agentsAll: Map<string, Agent>; // every retained session, incl. hidden ones (name/team lookups for old events)
@@ -26,8 +30,9 @@ export interface ShellStore extends Store {
   setQuery(q: string): void;
   setFilter(f: Filter): void;
   setShowHistory(on: boolean): void;
-  /** "Message agent": POST the text to the data server, which sends it to the session. Rejects with the server's reason. */
-  sendMessage(sessionKey: string, text: string): Promise<void>;
+  setView(v: View): void;
+  setShowAllWork(on: boolean): void;
+  sendMessage(sessionKey: string, text: string, direct?: boolean): Promise<SendResult>;
   connect(): void;
   close(): void;
 }
@@ -52,6 +57,8 @@ export function createStore(source: Source): ShellStore {
     query: '',
     filter: 'all',
     showHistory: false,
+    view: 'work',
+    showAllWork: false,
     liveCount: 0,
     historyCount: 0,
     agentsAll: new Map(),
@@ -186,16 +193,17 @@ export function createStore(source: Source): ShellStore {
       rebuild(rawTeams, {});
       notify();
     },
-    async sendMessage(sessionKey, text) {
+    setView(v) { if (v !== state.view) { state.view = v; notify(); } },
+    setShowAllWork(on) { if (on !== state.showAllWork) { state.showAllWork = on; notify(); } },
+    async sendMessage(sessionKey, text, direct = false) {
       const r = await fetch(api(`send?source=${source}`), {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-agent-os-send': '1' },
-        body: JSON.stringify({ key: sessionKey, message: text }),
+        body: JSON.stringify({ key: sessionKey, message: text, ...(direct ? { direct: true } : {}) }),
       });
-      if (!r.ok) {
-        const why = await r.json().then((j: { error?: string }) => j.error, () => undefined);
-        throw new Error(why ?? `HTTP ${r.status}`);
-      }
+      const j = await r.json().catch(() => ({})) as { error?: string; to?: string; relayed?: boolean; agent?: string };
+      if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
+      return { to: j.to ?? sessionKey, relayed: j.relayed === true, agent: j.agent ?? '' };
     },
     connect,
     close() { clearTimeout(timer); es?.close(); es = null; },

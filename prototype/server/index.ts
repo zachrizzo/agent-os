@@ -4,7 +4,6 @@
 //   GET /api/stream?source=live|mock      (SSE: "snapshot" once, then "delta")
 //   GET /api/history?source=..&key=<sessionKey>
 //   GET /api/board?source=..           read-only Workboard cards (boards spark + forge) for the Board view
-//   POST /api/send?source=..   {key, message}  ("Message agent": one Gateway sessions.send; needs header x-agent-os-send: 1)
 //   GET  /api/rooms            rooms + the live agent list (PHI excluded)      GET /api/rooms/:id   one room with its thread and run state
 //   POST /api/rooms {name, members, captain?}   create             POST /api/rooms/:id {name?, addMembers?, removeMembers?, archived?, captain?}
 //   POST /api/rooms/:id/send {message}   starts an open discussion: every member replies, then rounds of reply-or-PASS; the lead (captain) moderates; it ends when a whole round is PASS or on Stop
@@ -71,10 +70,10 @@ async function send(req: IncomingMessage, res: ServerResponse, src: string | nul
   try {
     const s = source(src);
     await s.ready;
-    await s.send(body.key, body.message);
-    json(res, 200, { ok: true });
+    const routed = await s.send(body.key, body.message, body.direct === true);
+    json(res, 200, { ok: true, to: routed.key, relayed: routed.relayed, agent: routed.agent });
   } catch (e) {
-    json(res, /unknown session|empty|too long/.test((e as Error).message) ? 400 : 502, { error: (e as Error).message });
+    json(res, /unknown session|empty|too long|direct send/.test((e as Error).message) ? 400 : 502, { error: (e as Error).message });
   }
 }
 

@@ -12,9 +12,9 @@ const POLL_IDLE_MS = 5000;
 
 type Mode = { t: 'empty' } | { t: 'create' } | { t: 'room'; id: string };
 
-const MODE_LABEL = { everyone: 'Everyone', mentions: 'Mentions only', lead: 'Lead first' } as const;
-const MODE_HINT = 'Who answers a message that does not @mention anyone: everyone talks it through; only @mentioned agents answer; or the lead answers first and others join when @mentioned or handed a point.';
-const PAUSE_TITLE: Record<PauseInfo['reason'], string> = { posts: 'Paused to check in', tokens: 'Paused at the token ceiling', repeat: 'Paused: an agent repeated itself', ring: 'Paused: a hand-off loop' };
+const MODE_LABEL = { quiet: 'Quiet', everyone: 'Everyone', mentions: 'Mentions only', lead: 'Lead first' } as const;
+const MODE_HINT = 'Who answers: Quiet (default) = only @mentioned agents, or the lead when nobody is mentioned, one round until you press Continue; Everyone = all agents talk it through; Mentions only = only @mentioned agents; Lead first = the lead answers and others join when @mentioned or handed a point.';
+const PAUSE_TITLE: Record<PauseInfo['reason'], string> = { round: 'One round done', posts: 'Paused to check in', tokens: 'Paused at the token ceiling', repeat: 'Paused: an agent repeated itself', ring: 'Paused: a hand-off loop' };
 const money = (n: number) => `$${n.toFixed(n < 1 ? 3 : 2)}`;
 const secs = (since: number) => { const s = Math.max(0, Math.round((Date.now() - since) / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`; };
 const clipTxt = (t: string, n: number) => (t.length > n ? `${t.slice(0, n - 1).trimEnd()}…` : t);
@@ -38,6 +38,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
   let draft = '';
   const picked = new Set<string>();
   let createName = '';
+  let createPurpose = '';
   let timer: number | undefined;
   let busy = false;
   const agentOf = (id: string): RoomAgent => agents.find((a) => a.id === id) ?? view?.members.find((a) => a.id === id) ?? { id, name: id };
@@ -101,6 +102,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
       mainEl.innerHTML = `<div class="rm-create">
         <h3>New room</h3>
         <label class="rm-field"><span>Name</span><input class="rm-name-in" maxlength="60" placeholder="e.g. Launch review" value="${esc(createName)}"/></label>
+        <label class="rm-field"><span>Purpose <small>optional · each agent gets it in a short context note on its first turn</small></span><input class="rm-purpose-in" maxlength="300" placeholder="e.g. Decide the AIPIT-6435 rollout plan" value="${esc(createPurpose)}"/></label>
         <div class="rm-field"><span>Agents <small>${picked.size} selected · pick from the live agent list</small></span>${agentPicker(picked)}</div>
         <div class="rm-actions"><button class="rm-primary" data-act="create" ${picked.size && createName.trim() ? '' : 'disabled'}>Create room</button><button class="rm-ghost" data-act="cancel">Cancel</button></div>
         <div class="rm-notice" role="status">${esc(notice)}</div></div>`;
@@ -132,7 +134,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
       ? `<span class="rm-typing"><i></i>${names.length ? `${esc(names.slice(0, 3).join(', '))}${names.length > 3 ? ` +${names.length - 3}` : ''} ${names.length === 1 ? 'is' : 'are'} typing…` : 'Discussion in progress…'}</span><button class="rm-ghost" data-act="end" title="Let the replies in flight land, then finish. Nothing new starts.">End now</button><button class="rm-ghost" data-act="stop" title="Abort every agent run right away">Stop</button>`
       : '';
     const pauseBanner = paused && run?.pause
-      ? `<div class="rm-banner pause" role="status"><span class="rm-btxt"><b>${svg('pause', 13)} ${esc(PAUSE_TITLE[run.pause.reason])}</b><small>${esc(run.pause.detail)}. Nothing is capped: Continue picks the discussion up where it left off, or write a message to steer it.</small></span><button class="rm-primary sm" data-act="resume">Continue</button><button class="rm-ghost sm" data-act="end" title="Finish now without another round">End now</button><button class="rm-ghost sm" data-act="stop">Stop</button></div>`
+      ? `<div class="rm-banner pause" role="status"><span class="rm-btxt"><b>${svg('pause', 13)} ${esc(PAUSE_TITLE[run.pause.reason])}</b><small>${esc(run.pause.detail)}. ${run.pause.reason === 'round' ? 'Nobody else speaks until you press Continue for another round, or write a message.' : 'Nothing is capped: Continue picks the discussion up where it left off, or write a message to steer it.'}</small></span><button class="rm-primary sm" data-act="resume">Continue</button><button class="rm-ghost sm" data-act="end" title="Finish now without another round">End now</button><button class="rm-ghost sm" data-act="stop">Stop</button></div>`
       : run?.status === 'interrupted'
         ? `<div class="rm-banner interrupted" role="status"><span class="rm-btxt"><b>${svg('warn', 13)} Interrupted by a restart</b><small>The last discussion was cut off and is not replayed (its tools may already have run). Send a message to start again.</small></span></div>`
         : '';
@@ -200,7 +202,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
         ${room.members.length < MAX_MEMBERS && nonMembers.length ? `<button class="rm-add" data-act="add-toggle" ${live ? 'disabled' : ''}>${svg('plus', 12)}<span>Add agent</span></button>` : ''}
         <span class="grow"></span>
         <span class="rm-limits" title="${esc(MODE_HINT)}">
-          answers <select data-set="responderMode" class="wide" aria-label="Who answers a message with no @mention">${(Object.keys(MODE_LABEL) as Array<keyof typeof MODE_LABEL>).map((k) => `<option value="${k}" ${(room.responderMode ?? 'everyone') === k ? 'selected' : ''}>${MODE_LABEL[k]}</option>`).join('')}</select></span>
+          answers <select data-set="responderMode" class="wide" aria-label="Who answers a message with no @mention">${(Object.keys(MODE_LABEL) as Array<keyof typeof MODE_LABEL>).map((k) => `<option value="${k}" ${(room.responderMode ?? 'quiet') === k ? 'selected' : ''}>${MODE_LABEL[k]}</option>`).join('')}</select></span>
         <span class="rm-limits" title="The lead moderates the discussion. An @mention in your message goes straight to that agent.">
           lead <select data-set="captain" class="wide" aria-label="Discussion lead" ${live ? 'disabled' : ''}>${view.members.map((a) => `<option value="${esc(a.id)}" ${a.id === room.captain ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></span>
       </div>
@@ -208,7 +210,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
       ${settingsPanel}
       ${notesPanel}
       ${adding ? `<div class="rm-addbox">${agentPicker(new Set(), room.members, 'data-addpick')}<div class="rm-actions"><button class="rm-ghost sm" data-act="add-close">Done</button></div></div>` : ''}
-      <div class="rm-thread" tabindex="0">${msgs || typing ? msgs + typing : '<div class="rm-blank small"><span>No messages yet. Ask something: every agent replies and they talk it through together until nobody has more to add. <span class="rm-at">@name</span> goes straight to just that agent.</span></div>'}</div>
+      <div class="rm-thread" tabindex="0">${msgs || typing ? msgs + typing : `<div class="rm-blank small"><span>${(room.responderMode ?? 'quiet') === 'quiet' ? 'No messages yet. <span class="rm-at">@name</span> asks just that agent; with no @mention only the lead answers. One reply each, then the room waits for you to press Continue.' : 'No messages yet. Ask something: every agent replies and they talk it through together until nobody has more to add. <span class="rm-at">@name</span> goes straight to just that agent.'}</span></div>`}</div>
       <footer class="rm-compose">
         ${pauseBanner}
         <div class="rm-status">${status}</div>
@@ -290,12 +292,12 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
         host.run('open-session', roomSessionKey(room.captain, room.id)).catch((err: Error) => { notice = err.message; paintMain(); });
         break;
       }
-      case 'new': mode = { t: 'create' }; picked.clear(); createName = ''; notice = ''; paint(); break;
+      case 'new': mode = { t: 'create' }; picked.clear(); createName = ''; createPurpose = ''; notice = ''; paint(); break;
       case 'cancel': mode = { t: 'empty' }; notice = ''; paint(); break;
       case 'toggle-archived': showArchived = !showArchived; paintList(); break;
       case 'create': void act(async () => {
-        const v = await api.create({ name: createName, members: [...picked] });
-        mode = { t: 'room', id: v.room.id }; view = v; picked.clear(); createName = ''; return v;
+        const v = await api.create({ name: createName, members: [...picked], ...(createPurpose.trim() ? { purpose: createPurpose.trim() } : {}) });
+        mode = { t: 'room', id: v.room.id }; view = v; picked.clear(); createName = ''; createPurpose = ''; return v;
       }); break;
       case 'rename': renaming = true; paintMain(); mainEl.querySelector<HTMLInputElement>('.rm-rename')?.select(); break;
       case 'rename-cancel': renaming = false; paintMain(); break;
@@ -345,6 +347,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
       const save = el.querySelector<HTMLButtonElement>('[data-act=notes-save]');
       if (save) save.disabled = t.value === (view?.room.notes ?? '');
     }
+    if (t.matches('.rm-purpose-in')) createPurpose = t.value;
     if (t.matches('.rm-name-in')) { createName = t.value; el.querySelector<HTMLButtonElement>('[data-act=create]')!.disabled = !(picked.size && createName.trim()); }
   });
   el.addEventListener('keydown', (e) => {

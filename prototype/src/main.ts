@@ -17,6 +17,8 @@ import { mountDrawer } from './ui/drawer';
 import { mountRail } from './ui/rail';
 import { mountRooms } from './ui/rooms';
 import { mountTopbar } from './ui/topbar';
+import { mountWork } from './ui/work';
+import type { View } from './store';
 import { fileParam } from '../shared/docs';
 import { initTheme } from './theme';
 
@@ -39,7 +41,21 @@ async function boot() {
     onOpenSession: (key) => drawer.openSession(key, true),
   });
   const activity = mountActivity($('activity'), store, (e) => drawer.open(e));
-  const renderRail = mountRail($('rail'), store, (sel) => { center.focus(sel); app.classList.remove('rail-open'); });
+  const workEl = $('work');
+  const work = mountWork(workEl, store, { onOpenSession: (key) => drawer.openSession(key) });
+  const closeOverlays = () => { rooms.hide(); board.hide(); docs.hide(); renderTop.setRooms(roomCount, false); renderTop.setBoard(false); renderTop.setDocs(false); };
+  const showView = (v: View) => {
+    closeOverlays();
+    store.setView(v);
+    applyView();
+  };
+  const applyView = () => {
+    const v = store.get().view;
+    app.dataset.view = v;
+    workEl.hidden = v !== 'work';
+    if (v === 'work') work.paintNow(); else requestAnimationFrame(() => center.resize());
+  };
+  const renderRail = mountRail($('rail'), store, (sel) => { if (store.get().view !== 'fleet') { store.setView('fleet'); applyView(); } center.focus(sel); app.classList.remove('rail-open'); });
   let roomCount = 0;
   const rooms = mountRooms($('rooms'), store, (n) => { roomCount = n; renderTop.setRooms(n, rooms.isOpen()); }, createHostBridge());
   const board = mountBoard($('board'), store);
@@ -50,6 +66,7 @@ async function boot() {
     onRooms: () => { board.hide(); renderTop.setBoard(false); docs.hide(); renderTop.setDocs(false); rooms.toggle(); renderTop.setRooms(roomCount, rooms.isOpen()); },
     onBoard: () => { rooms.hide(); renderTop.setRooms(roomCount, false); docs.hide(); renderTop.setDocs(false); board.toggle(); renderTop.setBoard(board.isOpen()); },
     onDocs: () => { rooms.hide(); renderTop.setRooms(roomCount, false); board.hide(); renderTop.setBoard(false); docs.toggle(); renderTop.setDocs(docs.isOpen()); },
+    onView: showView,
   });
   window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || drawer.isOpen()) return;
@@ -65,6 +82,7 @@ async function boot() {
     renderRail(s);
     center.update(s);
     activity.update(s);
+    work.update();
   });
 
   let map: MapApi;
@@ -86,6 +104,7 @@ async function boot() {
   new ResizeObserver(() => map.resize()).observe(center.host);
 
   store.connect();
+  applyView();
   void rooms.prime();
   // Deep link: ?file=reports/x.md opens straight into Docs.
   const deepFile = fileParam(location.search);

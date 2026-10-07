@@ -123,7 +123,7 @@ test('menu actions and panels: wrap up, end, notes (save + decisions + unpin), s
   run = null;
   const { el, rooms } = await open();
   const modeSel = el.querySelector<HTMLSelectElement>('[data-set=responderMode]')!;
-  assert.deepEqual([...modeSel.options].map((o) => o.textContent), ['Everyone', 'Mentions only', 'Lead first']);
+  assert.deepEqual([...modeSel.options].map((o) => o.textContent), ['Quiet', 'Everyone', 'Mentions only', 'Lead first']);
   calls.length = 0;
   modeSel.value = 'lead'; modeSel.dispatchEvent(new w.Event('change', { bubbles: true })); await tick();
   assert.deepEqual(calls[0], ['rooms/r00000001', { responderMode: 'lead' }]);

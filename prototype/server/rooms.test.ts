@@ -1,11 +1,11 @@
 // Rooms service: the open discussion over a fake Gateway, Stop -> gateway abort, persistence, and loading old (captain-led council) rooms.json files.
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { scriptedReply, triggerText } from '../shared/scripted.ts';
-import { createRoomsService, listAgentsWithFallback, parseAgentList, type RoomAgent, type RoomGateway } from './rooms.ts';
+import { createRoomsService, defaultContextFiles, listAgentsWithFallback, parseAgentList, type RoomAgent, type RoomGateway } from './rooms.ts';
 
 const AGENTS: RoomAgent[] = [{ id: 'rfc-lead', name: 'RFC Lead' }, { id: 'rfc-skeptic', name: 'RFC Skeptic' }, { id: 'rfc-scribe', name: 'RFC Scribe' }, { id: 'phi', name: 'PHI' }];
 function fakeGateway(delays: Record<string, number> = {}) {
@@ -27,10 +27,10 @@ const tmp = () => mkdtempSync(join(tmpdir(), 'aos-rooms-'));
 
 test('new rooms: the lead is rfc-lead when present, else the first member; no pipeline settings exist', async () => {
   const svc = createRoomsService({ gateway: fakeGateway().gw });
-  const a = await svc.create({ name: 'A', members: ['rfc-skeptic', 'rfc-scribe'] });
+  const a = await svc.create({ name: 'A', members: ['rfc-skeptic', 'rfc-scribe'], responderMode: 'everyone' });
   assert.equal(a.room.captain, 'rfc-skeptic');
   for (const k of ['mode', 'maxRounds', 'maxSteps', 'councils', 'maxTurns', 'memberTimeoutSec']) assert.ok(!(k in a.room), k);
-  const b = await svc.create({ name: 'B', members: ['rfc-skeptic', 'rfc-lead'] });
+  const b = await svc.create({ name: 'B', members: ['rfc-skeptic', 'rfc-lead'], responderMode: 'everyone' });
   assert.equal(b.room.captain, 'rfc-lead');
   assert.equal((await svc.update(b.room.id, { captain: 'rfc-skeptic' })).room.captain, 'rfc-skeptic');
   await assert.rejects(svc.update(b.room.id, { captain: 'rfc-scribe' }), /lead must be a member/);
@@ -45,7 +45,7 @@ test('a message starts an open discussion: member bubbles in the thread, a secon
   const file = join(dir, 'rooms.json');
   const { gw, log } = fakeGateway();
   const svc = createRoomsService({ gateway: gw, file });
-  const { room } = await svc.create({ name: 'Talk', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'] });
+  const { room } = await svc.create({ name: 'Talk', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'], responderMode: 'everyone' });
   await svc.send(room.id, 'Ship the RFC?');
   await new Promise((r) => setTimeout(r, 5));
   assert.equal((await svc.get(room.id)).run?.status, 'running');
@@ -65,19 +65,19 @@ test('a message starts an open discussion: member bubbles in the thread, a secon
   // reload: same thread from disk
   const svc2 = createRoomsService({ gateway: gw, file });
   assert.deepEqual((await svc2.get(room.id)).room.messages, v.room.messages);
-  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 4);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 5);
   svc.close(); svc2.close(); rmSync(dir, { recursive: true });
 });
 
 test('@mention goes straight to that agent; one-member rooms answer once', async () => {
   const { gw, log } = fakeGateway();
   const svc = createRoomsService({ gateway: gw });
-  const { room } = await svc.create({ name: 'B', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'] });
+  const { room } = await svc.create({ name: 'B', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'], responderMode: 'everyone' });
   await svc.send(room.id, '@rfc-skeptic what do you think?');
   await svc.idle(room.id);
   assert.deepEqual(log.map((l) => l.agent), ['rfc-skeptic']);
   assert.deepEqual((await svc.get(room.id)).room.messages.map((m) => m.from), ['you', 'rfc-skeptic']);
-  const solo = await svc.create({ name: 'Solo', members: ['rfc-lead'] });
+  const solo = await svc.create({ name: 'Solo', members: ['rfc-lead'], responderMode: 'everyone' });
   log.length = 0;
   await svc.send(solo.room.id, 'anything');
   await svc.idle(solo.room.id);
@@ -88,7 +88,7 @@ test('@mention goes straight to that agent; one-member rooms answer once', async
 test('while members are working the run state lists them as typing; Stop aborts every in-flight run and ends it stopped', async () => {
   const { gw, aborted } = fakeGateway({ 'rfc-skeptic': 5000, 'rfc-scribe': 5000 });
   const svc = createRoomsService({ gateway: gw });
-  const { room } = await svc.create({ name: 'S', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'] });
+  const { room } = await svc.create({ name: 'S', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'], responderMode: 'everyone' });
   await svc.send(room.id, 'long one');
   await new Promise((r) => setTimeout(r, 300));
   const mid = await svc.get(room.id);
@@ -104,7 +104,7 @@ test('while members are working the run state lists them as typing; Stop aborts 
 
 test('phi stays refused', async () => {
   const svc = createRoomsService({ gateway: fakeGateway().gw });
-  await assert.rejects(svc.create({ name: 'P', members: ['phi'] }), /cannot join/);
+  await assert.rejects(svc.create({ name: 'P', members: ['phi'], responderMode: 'everyone' }), /cannot join/);
   svc.close();
 });
 
@@ -133,7 +133,8 @@ test('old rooms.json (captain-led council, with mode/steps/councils and the reti
   assert.equal(readFileSync(file, 'utf8'), raw, 'load does not rewrite the file');
   await svc.update('rc1cabea9', { name: 'RFC Council' });
   const saved = JSON.parse(readFileSync(file, 'utf8'));
-  assert.equal(saved.version, 4);
+  assert.equal(saved.version, 5);
+  assert.ok(saved.rooms.every((r: any) => r.responderMode === 'quiet'), 'rooms saved before quiet rooms existed become quiet');
   assert.ok(saved.rooms.every((r: any) => !('mode' in r) && !('councils' in r) && !('maxSteps' in r)));
   svc.close(); rmSync(dir, { recursive: true });
 });
@@ -141,7 +142,7 @@ test('old rooms.json (captain-led council, with mode/steps/councils and the reti
 test('a member that never replies is never timed out; Stop ends it', async () => {
   const { gw, aborted } = fakeGateway({ 'rfc-scribe': 3_600_000 });
   const svc = createRoomsService({ gateway: gw });
-  const { room } = await svc.create({ name: 'T', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'] });
+  const { room } = await svc.create({ name: 'T', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'], responderMode: 'everyone' });
   await svc.send(room.id, 'x');
   await new Promise((r) => setTimeout(r, 500));
   assert.equal((await svc.get(room.id)).run?.status, 'running');
@@ -162,7 +163,7 @@ test('a message sent while a discussion runs is queued (flagged, hidden from age
   const base = fakeGateway({ 'rfc-skeptic': 60 });
   const gw: RoomGateway = { ...base.gw, async turn(a, r, p, s, pr) { prompts.push(p); return base.gw.turn(a, r, p, s, pr); } };
   const svc = createRoomsService({ gateway: gw });
-  const { room } = await svc.create({ name: 'Q', members: ['rfc-lead', 'rfc-skeptic'] });
+  const { room } = await svc.create({ name: 'Q', members: ['rfc-lead', 'rfc-skeptic'], responderMode: 'everyone' });
   await svc.send(room.id, 'first question');
   await nap(20);
   const v = await svc.send(room.id, 'and what about cost?'); // busy: queued, not a 409
@@ -184,7 +185,7 @@ test('a message sent while a discussion runs is queued (flagged, hidden from age
 test('too many queued messages are refused; Stop drops the queued ones with a note (not replayed, not silently lost)', async () => {
   const { gw } = fakeGateway({ 'rfc-lead': 3_600_000 });
   const svc = createRoomsService({ gateway: gw });
-  const { room } = await svc.create({ name: 'Q', members: ['rfc-lead', 'rfc-skeptic'] });
+  const { room } = await svc.create({ name: 'Q', members: ['rfc-lead', 'rfc-skeptic'], responderMode: 'everyone' });
   await svc.send(room.id, 'start');
   for (let i = 0; i < 5; i++) await svc.send(room.id, `q${i}`);
   await assert.rejects(svc.send(room.id, 'q5'), /already queued/);
@@ -200,7 +201,7 @@ test('too many queued messages are refused; Stop drops the queued ones with a no
 test('soft pause end to end: a repeating room pauses (never stops), the room stays busy, Continue carries on, and Stop ends a pause', async () => {
   const { gw } = fakeGateway();
   const svc = createRoomsService({ gateway: gw });
-  const { room } = await svc.create({ name: 'P', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'] });
+  const { room } = await svc.create({ name: 'P', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'], responderMode: 'everyone' });
   await svc.send(room.id, 'pingpong'); // every member @mentions the next one with the same words every round
   await until(async () => (await svc.get(room.id)).run?.status === 'paused');
   let v = await svc.get(room.id);
@@ -225,7 +226,7 @@ test('soft pause end to end: a repeating room pauses (never stops), the room sta
 test('writing while paused releases the pause and the message joins; End now while paused ends the run softly', async () => {
   const { gw } = fakeGateway();
   const svc = createRoomsService({ gateway: gw });
-  const { room } = await svc.create({ name: 'P', members: ['rfc-lead', 'rfc-skeptic'] });
+  const { room } = await svc.create({ name: 'P', members: ['rfc-lead', 'rfc-skeptic'], responderMode: 'everyone' });
   await svc.update(room.id, { pauseAfterPosts: 1 });
   await svc.send(room.id, 'hello');
   await until(async () => (await svc.get(room.id)).run?.status === 'paused');
@@ -244,7 +245,7 @@ test('usage: each run totals turns/tokens/cost, the room keeps a running total a
   const base = fakeGateway();
   const gw: RoomGateway = { ...base.gw, async turn(a, r, p, s) { const text = (await base.gw.turn(a, r, p, s)) as string; return a === 'rfc-skeptic' ? { text, usage: { inputTokens: 400, outputTokens: 40, costUsd: 0.02 } } : text; } };
   const svc = createRoomsService({ gateway: gw });
-  const { room } = await svc.create({ name: 'U', members: ['rfc-lead', 'rfc-skeptic'] });
+  const { room } = await svc.create({ name: 'U', members: ['rfc-lead', 'rfc-skeptic'], responderMode: 'everyone' });
   await svc.send(room.id, 'one');
   await svc.idle(room.id);
   const first = await svc.get(room.id);
@@ -299,7 +300,7 @@ test('live run state is written to rooms.json as it changes (so a crash mid-run 
   const dir = tmp();
   const file = join(dir, 'rooms.json');
   const svc = createRoomsService({ gateway: fakeGateway({ 'rfc-lead': 400 }).gw, file });
-  const { room } = await svc.create({ name: 'W', members: ['rfc-lead', 'rfc-skeptic'] });
+  const { room } = await svc.create({ name: 'W', members: ['rfc-lead', 'rfc-skeptic'], responderMode: 'everyone' });
   await svc.send(room.id, 'x');
   await nap(60);
   const mid = JSON.parse(readFileSync(file, 'utf8'));
@@ -339,7 +340,7 @@ test('notes and pins: notes are saved and capped, pinned messages survive the tr
   const base = fakeGateway();
   const gw: RoomGateway = { ...base.gw, async turn(a, r, p, s, pr) { prompts.push(p); return base.gw.turn(a, r, p, s, pr); } };
   const svc = createRoomsService({ gateway: gw });
-  const { room } = await svc.create({ name: 'N', members: ['rfc-lead', 'rfc-skeptic'] });
+  const { room } = await svc.create({ name: 'N', members: ['rfc-lead', 'rfc-skeptic'], responderMode: 'everyone' });
   await svc.update(room.id, { notes: '  Budget is 5k.  ' });
   assert.equal((await svc.get(room.id)).room.notes, 'Budget is 5k.');
   await assert.rejects(svc.update(room.id, { notes: 'x'.repeat(4001) }), /notes must be text/);
@@ -365,7 +366,7 @@ test('notes and pins: notes are saved and capped, pinned messages survive the tr
 test('wrap up: a normal @lead message (no special phase); End now never aborts the gateway runs', async () => {
   const fg = fakeGateway();
   const svc = createRoomsService({ gateway: fg.gw });
-  const { room } = await svc.create({ name: 'W', members: ['rfc-lead', 'rfc-skeptic'] });
+  const { room } = await svc.create({ name: 'W', members: ['rfc-lead', 'rfc-skeptic'], responderMode: 'everyone' });
   await svc.send(room.id, 'start');
   await svc.idle(room.id);
   const before = fg.log.length;
@@ -387,7 +388,7 @@ test('speak filter via the service: opt-in, uses the gateway judge when present;
   let broken = false;
   const gw: RoomGateway = { ...base.gw, async judge() { judged++; if (broken) throw new Error('model down'); return '{"speak":[]}'; } };
   const svc = createRoomsService({ gateway: gw });
-  const { room } = await svc.create({ name: 'F', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'] });
+  const { room } = await svc.create({ name: 'F', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'], responderMode: 'everyone' });
   await svc.send(room.id, 'plain');
   await svc.idle(room.id);
   assert.equal(judged, 0, 'off by default');
@@ -412,7 +413,7 @@ test('two sends in the same tick start one run (the second is queued); the run i
   const file = join(dir, 'rooms.json');
   const fg = fakeGateway({ 'rfc-lead': 80, 'rfc-skeptic': 80 });
   const svc = createRoomsService({ gateway: fg.gw, file });
-  const { room } = await svc.create({ name: 'R', members: ['rfc-lead', 'rfc-skeptic'] });
+  const { room } = await svc.create({ name: 'R', members: ['rfc-lead', 'rfc-skeptic'], responderMode: 'everyone' });
   const [a, b] = await Promise.all([svc.send(room.id, 'one'), svc.send(room.id, 'two')]);
   assert.equal(a.run?.status, 'running');
   assert.equal(b.room.messages.filter((m) => m.from === 'you' && m.queued).length, 1, 'the second message was queued behind the first run');
@@ -439,7 +440,7 @@ test('Stop records a cutoff: a reply that arrives late from the stopped run is d
     },
   };
   const svc = createRoomsService({ gateway: gw });
-  const { room } = await svc.create({ name: 'Cutoff', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'] });
+  const { room } = await svc.create({ name: 'Cutoff', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'], responderMode: 'everyone' });
   await svc.send(room.id, 'stuck question');
   await new Promise((r) => setTimeout(r, 60));
   const runId = (await svc.get(room.id)).run!.id;
@@ -476,7 +477,7 @@ test('rate limits are retried through the service with the configured backoff, a
     },
   };
   const svc = createRoomsService({ gateway: gw, retry: { retryDelayMs: () => 1 } });
-  const { room } = await svc.create({ name: 'Retry', members: ['rfc-lead', 'rfc-skeptic'] });
+  const { room } = await svc.create({ name: 'Retry', members: ['rfc-lead', 'rfc-skeptic'], responderMode: 'everyone' });
   await svc.send(room.id, 'flaky one');
   await svc.idle(room.id);
   let v = await svc.get(room.id);
@@ -504,6 +505,67 @@ test('listing agents falls back to `openclaw agents list --json` when the Gatewa
   // end to end: a room can be created from the fallback list
   const svc = createRoomsService({ gateway: { ...fakeGateway().gw, listAgents: () => listAgentsWithFallback(down, async () => cli) } });
   assert.deepEqual((await svc.list()).agents.map((a) => a.id), ['main', 'spark']);
-  assert.equal((await svc.create({ name: 'X', members: ['main', 'spark'] })).room.members.length, 2);
+  assert.equal((await svc.create({ name: 'X', members: ['main', 'spark'], responderMode: 'everyone' })).room.members.length, 2);
   svc.close();
+});
+
+test('quiet rooms by default: an unaddressed message reaches only the lead, it pauses after one round, and Continue is needed for more', async () => {
+  const { gw, log } = fakeGateway();
+  const svc = createRoomsService({ gateway: gw, contextFiles: () => [] });
+  const { room } = await svc.create({ name: 'Quiet', members: ['rfc-lead', 'rfc-skeptic', 'rfc-scribe'] });
+  assert.equal(room.responderMode, 'quiet');
+  await svc.send(room.id, 'Ship the RFC?');
+  for (let i = 0; i < 50 && (await svc.get(room.id)).run?.status !== 'paused'; i++) await new Promise((r) => setTimeout(r, 10));
+  const v = await svc.get(room.id);
+  assert.equal(v.run?.status, 'paused');
+  assert.equal(v.run?.pause?.reason, 'round');
+  assert.deepEqual(log.map((l) => l.agent), ['rfc-lead']);
+  assert.deepEqual(v.room.messages.filter((m) => m.from !== 'system').map((m) => m.from), ['you', 'rfc-lead']);
+  await svc.end(room.id);
+  await svc.idle(room.id);
+  assert.equal((await svc.get(room.id)).run?.stopReason, 'ended');
+  assert.equal(log.length, 1, 'nobody spoke again without Continue');
+  svc.close();
+});
+
+test('each member session gets the room context note on its first turn only; the note names the purpose, members and files, and is persisted as primed', async () => {
+  const dir = tmp();
+  const file = join(dir, 'rooms.json');
+  const prompts: Array<{ agent: string; prompt: string }> = [];
+  const gw: RoomGateway = {
+    async listAgents() { return AGENTS; },
+    async ensureSession() {},
+    async turn(agent, _room, prompt) { prompts.push({ agent, prompt }); return 'ok'; },
+  };
+  const svc = createRoomsService({ gateway: gw, file, contextFiles: (ids) => ids.map((id) => `~/.openclaw/teams/${id}/MEMORY.md`) });
+  const { room } = await svc.create({ name: 'Ctx', purpose: 'Decide the rollout', members: ['rfc-lead', 'rfc-skeptic'] });
+  const settle = async () => {
+    for (let i = 0; i < 50 && (await svc.get(room.id)).run?.status !== 'paused'; i++) await new Promise((r) => setTimeout(r, 10));
+    await svc.end(room.id);
+    await svc.idle(room.id);
+  };
+  await svc.send(room.id, '@rfc-skeptic first?');
+  await settle();
+  await svc.send(room.id, '@rfc-skeptic again?');
+  await settle();
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0].prompt, /^\[Agent OS room context/);
+  assert.match(prompts[0].prompt, /Purpose: Decide the rollout/);
+  assert.match(prompts[0].prompt, /Room members: Zach, RFC Lead \(@rfc-lead\), RFC Skeptic \(@rfc-skeptic\)/);
+  assert.match(prompts[0].prompt, /~\/\.openclaw\/teams\/rfc-lead\/MEMORY\.md/);
+  assert.match(prompts[0].prompt, /Zach's message:\n@rfc-skeptic first\?/);
+  assert.ok(!/room context/.test(prompts[1].prompt), 'second turn has no note');
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).rooms[0].primed, ['rfc-skeptic']);
+  await assert.rejects(svc.update(room.id, { purpose: 42 } as never), /purpose must be text/);
+  assert.equal((await svc.update(room.id, { purpose: '  New   aim ' })).room.purpose, 'New aim');
+  svc.close(); rmSync(dir, { recursive: true });
+});
+
+test('default context files: workspace memory and member team memory that exist, with ~ paths, never phi', () => {
+  const home = tmp();
+  for (const d of ['.openclaw/workspace', '.openclaw/teams/agent-service', '.openclaw/teams/phi']) mkdirSync(join(home, d), { recursive: true });
+  for (const f of ['.openclaw/workspace/MEMORY.md', '.openclaw/teams/agent-service/MEMORY.md', '.openclaw/teams/phi/MEMORY.md']) writeFileSync(join(home, f), 'x');
+  const files = defaultContextFiles(['agent-service-lead', 'agent-service-coder', 'phi-lead', 'admin-portal-coder', 'coder'], home);
+  assert.deepEqual(files, ['~/.openclaw/workspace/MEMORY.md', '~/.openclaw/teams/agent-service/MEMORY.md']);
+  rmSync(home, { recursive: true });
 });

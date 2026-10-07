@@ -12,6 +12,8 @@ import { classifySession, isRunning } from '../shared/liveness.ts';
 import { BOARDS, normalizeCard, type BoardCard } from '../shared/board.ts';
 import { isExcludedAgent, judgeSessionKey, type TurnProgress, type TurnResult } from '../shared/rooms.ts';
 import { toolInFlight, usageFromMessages } from '../shared/turn-usage.ts';
+import { nowFromProgress, progressOf, type RunProgress } from '../shared/progress.ts';
+import { routeMessage, type Routed } from '../shared/route.ts';
 import { redact } from './redact.ts';
 import { createRoomsService, isRoomKey, listAgentsWithFallback, roomSessionKey, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
@@ -26,6 +28,8 @@ const agentOfKey = (key: unknown) => String(key ?? '').match(/^agent:([^:]+):/)?
 const MAX_MESSAGE_CHARS = 4000;
 const HIST_PER_POLL = 2; // chat.history reads per poll (single-flight CLI; main's history is ~3 MB)
 const HIST_MESSAGES = 120;
+const PROGRESS_PER_POLL = 2;
+const PROGRESS_EVERY_MS = 8000;
 const RING_MAX = 600;
 const POLL_MS = 2500;
 const MAX_POLL_MS = 30_000;
@@ -111,7 +115,7 @@ function gist(preview: string, n = 60): string {
 }
 
 function shortKey(key: string): string {
-  if (key === COS_ID) return 'Chief of Staff';
+  if (key === COS_ID || parseKey(key).agentId === 'main') return 'Chief of Staff';
   const { agentId, kind } = parseKey(key);
   return kind === 'main' ? agentId : `${agentId} ${kind}`;
 }
@@ -131,6 +135,7 @@ export function createLiveSource(): Source {
   const ring: FleetEvent[] = [];
   const identities = new Map<string, string>(); // agentId -> display name
   const histSig = new Map<string, string>(); // session key -> run-state signature last read from history
+  const progress = new Map<string, { at: number; p?: RunProgress }>();
   const agentLabel = (agentId: string, isCos: boolean) => (isCos || agentId === 'main' ? 'Chief of Staff' : identities.get(agentId) ?? cap(agentId));
   let lastError: string | undefined;
   let eid = 0;
@@ -241,6 +246,19 @@ export function createLiveSource(): Source {
     for (const e of openNeedsOf(ring, t)) if (e.to === 'zach') openAsk.set(e.from, clip(e.text, 80));
     const histDue: Array<{ s: any; meta: ReturnType<typeof sessionMetaOf>; sig: string; at: number }> = [];
 
+    const runningKeys = new Set(visible.filter((s) => isRunning(s)).map((s) => s.key));
+    for (const k of [...progress.keys()]) if (!runningKeys.has(k)) progress.delete(k);
+    const progressDue = [...runningKeys].filter((k) => t - (progress.get(k)?.at ?? 0) >= PROGRESS_EVERY_MS)
+      .sort((x, y) => (progress.get(x)?.at ?? 0) - (progress.get(y)?.at ?? 0)).slice(0, PROGRESS_PER_POLL);
+    for (const k of progressDue) {
+      try {
+        const h = await call('chat.history', { sessionKey: k, limit: 1 }, 10_000);
+        progress.set(k, { at: t, p: progressOf(h?.inFlightRun) });
+      } catch { progress.set(k, { at: t, p: progress.get(k)?.p }); }
+    }
+    const lastOwn = new Map<string, string>();
+    for (const e of ring) if (!e.sys && e.kind !== 'handoff' && e.from !== 'zach') lastOwn.set(e.from, e.text);
+
     // Active children per parent, for CoS/lead "now" lines.
     const activeKids = new Map<string, number>();
     for (const s of visible) {
@@ -275,15 +293,18 @@ export function createLiveSource(): Source {
         : label ? clip(label, 28) : `${agentId}-${tail.slice(0, 6)}`;
       const preview = String(s.lastMessagePreview ?? '');
       const g = gist(preview);
+      const own = g && !g.startsWith('Message from') && !g.startsWith('Cron:') ? g : '';
+      const outcome = lastOwn.get(s.key) ?? own;
+      const doing = progress.get(s.key)?.p;
       const now = clip(
         status === 'error' ? `${s.abortedLastRun ? 'Aborted' : cap(String(s.status))}${label ? ` · ${label}` : ''}`
         : status === 'needs' ? `Needs you: ${ask}`
-        : isCos && running ? 'Working with Zach'
+        : isCos && running ? nowFromProgress(doing, 'Working with Zach')
         : role !== 'worker' && !running && activeKids.get(s.key) ? `Overseeing ${activeKids.get(s.key)} active ${activeKids.get(s.key) === 1 ? 'worker' : 'workers'}`
         : isCos ? (s.status === 'done' ? 'Waiting for Zach' : 'Idle')
-        : running ? (g && !g.startsWith('Message from') && !g.startsWith('Cron:') ? g : label ? `Working: ${label}` : 'Working')
-        : s.status === 'done' ? `Done · ${g || label || 'finished'}`
-        : g || label || 'Idle', 60);
+        : running ? nowFromProgress(doing, own || (label ? `Working: ${label}` : 'Working'))
+        : s.status === 'done' ? `Done · ${outcome || label || 'finished'}`
+        : outcome ? `Idle · ${outcome}` : label || 'Idle', 80);
 
       const tokens = Number(s.totalTokens ?? (Number(s.inputTokens ?? 0) + Number(s.outputTokens ?? 0))) || 0;
       const costUsd = Number(s.estimatedCostUsd ?? 0) || 0;
@@ -436,15 +457,18 @@ export function createLiveSource(): Source {
         return { role, ts, ...(sender ? { sender: clip(sender, 60) } : {}), text: clip(raw, 600) };
       }).filter((m) => m.text);
     },
-    async send(key, text) {
+    async send(key, text, direct): Promise<Routed> {
       const message = String(text ?? '').trim();
       if (!message) throw new Error('empty message');
       if (message.length > MAX_MESSAGE_CHARS) throw new Error(`message too long (max ${MAX_MESSAGE_CHARS} chars)`);
       if (!agents.has(key)) throw new Error('unknown session');
-      await call(SEND_METHOD, { key, message, idempotencyKey: randomUUID() }, 20_000);
-      const e = { ...ev(Date.now(), 'zach', key, 'message', message), session: key };
+      const routed = routeMessage(key, message, direct);
+      if (!agents.has(routed.key)) throw new Error('unknown session');
+      await call(SEND_METHOD, { key: routed.key, message: routed.message, idempotencyKey: randomUUID() }, 20_000);
+      const e = { ...ev(Date.now(), 'zach', routed.key, 'message', routed.relayed ? `@${routed.agent}: ${message}` : message), session: routed.key };
       mergeEvents(ring, [e], RING_MAX);
       broadcast({ ts: e.ts, upserts: [], removed: [], events: [e], meters: meters() });
+      return routed;
     },
     async board(): Promise<BoardCard[]> {
       const lists = await Promise.all(BOARDS.map(async (b) => ((await call('workboard.cards.list', { boardId: b }, 15_000)).cards ?? []).map((c: unknown) => normalizeCard(c, b))));

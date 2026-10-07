@@ -17,8 +17,16 @@ const scenarios = [
   { name: "no mic in composer", query: "?nomic=1", wait: 10500, expect: { live: false, talk: 0, dict: 0, sends: 0, status: "isn't available" } },
 ];
 
-// Mock fleet (prototype/server/mock.ts): 60 live agents; every team also retains finished/aborted/archived sessions.
-const LIVE_AGENTS = 60;
+const LIVE_AGENTS = 64;
+const setMode = async (p, mode) => {
+  for (let i = 0; i < 5; i++) {
+    const saved = p.waitForResponse((r) => /\/api\/rooms\/r[0-9a-f]{8}\?/.test(r.url()) && r.request().method() === "POST", { timeout: 3000 }).then(() => true, () => false);
+    await p.selectOption("[data-set=responderMode]", mode);
+    if (await saved) return;
+  }
+  throw new Error(`could not switch the room to ${mode}`);
+};
+const toFleet = async (p) => { await p.click(".view-tabs [data-view=fleet]"); await p.waitForSelector("#work", { state: "hidden" }); await p.waitForSelector(".view-tabs [data-view=fleet][aria-selected=true]"); };
 const num = async (page, sel) => Number((await page.locator(sel).first().innerText()).replace(/\D+/g, ""));
 
 async function liveOnlyChecks(browser, tag) {
@@ -30,6 +38,9 @@ async function liveOnlyChecks(browser, tag) {
   await page.waitForFunction(() => document.querySelector(".meter[data-k=agents] b")?.textContent !== "–", null, { timeout: 15000 });
   await page.waitForTimeout(2500); // let the count tween settle
   const bad = [];
+  if ((await page.getAttribute(".view-tabs [data-view=work]", "aria-selected")) !== "true" || !(await page.locator("#work:visible").count())) bad.push(["Work is the default view", "not selected"]);
+  if (await page.locator(".meter[data-k=tok], .meter[data-k=cost]").count()) bad.push(["no tok/min or $/hr meters", "present"]);
+  await toFleet(page);
   const agents = () => num(page, ".meter[data-k=agents] b");
   const hidden = () => num(page, ".hist-btn b");
   const subtitle = () => page.locator(".c-sub").first().innerText();
@@ -64,12 +75,16 @@ async function messageAgentChecks(browser, tag) {
   await page.goto(base + "agent-os/?source=mock");
   await page.waitForSelector(".hist-btn");
   await page.waitForFunction(() => document.querySelector(".meter[data-k=agents] b")?.textContent !== "–", null, { timeout: 15000 });
+  await toFleet(page);
   if (await page.locator(".c-compose:visible").count()) bad.push(["no composer without a selection", "visible"]);
   // Agent view: select the first live agent row in the rail.
   const row = page.locator("#rail .row.agent").first();
   await row.waitFor();
-  const agentName = (await row.locator(".nm").innerText()).replace(/\s*lead\s*$/i, "").trim();
   await row.click();
+  await page.waitForFunction(() => /@[\w-]+/.test(document.querySelector(".c-compose .cmp-via")?.textContent ?? ""), null, { timeout: 5000 }).catch(() => {});
+  const agentId = await page.evaluate(() => [...document.querySelectorAll(".c-compose .cmp-via")].map((e) => e.textContent).join("").match(/@([\w-]+)/)?.[1] ?? "");
+  if (!agentId) bad.push(["composer says it relays through the Chief of Staff", await page.locator(".c-compose .cmp-via").innerText()]);
+  if (await page.locator(".c-compose .cmp-direct:visible").count()) bad.push(["no Send direct for an agent with a lead", "visible"]);
   await page.waitForSelector(".c-compose:visible");
   const sent1 = `harness ping ${tag} ${Date.now()}`;
   await page.locator(".c-compose textarea").fill(sent1);
@@ -81,8 +96,9 @@ async function messageAgentChecks(browser, tag) {
   if (!feed.includes(sent1)) bad.push(["Activity shows the sent message", "missing"]);
   const youRow = page.locator("#activity .ev", { hasText: sent1 });
   const eline = (await youRow.locator(".eline").innerText()).replace(/\s+/g, " ");
-  if (!/^You\s*→\s*\S/.test(eline)) bad.push(["Activity row reads You -> agent", eline]);
-  if (!eline.includes(agentName)) bad.push(["Activity row targets the selected agent", `${eline} vs ${agentName}`]);
+  if (!/^You\s*→\s*Chief of Staff/.test(eline)) bad.push(["Activity row reads You -> Chief of Staff", eline]);
+  if (!(await youRow.innerText()).includes(`@${agentId}`)) bad.push(["Activity row names the agent it is for", `${await youRow.innerText()} vs @${agentId}`]);
+  if (!(await page.locator(".c-compose .cmp-status.ok").innerText()).includes(`relay to @${agentId}`)) bad.push(["status says it went to the Chief of Staff", await page.locator(".c-compose .cmp-status").innerText()]);
   // Drawer: open it from that Activity row; thread shows the message, composer sends again.
   await youRow.click();
   await page.waitForSelector("#drawer.open .d-compose textarea:not([disabled])");
@@ -96,20 +112,24 @@ async function messageAgentChecks(browser, tag) {
   if (!(await page.locator("#activity .stream").innerText()).includes(sent2)) bad.push(["Activity shows the drawer message", "missing"]);
   // Empty / over-long input is refused by the server, not silently sent.
   const refused = await page.evaluate(async () => {
-    const r = await fetch(new URL("api/send?source=mock", document.baseURI), { method: "POST", headers: { "content-type": "application/json", "x-agent-os-send": "1" }, body: JSON.stringify({ key: "agent:nope:main", message: "x" }) });
-    const nohdr = await fetch(new URL("api/send?source=mock", document.baseURI), { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-    return [r.status, nohdr.status];
+    const post = (body, hdr = true) => fetch(new URL("api/send?source=mock", document.baseURI), { method: "POST", headers: { "content-type": "application/json", ...(hdr ? { "x-agent-os-send": "1" } : {}) }, body: JSON.stringify(body) });
+    const r = await post({ key: "agent:nope:main", message: "x" });
+    const nohdr = await post({}, false);
+    const chained = await post({ key: "agent:agent-service-lead:main", message: "x", direct: true });
+    const relayed = await (await post({ key: "agent:agent-service-lead:main", message: "harness relay" })).json();
+    const direct = await (await post({ key: "agent:scrum:cron:w0rk0006", message: "harness direct", direct: true })).json();
+    return [r.status, nohdr.status, chained.status, relayed.to, relayed.relayed, direct.to, direct.relayed];
   });
-  if (refused[0] !== 400 || refused[1] !== 403) bad.push(["unknown session 400 / missing header 403", JSON.stringify(refused)]);
+  if (JSON.stringify(refused) !== JSON.stringify([400, 403, 400, "agent:main:main", true, "agent:scrum:cron:w0rk0006", false])) bad.push(["unknown 400 / no header 403 / direct to a chained agent 400 / relay to main / direct to scrum", JSON.stringify(refused)]);
   // Team view: a team row targets its lead.
   await page.keyboard.press("Escape");
   await page.fill(".search input", "");
   await page.locator("#rail .row.team").nth(1).click();
   await page.waitForSelector(".c-compose:visible");
-  if (!(await page.locator(".c-compose textarea").getAttribute("placeholder"))?.includes("lead")) bad.push(["team view composer targets the lead", await page.locator(".c-compose textarea").getAttribute("placeholder")]);
+  if (!/via Chief of Staff/.test(await page.locator(".c-compose textarea").getAttribute("placeholder") ?? "")) bad.push(["team view composer goes through the Chief of Staff", await page.locator(".c-compose textarea").getAttribute("placeholder")]);
   if (errors.length) bad.push(["pageerrors", errors.join("; ")]);
   if (bad.length) failed++;
-  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · Message agent composer (agent view, team view, drawer, Activity You -> agent)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · Message agent composer via the Chief of Staff (agent view, team view, drawer, Activity You -> Chief of Staff, direct only without a chain)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
   await page.close();
 }
 
@@ -122,6 +142,7 @@ async function a2aChecks(browser, tag) {
   await page.goto(base + "agent-os/?source=mock");
   await page.waitForSelector(".hist-btn");
   await page.waitForFunction(() => document.querySelector(".meter[data-k=agents] b")?.textContent !== "–", null, { timeout: 15000 });
+  await toFleet(page);
   await page.locator("#rail .row.agent").first().click();
   await page.waitForSelector(".c-compose:visible");
   await page.click(".cmp-thread");
@@ -171,13 +192,27 @@ async function roomsChecks(browser, tag) {
   expect("three members shown", (await page.locator(".rm-members .rm-chip").count()) === 3);
   expect("captain defaults to the first member", (await page.locator("[data-set=captain]").inputValue()) === "forge");
 
-  // no mention -> everyone answers, in one thread, with name + avatar; Zach is "You"
   const send = async (text) => { await page.locator(".rm-compose textarea").fill(text); await page.keyboard.press("Enter"); };
+  expect("new rooms are quiet", (await page.locator("[data-set=responderMode]").inputValue()) === "quiet");
+  await send("Quiet check please");
+  await page.waitForSelector(".rm-banner.pause [data-act=resume]", { timeout: 15000 }).catch(() => bad.push(["quiet room pauses after one round", "no Continue"]));
+  const quiet = await page.locator(".rm-msg .rm-meta b").allInnerTexts();
+  expect("quiet: only the lead (Forge) answered", quiet.join(",") === "You,Forge", quiet.join(","));
+  expect("quiet: the banner says one round is done", /One round done/.test(await page.locator(".rm-banner.pause").innerText()));
+  await page.waitForTimeout(800);
+  expect("quiet: nobody else speaks without Continue", (await page.locator(".rm-msg").count()) === 2);
+  await page.click(".rm-banner.pause [data-act=end]");
+  await page.waitForSelector(".rm-banner.pause", { state: "detached" });
+  await idle();
+  await setMode(page, "everyone");
+
+  // no mention -> everyone answers, in one thread, with name + avatar; Zach is "You"
   await send("Status check please");
   await page.waitForFunction(() => document.querySelectorAll(".rm-msg:not(.pending)").length >= 4, null, { timeout: 15000 }).catch(async () => bad.push(["everyone answers with no @mention", String(await page.locator(".rm-msg").count())]));
   await idle();
   const names = await page.locator(".rm-msg .rm-meta b").allInnerTexts();
-  expect("Zach first, then every member, the lead (Forge) last of round one", names[0] === "You" && ["Spark", "Research", "Forge"].every((n) => names.includes(n)) && names.indexOf("Forge") > names.indexOf("Spark"), names.join(","));
+  const open = names.slice(names.lastIndexOf("You"));
+  expect("Zach first, then every member, the lead (Forge) last of round one", open[0] === "You" && ["Spark", "Research", "Forge"].every((n) => open.includes(n)) && open.indexOf("Forge") > open.indexOf("Spark"), names.join(","));
   expect("each message has its own avatar", (await page.locator(".rm-msg > .avatar").count()) === (await page.locator(".rm-msg").count()));
   const before = (await page.locator(".rm-msg").count());
 
@@ -219,7 +254,7 @@ async function roomsChecks(browser, tag) {
   expect("rooms persist across a reload", (await page.locator(".rm-row", { hasText: name + " v2" }).count()) === 1);
   await page.locator(".rm-row", { hasText: name + " v2" }).click();
   await page.waitForSelector(".rm-msg");
-  expect("thread persists across a reload", (await page.locator(".rm-msg").count()) >= 8);
+  expect("thread persists across a reload", (await page.locator(".rm-msg").count()) >= 10);
   await menu("archive");
   await page.waitForFunction((n) => ![...document.querySelectorAll(".rm-rows:not(.archived) .rm-row")].some((r) => r.textContent.includes(n)), name + " v2");
   await page.click("[data-act=toggle-archived]");
@@ -236,7 +271,7 @@ async function roomsChecks(browser, tag) {
   expect("guards: no header 403, phi 400, unknown room 404, unknown agent 400", JSON.stringify(g) === "[403,400,404,400]", JSON.stringify(g));
   if (errors.length) bad.push(["pageerrors", errors.join("; ")]);
   if (bad.length) failed++;
-  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · group rooms (create, gating, members, Stop, rename/archive, persistence, guards)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · group rooms (quiet by default, create, gating, members, Stop, rename/archive, persistence, guards)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
   await page.close();
 }
 
@@ -368,6 +403,7 @@ async function themeChecks(browser, tag) {
   await frame().evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }))); // focus lives in the host page, so dispatch inside the frame
   await frame().waitForFunction(() => !document.querySelector("#drawer.open"));
   await page.waitForTimeout(500); // let the drawer fade out
+  await toFleet(frame());
   await frame().locator("#rail .row.agent").first().click();
   await frame().waitForSelector(".c-compose:visible");
   await frame().locator(".c-compose textarea").fill("Draft to check contrast");
@@ -493,6 +529,7 @@ async function markdownChecks(browser, tag) {
   for (const id of ["spark", "forge", "research"]) await page.locator(`input[data-pick=${id}]`).check();
   await page.click("[data-act=create]");
   await page.waitForSelector(".rm-bar h3");
+  await setMode(page, "everyone");
   await page.locator(".rm-compose textarea").fill("richmd: how should we roll this out? **bold from Zach** and `code`");
   await page.keyboard.press("Enter");
   await page.waitForSelector(".rm-status .rm-typing", { timeout: 8000 });
@@ -531,6 +568,7 @@ async function markdownChecks(browser, tag) {
 
   // session drawer: assistant bubble and the A2A row
   await page.waitForFunction(() => document.querySelector(".meter[data-k=agents] b")?.textContent !== "–", null, { timeout: 15000 });
+  await toFleet(page);
   await page.locator("#rail .row.agent").first().click();
   await page.waitForSelector(".c-compose:visible");
   await page.click(".cmp-thread");
@@ -647,11 +685,54 @@ async function docsChecks(browser, tag) {
   console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · docs viewer (rendered/raw, both themes, hostile input, deep link)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
 }
 
+async function workChecks(browser, tag) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const bad = [];
+  const expect = (name, ok, detail = "") => { if (!ok) bad.push([name, detail]); };
+  await page.goto(base + "agent-os/?source=mock");
+  await page.waitForSelector("#work .wk-row[data-key='AIPIT-6358']", { timeout: 15000 });
+  const row = (key) => page.locator(`#work .wk-row[data-key='${key}']`);
+  const text = async (key, sel) => (await row(key).locator(sel).innerText()).replace(/\s+/g, " ").trim();
+  const states = await page.locator("#work .wk-row").evaluateAll((rs) => rs.map((r) => r.className.match(/st-(\w+)/)[1]));
+  const firstOther = states.findIndex((st) => st !== "needs");
+  expect("Needs Zach rows are pinned on top", firstOther > 0 && states.slice(firstOther).every((st) => st !== "needs"), states.join(","));
+  expect("AIPIT-6401 needs Zach, with the question as the blocker", (await text("AIPIT-6401", ".wk-state")) === "Needs Zach" && (await text("AIPIT-6401", ".wk-block")).includes("staging today"));
+  expect("AIPIT-6358: one row with its MR, working, owned by the lead", (await row("AIPIT-6358").count()) === 1 && (await text("AIPIT-6358", ".wk-line")).includes("!980") && (await text("AIPIT-6358", ".wk-state")) === "Working" && (await text("AIPIT-6358", ".wk-lead")) === "agent-service Lead/PM", await text("AIPIT-6358", ".wk-line"));
+  expect("AIPIT-6358: last milestone is the review verdict, the open must-fix is the blocker", (await text("AIPIT-6358", ".wk-ms b")) === "Review: changes requested" && (await text("AIPIT-6358", ".wk-block")) === "Review: changes requested");
+  expect("AIPIT-6358: the Now line says what the agent is doing", (await text("AIPIT-6358", ".wk-now")).includes("Running a command"), await text("AIPIT-6358", ".wk-now"));
+  expect("AIPIT-6358: age since the first sign of the work", (await text("AIPIT-6358", ".wk-age")) === "2h", await text("AIPIT-6358", ".wk-age"));
+  expect("MER-212 is blocked with its reason", (await text("MER-212", ".wk-state")) === "Blocked" && (await text("MER-212", ".wk-block")).includes("lease"));
+  expect("AIPIT-6435 is done; its last milestone is the security pass", (await text("AIPIT-6435", ".wk-state")) === "Done" && (await text("AIPIT-6435", ".wk-ms b")) === "Security: pass");
+  expect("automation (cron) work is hidden by default", (await row("AIPIT-6000").count()) === 0);
+  await page.click("#work .wk-toggle");
+  await page.waitForSelector("#work .wk-row[data-key='AIPIT-6000']");
+  expect("the toggle reveals automation work", (await page.getAttribute("#work .wk-toggle", "aria-pressed")) === "true");
+  await row("AIPIT-6000").click();
+  await page.waitForSelector("#drawer.open .d-compose textarea");
+  expect("a row opens its session", (await page.locator("#drawer .d-meta .mono").first().innerText()) === "agent:scrum:cron:w0rk0006");
+  expect("Send direct is offered for an agent with no approval chain", (await page.locator("#drawer .cmp-direct:visible").count()) === 1);
+  await page.locator("#drawer .cmp-direct input").check();
+  expect("checking it says the message goes straight to the agent", (await page.locator("#drawer .cmp-via").innerText()).includes("straight to @scrum"));
+  await page.keyboard.press("Escape");
+  await row("AIPIT-6358").click();
+  await page.waitForSelector("#drawer.open .d-compose textarea");
+  expect("no Send direct for an agent under a lead", (await page.locator("#drawer .cmp-direct:visible").count()) === 0 && (await page.locator("#drawer .cmp-via").innerText()).includes("relays it to @agent-service-coder"));
+  await page.keyboard.press("Escape");
+  await toFleet(page);
+  expect("Fleet shows the map", (await page.locator("#center .aos-map canvas").count()) >= 1 && (await page.getAttribute(".view-tabs [data-view=fleet]", "aria-selected")) === "true");
+  if (errors.length) bad.push(["pageerrors", errors.join("; ")]);
+  if (bad.length) failed++;
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · Work view (default tab, rows per ticket/MR, Needs Zach pinned, lead/milestone/blocker/age, automation toggle, row opens session, direct only without a chain)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  await page.close();
+}
+
 let failed = 0;
 for (const [tag, engine] of [["webkit", webkit], ["chromium", chromium]]) {
   const browser = await engine.launch();
   // One scenario failing (or timing out) must not hide the others: report it and carry on.
-  for (const check of [liveOnlyChecks, noReplayChecks, themeChecks, messageAgentChecks, a2aChecks, roomsChecks, erroringCountChecks, activityChecks, markdownChecks, docsChecks]) {
+  for (const check of [workChecks, liveOnlyChecks, noReplayChecks, themeChecks, messageAgentChecks, a2aChecks, roomsChecks, erroringCountChecks, activityChecks, markdownChecks, docsChecks]) {
     try { await check(browser, tag); } catch (e) { failed++; console.log(`FAIL ${tag} · ${check.name} threw: ${String(e.message ?? e).split("\n").slice(0, 3).join(" ").slice(0, 300)}`); }
   }
   for (const sc of scenarios) {
