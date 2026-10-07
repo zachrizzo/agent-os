@@ -7,7 +7,7 @@ test('mock rooms: turns report usage, the speak-filter judge skips members nobod
   const src = createMockSource();
   try {
     const rooms = src.rooms;
-    const { room } = await rooms.create({ name: 'Mock', members: ['forge', 'spark', 'research'] });
+    const { room } = await rooms.create({ name: 'Mock', members: ['forge', 'spark', 'research'], responderMode: 'everyone' });
     await rooms.send(room.id, 'plain question');
     await rooms.idle(room.id);
     const plain = await rooms.get(room.id);

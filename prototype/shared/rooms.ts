@@ -17,6 +17,7 @@ export const MAX_ROOMS = 50;
 export const MAX_ROOM_NAME = 60;
 export const MAX_MESSAGE_CHARS = 4000;
 export const MAX_STORED_MESSAGES = 400;
+export const MAX_PURPOSE_CHARS = 300;
 const CONTEXT_MESSAGES = 6;
 const CONTEXT_ITEM_CHARS = 600;
 const DISCUSSION_ITEM_CHARS = 1500;
@@ -45,9 +46,9 @@ export interface RoomMessage {
   /** Pinned by Zach as a decision: always shown in the Decisions shelf and quoted to every member. */
   pinned?: boolean;
 }
-/** Who answers a message that does not @mention anyone. `everyone`: all members (the default). `mentions`: nobody until Zach @mentions someone (or @all). `lead`: the lead answers alone; others join when @mentioned or handed a point. */
-export type ResponderMode = 'everyone' | 'mentions' | 'lead';
-export const RESPONDER_MODES: readonly ResponderMode[] = ['everyone', 'mentions', 'lead'];
+export type ResponderMode = 'quiet' | 'everyone' | 'mentions' | 'lead';
+export const RESPONDER_MODES: readonly ResponderMode[] = ['quiet', 'everyone', 'mentions', 'lead'];
+export const DEFAULT_RESPONDER_MODE: ResponderMode = 'quiet';
 export interface RoomSettings {
   mentionGating: boolean;
   responderMode: ResponderMode;
@@ -71,12 +72,14 @@ export interface Room extends RoomSettings {
   messages: RoomMessage[];
   /** Shared notes for the room: written by Zach, quoted to every member each turn. */
   notes?: string;
+  purpose?: string;
+  primed?: string[];
   /** Running total across every run in this room. */
   usage?: RoomUsage;
 }
 /** What one member is doing right now, for the participants strip. `waiting`: the lead is holding its turn until the others have answered. */
 export interface AgentActivity { id: string; state: 'thinking' | 'tool' | 'waiting'; since: number; tool?: string; waitingOn?: string[] }
-export interface PauseInfo { reason: 'posts' | 'tokens' | 'repeat' | 'ring'; detail: string; at: number }
+export interface PauseInfo { reason: 'posts' | 'tokens' | 'repeat' | 'ring' | 'round'; detail: string; at: number }
 export interface RoomRunState {
   id: string;
   /** `paused`: a soft pause, waiting for Continue. `interrupted`: the data server restarted mid-run; the run is not replayed. */
@@ -119,7 +122,7 @@ export const DEFAULT_PAUSE_POSTS = 24;
 export function normalizeSettings(raw: Partial<RoomSettings> | undefined): RoomSettings {
   return {
     mentionGating: raw?.mentionGating !== false,
-    responderMode: RESPONDER_MODES.includes(raw?.responderMode as ResponderMode) ? raw!.responderMode! : 'everyone',
+    responderMode: RESPONDER_MODES.includes(raw?.responderMode as ResponderMode) ? raw!.responderMode! : DEFAULT_RESPONDER_MODE,
     pauseAfterPosts: clampInt(raw?.pauseAfterPosts, 0, 500, DEFAULT_PAUSE_POSTS),
     pauseAfterTokens: clampInt(raw?.pauseAfterTokens, 0, 50_000_000, 0),
     speakFilter: raw?.speakFilter === true,
@@ -164,12 +167,13 @@ export function parseMentions(text: string, members: RoomMember[]): string[] | n
  * Round-1 responders. @all always means everyone. With mention gating on (or in `mentions` mode), @mentioned members answer alone; a message with no mention goes to
  * everyone (`everyone`), only the lead (`lead`), or nobody (`mentions`). Gating off (outside `mentions` mode): everyone, always.
  */
-export function selectResponders(text: string, members: RoomMember[], gating: boolean, mode: ResponderMode = 'everyone', leadId = ''): string[] {
+export function selectResponders(text: string, members: RoomMember[], gating: boolean, mode: ResponderMode = DEFAULT_RESPONDER_MODE, leadId = ''): string[] {
   const everyone = members.map((m) => m.id);
-  if (!gating && mode !== 'mentions') return everyone;
+  if (!gating && mode !== 'mentions' && mode !== 'quiet') return everyone;
   const hit = parseMentions(text, members);
   if (hit === null) return everyone;
   if (hit.length) return hit;
+  if (mode === 'quiet') return everyone.includes(leadId) ? [leadId] : everyone.slice(0, 1);
   if (mode === 'mentions') return [];
   if (mode === 'lead' && members.length > 1 && everyone.includes(leadId)) return [leadId];
   return everyone;
@@ -248,6 +252,25 @@ export function memberPrompt(c: PromptCtx): string {
     ? ` You are the lead: you moderate this discussion, as a member who also takes part. Keep it moving: address members with @id when someone should dig in, point out where two members disagree, ask for what is missing. You do not conclude the discussion; when there is nothing left to steer, reply exactly ${PASS_TOKEN}. If Zach asks for a summary, write it as a normal message.`
     : '';
   return [promptHead(c), `${body}${lead}`, TALK].join('\n\n');
+}
+
+const MODE_RULE: Record<ResponderMode, string> = {
+  quiet: 'Only members Zach @mentions answer; when he mentions nobody, only the lead answers. One reply per round: the room waits for Zach to press Continue before anyone speaks again.',
+  everyone: 'Every member answers and the discussion runs in rounds until everyone passes.',
+  mentions: 'Only members Zach @mentions answer.',
+  lead: 'The lead answers first; others join when @mentioned or handed a point.',
+};
+
+export function contextNote(c: { room: Pick<Room, 'id' | 'name' | 'purpose' | 'captain'> & Partial<Pick<Room, 'responderMode'>>; members: RoomMember[]; files: string[] }): string {
+  const lead = c.members.find((m) => m.id === c.room.captain);
+  const purpose = (c.room.purpose ?? '').trim() || c.room.name;
+  return [
+    `[Agent OS room context: read once, then answer the message below]`,
+    `Room: "${c.room.name}" (${c.room.id}). Purpose: ${clipText(oneLine(purpose), MAX_PURPOSE_CHARS)}`,
+    `Room members: Zach, ${c.members.map((m) => `${m.name} (@${m.id})`).join(', ')}.${lead ? ` The lead is ${lead.name} (@${lead.id}).` : ''}`,
+    `How it works: ${MODE_RULE[c.room.responderMode ?? DEFAULT_RESPONDER_MODE]} This session is your seat in the room, separate from your main chat.`,
+    c.files.length ? `Relevant files (read only what you need):\n${c.files.map((f) => `- ${f}`).join('\n')}` : '',
+  ].filter(Boolean).join('\n');
 }
 
 // ---- safety: repeats and rings (a soft pause, never a stop)
@@ -396,10 +419,12 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
   const lead = members.find((m) => m.id === room.captain) ?? members[0];
   const byId = new Map(members.map((m) => [m.id, m]));
   const order = members.map((m) => m.id);
-  const mode = room.responderMode ?? 'everyone';
+  const mode = room.responderMode ?? DEFAULT_RESPONDER_MODE;
+  const quiet = mode === 'quiet';
   const gating = room.mentionGating !== false;
   /** A message that names members, or (lead-first mode) names nobody: only those answer it, and hand-offs pull others in. */
   const isDirected = (text: string) => {
+    if (quiet) return true;
     if (members.length < 2 && mode !== 'mentions') return false;
     const hit = gating || mode === 'mentions' ? parseMentions(text, members) : null;
     return !!hit?.length || (gating && mode === 'lead' && members.length > 1 && hit?.length === 0);
@@ -564,7 +589,7 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
       if (queued.length) { join(queued); continue; }
 
       // Soft pause (never a stop): hold the run until Zach clicks Continue, writes, or Stops.
-      const why = posted.length ? pauseReason() : null;
+      const why = posted.length && !quiet ? pauseReason() : null;
       if (why && hooks.waitForContinue) {
         hooks.state({ status: 'paused', pause: why });
         await hooks.waitForContinue(signal);
@@ -578,6 +603,22 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
       }
 
       const troubled = failures > failuresBefore || benched.size > 0; // a turn failed this round, or a member was already benched: not a clean ending
+      if (quiet && posted.length) {
+        const handed = new Set<string>();
+        for (const p of posted) for (const m of parseMentions(p.text, members.filter((x) => x.id !== p.id)) ?? []) handed.add(m);
+        if (!hooks.waitForContinue) return troubled ? 'failed' : 'complete';
+        const names = (ids: Iterable<string>) => [...ids].map((id) => byId.get(id)?.name ?? id).join(', ');
+        hooks.state({ status: 'paused', pause: { reason: 'round', detail: handed.size ? `${names(posted.map((p) => p.id))} replied and handed a point to ${names(handed)}` : `${names(posted.map((p) => p.id))} replied`, at: Date.now() } });
+        await hooks.waitForContinue(signal);
+        if (signal.aborted) return 'cancelled';
+        hooks.state({ status: 'running', pause: undefined });
+        if (ended()) return 'ended';
+        sincePosts = 0; sinceTokens = 0; hooks.state({ posts: 0 });
+        const late = hooks.takeQueued?.() ?? [];
+        if (late.length) { join(late); continue; }
+        targets = order.filter((id) => (handed.size ? handed : new Set(posted.map((p) => p.id))).has(id));
+        continue;
+      }
       if (!posted.length) {
         if (!troubled) return 'passed'; // a whole round of PASS: the discussion is over
         hooks.append({ from: 'system', text: `Not treated as everyone passing: ${failures} turn${failures === 1 ? '' : 's'} failed in this discussion (see above). Fix the cause and write again.`, round });

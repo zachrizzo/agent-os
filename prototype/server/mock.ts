@@ -3,6 +3,7 @@ import { COS_ID, TEAM_PALETTE, type Agent, type Delta, type EventKind, type Flee
 import { parseInterSession, shortSession } from '../shared/a2a.ts';
 import { RICH_MD, scriptedReply, triggerText } from '../shared/scripted.ts';
 import type { BoardCard } from '../shared/board.ts';
+import { routeMessage } from '../shared/route.ts';
 import { createRoomsService, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
 
@@ -111,6 +112,35 @@ export function createMockSource(): Source {
     }
   }
 
+  const seeded = new Set<string>();
+  const workEvents: FleetEvent[] = [];
+  function seedWork() {
+    const min = 60_000;
+    const put = (a: Omit<Agent, 'costUsd' | 'tokens' | 'model'>) => { agents.set(a.id, { costUsd: 0.4, tokens: 90_000, model: 'claude-sonnet-5-5', ...a }); seeded.add(a.id); return a.id; };
+    const lead = put({ id: 'agent:agent-service-lead:main', name: 'agent-service Lead/PM', agentName: 'agent-service Lead/PM', team: 'forge', role: 'worker', parent: 'agent:forge:main', status: 'idle', now: 'Idle · waiting on the coder', updatedAt: now - 2 * min, agentId: 'agent-service-lead', kind: 'main' });
+    const coder = put({ id: 'agent:agent-service-coder:subagent:w0rk0001', name: 'AIPIT-6358 !980 correction r2', agentName: 'agent-service Coder', team: 'forge', role: 'worker', parent: lead, status: 'active', now: 'Running a command · Full gate, then commit.', updatedAt: now, agentId: 'agent-service-coder', kind: 'subagent', label: 'AIPIT-6358 !980 correction r2' });
+    const reviewer = put({ id: 'agent:agent-service-reviewer:subagent:w0rk0002', name: 'AIPIT-6358 !980 re-review r1', agentName: 'agent-service Reviewer', team: 'forge', role: 'worker', parent: lead, status: 'idle', now: 'Done · CHANGES_REQUESTED for MR !980', updatedAt: now - 40 * min, agentId: 'agent-service-reviewer', kind: 'subagent', label: 'AIPIT-6358 !980 re-review r1', retired: true });
+    const sec = put({ id: 'agent:security:subagent:w0rk0003', name: 'AIPIT-6435 final security', agentName: 'Security', team: 'forge', role: 'worker', parent: lead, status: 'idle', now: 'Done · PASS.', updatedAt: now - 90 * min, agentId: 'security', kind: 'subagent', label: 'AIPIT-6435 final security', retired: true });
+    const infra = put({ id: 'agent:infra:subagent:w0rk0004', name: 'MER-212 EE lease', agentName: 'Infra', team: 'ops', role: 'worker', parent: 'agent:ops:main', status: 'idle', now: 'Done · Blocked: the EE lease expired', updatedAt: now - 25 * min, agentId: 'infra', kind: 'subagent', label: 'MER-212 EE lease', retired: true });
+    const asker = put({ id: 'agent:provider-voice-app-lead:subagent:w0rk0005', name: 'AIPIT-6401 rollout plan', agentName: 'provider-voice-app Lead/PM', team: 'exp', role: 'worker', parent: 'agent:exp:main', status: 'needs', ask: 'Ship AIPIT-6401 to staging today, or hold for QA?', now: 'Needs you: Ship AIPIT-6401 to staging today, or hold for QA?', updatedAt: now - 5 * min, agentId: 'provider-voice-app-lead', kind: 'subagent', label: 'AIPIT-6401 rollout plan' });
+    const cron = put({ id: 'agent:scrum:cron:w0rk0006', name: 'jira-sync', agentName: 'Scrum', team: 'cos', role: 'worker', parent: COS_ID, status: 'idle', now: 'Done · jira-sync finished', updatedAt: now - 10 * min, agentId: 'scrum', kind: 'cron', label: 'jira-sync AIPIT-6000' });
+    const ev = (ago: number, from: string, to: string, kind: EventKind, text: string, label?: string, extra: Partial<FleetEvent> = {}) =>
+      workEvents.push({ id: `w${workEvents.length}`, ts: now - ago * min, from, to, kind, text, session: from, ...(label ? { label } : {}), ...extra });
+    ev(120, lead, coder, 'handoff', 'AIPIT-6358 !980 correction r1', 'AIPIT-6358 !980 correction r1');
+    ev(60, coder, lead, 'done', 'The correction is committed on AIPIT-6358/share-support; 5,429 passed.', 'AIPIT-6358 !980 correction r1');
+    ev(45, lead, reviewer, 'handoff', 'AIPIT-6358 !980 re-review r1', 'AIPIT-6358 !980 re-review r1');
+    ev(40, reviewer, lead, 'done', 'CHANGES_REQUESTED for MR !980: one must-fix in worker.py:60.', 'AIPIT-6358 !980 re-review r1');
+    ev(30, lead, coder, 'handoff', 'AIPIT-6358 !980 correction r2', 'AIPIT-6358 !980 correction r2');
+    ev(180, lead, '', 'message', 'AIPIT-6435 m2 is pushed to origin at 8bcb7467 after the final review.');
+    ev(95, lead, sec, 'handoff', 'AIPIT-6435 final security', 'AIPIT-6435 final security');
+    ev(90, sec, lead, 'done', 'PASS. No high or critical issues in the AIPIT-6435 diff.', 'AIPIT-6435 final security');
+    ev(25, infra, 'agent:ops:main', 'blocked', 'Blocked: the EE lease for MER-212 expired and the namespace is gone.', 'MER-212 EE lease');
+    ev(5, asker, 'zach', 'needs', 'Ship AIPIT-6401 to staging today, or hold for QA?', 'AIPIT-6401 rollout plan', { needsYou: true });
+    ev(10, cron, '', 'done', 'jira-sync finished: AIPIT-6000 unchanged.', 'jira-sync AIPIT-6000');
+    workEvents.sort((a, b) => a.ts - b.ts);
+  }
+  seedWork();
+
   const events: FleetEvent[] = [];
   const listeners = new Set<(d: Delta) => void>();
   let pending: FleetEvent[] = [];
@@ -118,7 +148,7 @@ export function createMockSource(): Source {
   let changed = new Set<string>();
   let removed: string[] = [];
   const all = () => [...agents.values()];
-  const liveAll = () => all().filter((a) => !a.retired);
+  const liveAll = () => all().filter((a) => !a.retired && !seeded.has(a.id));
   const push = (e: Omit<FleetEvent, 'id'>) => { const x = { id: `m${eid++}`, ...e }; pending.push(x); return x; };
   const workerOf = (a: Agent) => a.label?.split(' ').pop() ?? 'worker';
 
@@ -172,7 +202,7 @@ export function createMockSource(): Source {
       const a = pick(done);
       push({ ts, from: a.id, to: a.parent ?? COS_ID, kind: 'done', text: pick(MSG.done), session: a.id });
       retire(a, ts, pick(HOW)); changed.add(a.id); // stays in the feed as history
-      const hist = all().filter((x) => x.retired).sort((x, y) => x.updatedAt - y.updatedAt);
+      const hist = all().filter((x) => x.retired && !seeded.has(x.id)).sort((x, y) => x.updatedAt - y.updatedAt);
       for (const old of hist.slice(0, Math.max(0, hist.length - 150))) { agents.delete(old.id); changed.delete(old.id); removed.push(old.id); }
       const b = spawnWorker(a.team, workerOf(a), ts);
       b.status = 'active';
@@ -272,7 +302,7 @@ export function createMockSource(): Source {
   return {
     rooms,
     snapshot(): Snapshot {
-      return { source: 'mock', ts: Date.now(), teams, agents: all(), events: events.slice(-200), meters: meters() };
+      return { source: 'mock', ts: Date.now(), teams, agents: all(), events: [...workEvents, ...events.slice(-200)], meters: meters() };
     },
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     async history(key) {
@@ -288,16 +318,19 @@ export function createMockSource(): Source {
         ...(sentLog.get(key) ?? []),
       ];
     },
-    async send(key, text) {
+    async send(key, text, direct) {
       const message = String(text ?? '').trim();
       if (!message) throw new Error('empty message');
       if (message.length > 4000) throw new Error('message too long (max 4000 chars)');
-      const a = agents.get(key);
+      if (!agents.get(key)) throw new Error('unknown session');
+      const routed = routeMessage(key, message, direct);
+      const a = agents.get(routed.key);
       if (!a) throw new Error('unknown session');
       const ts = Date.now();
-      sentLog.set(key, [...(sentLog.get(key) ?? []), { role: 'user', ts, text: message }]);
-      push({ ts, from: 'zach', to: key, kind: 'message', text: message, session: key });
-      a.updatedAt = ts; changed.add(key);
+      sentLog.set(routed.key, [...(sentLog.get(routed.key) ?? []), { role: 'user', ts, text: routed.message }]);
+      push({ ts, from: 'zach', to: routed.key, kind: 'message', text: routed.relayed ? `@${routed.agent}: ${message}` : message, session: routed.key });
+      a.updatedAt = ts; changed.add(routed.key);
+      return routed;
     },
     async board(): Promise<BoardCard[]> {
       const now = Date.now();

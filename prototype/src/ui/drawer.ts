@@ -65,8 +65,8 @@ export function mountDrawer(el: HTMLElement, store: ShellStore) {
     el.setAttribute('aria-hidden', 'false');
     if (ev) store.select({ type: 'event', id: ev.id });
 
-    const composer = mountComposer(el.querySelector<HTMLElement>('.cmp-mount')!, store, (k, text) => {
-      if (current === k) void loadThread(k, text);
+    const composer = mountComposer(el.querySelector<HTMLElement>('.cmp-mount')!, store, (k, text, result) => {
+      if (current === k && result.to === k) void loadThread(k, text);
     });
     composer.setTarget(a ? { key, label: a.name } : null);
     if (focusComposer) composer.focus();
