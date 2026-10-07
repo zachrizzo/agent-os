@@ -45,6 +45,7 @@ export interface RoomMessage {
   queued?: boolean;
   /** Pinned by Zach as a decision: always shown in the Decisions shelf and quoted to every member. */
   pinned?: boolean;
+  passed?: string[];
 }
 export type ResponderMode = 'quiet' | 'everyone' | 'mentions' | 'lead';
 export const RESPONDER_MODES: readonly ResponderMode[] = ['quiet', 'everyone', 'mentions', 'lead'];
@@ -163,6 +164,70 @@ export function parseMentions(text: string, members: RoomMember[]): string[] | n
   return members.filter((m) => hit.has(m.id)).map((m) => m.id);
 }
 
+export type MentionIntent = 'ask' | 'cc' | 'no-reply' | 'negation' | 'reference';
+
+const MENTION_LIST = String.raw`(?:(?:@[\w.-]+|and|&)[\s,]*)*`;
+const CC_BEFORE = new RegExp(String.raw`(?:^|[^\w])(?:b?cc|cc'?ing|fyi|copying)\b[\s:,'-]*${MENTION_LIST}$`, 'i');
+const FYI_AFTER = /^[\s,:;—–-]*(?:just\s+)?fyi\b/i;
+const STAND_DOWN_BEFORE = new RegExp(String.raw`\b(?:stand\s+down|hold\s+off)[\s,:—–-]*${MENTION_LIST}$`, 'i');
+const NEGATION_AFTER = /^[\s,:;—–-]*(?:(?:please|pls)\s+|you\s+(?:can\s+|should\s+|may\s+)?)?(?:don'?t|dont|do\s+not|never|stand\s+down|hold\s+off|no\s+need|needn'?t|shouldn'?t|should\s+not|mustn'?t|must\s+not)\b/i;
+const NO_REPLY = new RegExp([
+  String.raw`no\s+need\s+(?:for\s+you\s+)?to\s+(?:reply|respond|answer|ack(?:nowledge)?|chime\s+in|weigh\s+in|comment|do\s+anything|act)`,
+  String.raw`no\s+(?:reply|response|answer|action|ack(?:nowledg?ement)?)\s+(?:is\s+)?(?:needed|required|necessary|expected)`,
+  String.raw`(?:don'?t|do\s+not|needn'?t)\s+(?:need\s+to\s+)?(?:reply|respond|answer|ack(?:nowledge)?|do\s+anything)`,
+  String.raw`nothing\s+(?:needed|required)\s+from\s+you`,
+  String.raw`for\s+(?:your\s+)?(?:awareness|visibility|information|reference)`,
+].map((p) => `\\b${p}\\b`).join('|'), 'i');
+const REFERENCE_BEFORE = /\b(?:as|per)\s+$/i;
+const REFERENCE_AFTER = /^(?:'s\b|\s+(?:said|says|noted|mentioned|suggested|pointed\s+out|wrote|already\s+(?:said|noted|covered))\b)/i;
+const MENTION_RE = /(?:^|[^\w@])@([A-Za-z0-9][\w.-]*)/g;
+
+interface Sentence { start: number; end: number; question: boolean; text: string }
+function sentencesOf(text: string): Sentence[] {
+  const out: Sentence[] = [];
+  let start = 0;
+  for (const b of text.matchAll(/[.!?;]+(?=\s|$)|\n/g)) {
+    const end = b.index! + b[0].length;
+    out.push({ start, end, question: b[0].includes('?'), text: text.slice(start, end) });
+    start = end;
+  }
+  if (start < text.length) out.push({ start, end: text.length, question: false, text: text.slice(start) });
+  return out;
+}
+
+function intentAt(text: string, sentences: Sentence[], at: number, nameEnd: number): MentionIntent {
+  const i = sentences.findIndex((s) => at >= s.start && at < s.end);
+  const s = sentences[i];
+  const before = text.slice(s.start, at);
+  const after = text.slice(nameEnd, s.end);
+  if (CC_BEFORE.test(before) || FYI_AFTER.test(after)) return 'cc';
+  if (REFERENCE_BEFORE.test(before) || REFERENCE_AFTER.test(after)) return 'reference';
+  const next = sentences[i + 1];
+  if (NO_REPLY.test(s.text) || (next && !next.text.includes('@') && NO_REPLY.test(next.text))) return 'no-reply';
+  if (!s.question && (NEGATION_AFTER.test(after) || STAND_DOWN_BEFORE.test(before))) return 'negation';
+  return 'ask';
+}
+
+export function mentionIntents(text: string, members: RoomMember[]): Array<{ id: string; intent: MentionIntent }> {
+  const clean = text.replace(/[‘’]/g, "'");
+  const sentences = sentencesOf(clean);
+  const out: Array<{ id: string; intent: MentionIntent }> = [];
+  for (const m of clean.matchAll(MENTION_RE)) {
+    const name = m[1].replace(/[.-]+$/, '');
+    const member = members.find((x) => slug(x.id) === slug(name) || slug(x.name) === slug(name));
+    if (!member) continue;
+    const at = m.index! + m[0].length - m[1].length - 1;
+    out.push({ id: member.id, intent: intentAt(clean, sentences, at, at + 1 + name.length) });
+  }
+  return out;
+}
+
+export function handedMentions(text: string, members: RoomMember[]): string[] {
+  if (parseMentions(text, members) === null) return [];
+  const asked = new Set(mentionIntents(text, members).filter((x) => x.intent === 'ask').map((x) => x.id));
+  return members.filter((m) => asked.has(m.id)).map((m) => m.id);
+}
+
 /**
  * Round-1 responders. @all always means everyone. With mention gating on (or in `mentions` mode), @mentioned members answer alone; a message with no mention goes to
  * everyone (`everyone`), only the lead (`lead`), or nobody (`mentions`). Gating off (outside `mentions` mode): everyone, always.
@@ -239,6 +304,7 @@ function promptHead(c: PromptCtx): string {
     `Zach's message:\n${c.trigger.text}\n\nDiscussion so far:\n${discussion}`,
   ].filter(Boolean).join('\n\n');
 }
+const REPLY_RULE = `Reply only if you were asked a direct question, were given an action, have new information, or disagree with something that matters. Otherwise reply exactly ${PASS_TOKEN}. Acknowledgements, thanks, agreement and restating what was said are all ${PASS_TOKEN}. Being cc'd, told FYI or told no reply is needed is ${PASS_TOKEN}. If you were told not to do something or to stand down, reply ${PASS_TOKEN} unless you actually disagree.`;
 const TALK = `Write only your own reply, as one message in a group chat: short and conversational, no headings. Hand a point to someone with @id.`;
 
 /** What a member (or the lead) is asked each round. Round 1 is the first reaction; later rounds are a reply-or-PASS check against the whole discussion. */
@@ -246,8 +312,8 @@ export function memberPrompt(c: PromptCtx): string {
   const isLead = !c.directed && c.agent.id === c.lead.id && c.members.length > 1;
   const follow = c.followUp ? ` Zach has posted again in the discussion (the "You:" lines): answer his latest message if it is for you or for the room.` : '';
   const body = c.round === 1
-    ? `It is round 1. Give your own take on Zach's message. The others are answering at the same time and have not seen your reply yet.`
-    : `It is round ${c.round}. You have now seen what everyone said.${follow} Reply if you can add something: build on a point, disagree with someone, answer a question, or hand something to a member with @id. If you have nothing to add, reply exactly ${PASS_TOKEN}. Do not repeat or just agree with what is already said: the discussion ends when everyone passes in the same round.`;
+    ? `It is round 1. The others are answering at the same time and have not seen your reply yet. ${REPLY_RULE}`
+    : `It is round ${c.round}. You have now seen what everyone said.${follow} ${REPLY_RULE} The discussion ends when everyone passes in the same round.`;
   const lead = isLead
     ? ` You are the lead: you moderate this discussion, as a member who also takes part. Keep it moving: address members with @id when someone should dig in, point out where two members disagree, ask for what is missing. You do not conclude the discussion; when there is nothing left to steer, reply exactly ${PASS_TOKEN}. If Zach asks for a summary, write it as a normal message.`
     : '';
@@ -320,7 +386,7 @@ export function handoffsOf(messages: ReadonlyArray<RoomMessage>, members: RoomMe
     if (m.from === YOU) { pending = new Map(); continue; }
     const incoming = pending.get(m.from) ?? 0;
     pending.delete(m.from);
-    const to = (parseMentions(m.text, members.filter((x) => x.id !== m.from)) ?? []);
+    const to = handedMentions(m.text, members.filter((x) => x.id !== m.from));
     if (!to.length) continue;
     const hop = incoming + 1;
     for (const t of to) pending.set(t, Math.max(pending.get(t) ?? 0, hop));
@@ -511,7 +577,7 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
   async function narrow(ids: string[], round: number): Promise<string[]> {
     if (!room.speakFilter || !transport.judge || round < 2 || freshHuman) return ids;
     const pulled = new Set<string>();
-    for (const p of prevRoundPosts) for (const m of parseMentions(p.text, members.filter((x) => x.id !== p.id)) ?? []) pulled.add(m);
+    for (const p of prevRoundPosts) for (const m of handedMentions(p.text, members.filter((x) => x.id !== p.id))) pulled.add(m);
     const cands = ids.filter((id) => !pulled.has(id));
     if (!cands.length) return ids;
     let reply: string | null = null;
@@ -561,9 +627,11 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
       if (leadTurn && others.length) { waiting.set(lead.id, { id: lead.id, state: 'waiting', since: Date.now(), waitingOn: [...others] }); publish(); }
       // Everyone but the lead answers at once; each bubble lands as soon as that agent finishes. The lead then answers having read them.
       const posted: Array<{ id: string; text: string }> = [];
+      const passed: string[] = [];
       await Promise.all(others.map(async (id) => {
         const reply = await ask(id, memberPrompt(ctxFor(id, round)), round);
-        if (!reply.ok || isPass(reply.text)) return;
+        if (!reply.ok) return;
+        if (isPass(reply.text)) { passed.push(id); return; }
         const text = reply.text!.trim();
         hooks.append({ from: id, text, round });
         recordPost(id, text);
@@ -572,7 +640,8 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
       if (signal.aborted) return 'cancelled';
       if (leadTurn && !ended()) {
         const reply = await ask(lead.id, memberPrompt(ctxFor(lead.id, round)), round);
-        if (reply.ok && !isPass(reply.text)) {
+        if (reply.ok && isPass(reply.text)) passed.push(lead.id);
+        else if (reply.ok) {
           const text = reply.text!.trim();
           hooks.append({ from: lead.id, text, round });
           recordPost(lead.id, text);
@@ -581,6 +650,10 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
       }
       waiting.delete(lead.id); publish();
       if (signal.aborted) return 'cancelled';
+      if (passed.length) {
+        const ids = order.filter((id) => passed.includes(id));
+        hooks.append({ from: 'system', text: `${ids.map((id) => byId.get(id)!.name).join(', ')} passed`, round, passed: ids });
+      }
       prevRoundPosts = posted; freshHuman = false;
       if (ended()) return 'ended';
 
@@ -605,7 +678,7 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
       const troubled = failures > failuresBefore || benched.size > 0; // a turn failed this round, or a member was already benched: not a clean ending
       if (quiet && posted.length) {
         const handed = new Set<string>();
-        for (const p of posted) for (const m of parseMentions(p.text, members.filter((x) => x.id !== p.id)) ?? []) handed.add(m);
+        for (const p of posted) for (const m of handedMentions(p.text, members.filter((x) => x.id !== p.id))) handed.add(m);
         if (!hooks.waitForContinue) return troubled ? 'failed' : 'complete';
         const names = (ids: Iterable<string>) => [...ids].map((id) => byId.get(id)?.name ?? id).join(', ');
         hooks.state({ status: 'paused', pause: { reason: 'round', detail: handed.size ? `${names(posted.map((p) => p.id))} replied and handed a point to ${names(handed)}` : `${names(posted.map((p) => p.id))} replied`, at: Date.now() } });
@@ -626,7 +699,7 @@ export async function runDiscussion(room: Room, members: RoomMember[], trigger: 
       }
       if (directed) {
         const mentioned = new Set<string>();
-        for (const p of posted) for (const m of parseMentions(p.text, members.filter((x) => x.id !== p.id)) ?? []) mentioned.add(m);
+        for (const p of posted) for (const m of handedMentions(p.text, members.filter((x) => x.id !== p.id))) mentioned.add(m);
         if (!mentioned.size) return troubled ? 'failed' : 'complete'; // answered, nobody was handed anything
         const next = new Set([...posted.map((p) => p.id), ...mentioned]);
         targets = order.filter((id) => next.has(id));

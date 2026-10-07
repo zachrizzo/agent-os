@@ -117,6 +117,7 @@ export function mountRooms(el: HTMLElement, store: ShellStore, onCount: (n: numb
     const nonMembers = agents.filter((a) => !room.members.includes(a.id));
     const hand = handoffsOf(room.messages, view.members.map((m) => ({ id: m.id, name: m.name })));
     const msgs = room.messages.map((m) => {
+      if (m.passed) return `<div class="rm-passline" data-passed="${esc(m.passed.join(' '))}" title="Round ${m.round ?? ''}: nothing to add">${esc(m.passed.map((id) => agentOf(id).name).join(', '))} passed</div>`;
       if (m.from === 'system') return `<div class="rm-sys">${esc(m.text)}</div>`;
       const w = who(m.from);
       const h = hand.get(m.id);
