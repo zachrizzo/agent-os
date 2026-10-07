@@ -4,6 +4,7 @@ import { parseInterSession, shortSession } from '../shared/a2a.ts';
 import { RICH_MD, scriptedReply, triggerText } from '../shared/scripted.ts';
 import type { BoardCard } from '../shared/board.ts';
 import { routeMessage } from '../shared/route.ts';
+import { inScope, sessionTree, type SessionRow, type SessionScope } from '../shared/sessions.ts';
 import { createRoomsService, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
 
@@ -299,14 +300,38 @@ export function createMockSource(): Source {
   // In-memory by default: mock mode never touches the real rooms file. AGENT_OS_MOCK_ROOMS_FILE (a throwaway path, for the restart proof) opts in to persistence.
   const rooms = createRoomsService({ gateway, ...(process.env.AGENT_OS_MOCK_ROOMS_FILE ? { file: process.env.AGENT_OS_MOCK_ROOMS_FILE } : {}) });
 
+  const extraKeys = (agentId: string) => ({ dashboard: `agent:${agentId}:dashboard:m0ck0001`, room: `agent:${agentId}:room-r0m0ck01`, cron: `agent:${agentId}:cron:m0ck0002` });
+  const KIND_OF: Record<string, SessionRow['kind']> = { main: 'main', subagent: 'subagent', cron: 'automation' };
+  const STATE_OF = (a: Agent): SessionRow['state'] => a.status === 'error' ? 'error' : a.status === 'needs' ? 'needs' : a.status === 'active' ? 'running' : a.retired ? 'done' : 'idle';
+  const isExtra = (key: string) => /:(dashboard:m0ck0001|room-r0m0ck01|cron:m0ck0002)$/.test(key);
+
   return {
     rooms,
+    async sessions(scope: SessionScope): Promise<SessionRow[]> {
+      const members = all().filter((a) => inScope(a.agentId ?? '', scope) || (!!scope.agent && a.parent === `agent:${scope.agent}:main`));
+      const rows: SessionRow[] = members.map((a) => ({
+        key: a.id, agentId: a.agentId ?? '', kind: KIND_OF[a.kind ?? ''] ?? 'other', label: a.label ?? a.name, state: STATE_OF(a), updatedAt: a.updatedAt,
+        ...(a.parent && members.some((m) => m.id === a.parent) ? { parent: a.parent } : {}), ...(a.model ? { model: a.model } : {}),
+      }));
+      const t = Date.now();
+      for (const m of members.filter((a) => a.kind === 'main')) {
+        const id = m.agentId ?? '';
+        const k = extraKeys(id);
+        rows.push(
+          { key: k.dashboard, agentId: id, kind: 'dashboard', label: 'Dashboard chat', state: 'idle', updatedAt: t - 20 * 60_000, model: 'claude-opus-5-5' },
+          { key: k.room, agentId: id, kind: 'room', label: 'Room: RFC Council', state: 'idle', updatedAt: t - 70 * 60_000, model: 'claude-opus-5-5' },
+          { key: k.cron, agentId: id, kind: 'automation', label: 'Nightly triage sweep', state: 'done', updatedAt: t - 5 * 3600_000, model: 'claude-haiku-4-5' },
+        );
+      }
+      return sessionTree(rows).map((n) => n.row);
+    },
     snapshot(): Snapshot {
       return { source: 'mock', ts: Date.now(), teams, agents: all(), events: [...workEvents, ...events.slice(-200)], meters: meters() };
     },
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     async history(key) {
       const a = agents.get(key);
+      if (!a && isExtra(key)) return [{ role: 'user', ts: Date.now() - 3600_000, text: 'Kick off.' }, { role: 'assistant', ts: Date.now() - 3500_000, text: `Session ${key.split(':').slice(2).join(':')}: done.` }];
       if (!a) return [];
       const t = Date.now();
       return [

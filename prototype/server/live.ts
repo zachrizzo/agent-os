@@ -14,6 +14,7 @@ import { isExcludedAgent, judgeSessionKey, type TurnProgress, type TurnResult } 
 import { toolInFlight, usageFromMessages } from '../shared/turn-usage.ts';
 import { nowFromProgress, progressOf, type RunProgress } from '../shared/progress.ts';
 import { routeMessage, type Routed } from '../shared/route.ts';
+import { inScope, sessionTree, toSessionRow, type SessionRow, type SessionScope } from '../shared/sessions.ts';
 import { redact } from './redact.ts';
 import { createRoomsService, isRoomKey, listAgentsWithFallback, roomSessionKey, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
@@ -131,6 +132,7 @@ export function createLiveSource(): Source {
   const listeners = new Set<(d: Delta) => void>();
   const agents = new Map<string, Agent>();
   const raw = new Map<string, any>();
+  let everySession: any[] = [];
   const teams = new Map<string, Team>();
   const ring: FleetEvent[] = [];
   const identities = new Map<string, string>(); // agentId -> display name
@@ -224,6 +226,7 @@ export function createLiveSource(): Source {
       broadcast({ ts: Date.now(), upserts: [], removed: [], events: [], meters: meters(), error: lastError });
       return;
     }
+    everySession = all.filter((s) => s?.key && !isExcludedAgent(agentOfKey(s.key)));
     const t = Date.now();
     const cutoff = t - WINDOW_HOURS * 3600_000;
     // Archived/finished sessions stay in the feed flagged `retired`; the browser hides them behind History.
@@ -440,10 +443,18 @@ export function createLiveSource(): Source {
       return { source: 'live', ts: Date.now(), teams: [...teams.values()], agents: [...agents.values()], events: ring.slice(-400), meters: meters(), windowHours: WINDOW_HOURS, ...(lastError ? { error: lastError } : {}) };
     },
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
-    async history(key): Promise<HistoryItem[]> {
-      if (!agents.has(key)) return [];
-      const res = await call('chat.history', { sessionKey: key, limit: 40 }, 15_000);
-      const msgs: any[] = (res.messages ?? []).slice(-40);
+    async sessions(scope: SessionScope): Promise<SessionRow[]> {
+      const rows = everySession.filter((s) => inScope(s.agentId ?? agentOfKey(s.key), scope)).map((s) => {
+        const row = toSessionRow(s);
+        const preview = gist(String(s.lastMessagePreview ?? ''), 90);
+        return { ...row, label: clip(row.label, 80), ...(preview ? { preview } : {}) };
+      });
+      return sessionTree(rows).map((n) => n.row);
+    },
+    async history(key, limit = 40): Promise<HistoryItem[]> {
+      if (!agents.has(key) && !everySession.some((s) => s.key === key)) return [];
+      const res = await call('chat.history', { sessionKey: key, limit }, 15_000);
+      const msgs: any[] = (res.messages ?? []).slice(-limit);
       return msgs.map((m): HistoryItem => {
         const raw = typeof m.content === 'string' ? m.content : Array.isArray(m.content)
           ? m.content.map((c: any) => (c?.type === 'text' ? c.text : c?.type === 'toolCall' || c?.type === 'tool_use' ? `⚙ ${c.name ?? 'tool'}` : '')).filter(Boolean).join(' ')

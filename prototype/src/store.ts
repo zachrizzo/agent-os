@@ -7,6 +7,7 @@ import type { Agent, Delta, FleetEvent, Selection, Snapshot, State, Store, Team,
 export type Source = 'live' | 'mock';
 export type Filter = 'all' | 'needs' | 'blocked' | 'handoffs' | 'approvals' | 'system';
 export type View = 'work' | 'fleet';
+export type SideTab = 'activity' | 'sessions';
 export interface SendResult { to: string; relayed: boolean; agent: string }
 
 export interface ShellState extends State {
@@ -17,6 +18,8 @@ export interface ShellState extends State {
   showHistory: boolean;   // History toggle: reveal retired (finished/aborted/archived/stale) sessions
   view: View;
   showAllWork: boolean;
+  sideTab: SideTab;
+  scopeSel: Selection;    // the agent/team last picked: what the Sessions tab lists (an opened event does not clear it)
   liveCount: number;      // live agents; the headline "agents" number
   historyCount: number;   // retired sessions the toggle would reveal (or is revealing)
   agentsAll: Map<string, Agent>; // every retained session, incl. hidden ones (name/team lookups for old events)
@@ -32,6 +35,7 @@ export interface ShellStore extends Store {
   setShowHistory(on: boolean): void;
   setView(v: View): void;
   setShowAllWork(on: boolean): void;
+  setSideTab(t: SideTab): void;
   sendMessage(sessionKey: string, text: string, direct?: boolean): Promise<SendResult>;
   connect(): void;
   close(): void;
@@ -59,6 +63,8 @@ export function createStore(source: Source): ShellStore {
     showHistory: false,
     view: 'work',
     showAllWork: false,
+    sideTab: 'activity',
+    scopeSel: { type: 'none' },
     liveCount: 0,
     historyCount: 0,
     agentsAll: new Map(),
@@ -175,6 +181,8 @@ export function createStore(source: Source): ShellStore {
       const cur = state.selection;
       if (cur.type === sel.type && (cur as { id?: string }).id === (sel as { id?: string }).id) return;
       state.selection = sel;
+      if (sel.type === 'agent' || sel.type === 'team') { state.scopeSel = sel; state.sideTab = 'sessions'; }
+      else if (sel.type === 'none') { state.scopeSel = sel; state.sideTab = 'activity'; }
       notify();
     },
     setZoom(z: Zoom) { if (state.zoom !== z) { state.zoom = z; notify(); } },
@@ -194,6 +202,7 @@ export function createStore(source: Source): ShellStore {
       notify();
     },
     setView(v) { if (v !== state.view) { state.view = v; notify(); } },
+    setSideTab(t) { if (t !== state.sideTab) { state.sideTab = t; notify(); } },
     setShowAllWork(on) { if (on !== state.showAllWork) { state.showAllWork = on; notify(); } },
     async sendMessage(sessionKey, text, direct = false) {
       const r = await fetch(api(`send?source=${source}`), {
