@@ -23,6 +23,7 @@ export function scriptedReply(prompt: string): string {
   const isLead = !!leadId && id === leadId;
   const others = ids.filter((x) => x !== id);
   if (/pingpong/i.test(text)) return `@${others[(ids.indexOf(id) + 1) % Math.max(1, others.length)] ?? others[0]} pingpong`;
+  if (/ccnote/i.test(text)) return round === 1 ? `${name} here. Done. cc @${others[0] ?? id}` : PASS_TOKEN;
   if (round === 1) return rich ? RICH_MD.replace('@FIRST', `@${others[0] ?? id}`) : `${name} here. On "${topic}": noted, nothing blocking from my side.`;
   if (isLead) return PASS_TOKEN;
   if (/quiet/i.test(text) && id === 'bravo') return PASS_TOKEN;

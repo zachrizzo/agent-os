@@ -214,6 +214,8 @@ async function roomsChecks(browser, tag) {
   const open = names.slice(names.lastIndexOf("You"));
   expect("Zach first, then every member, the lead (Forge) last of round one", open[0] === "You" && ["Spark", "Research", "Forge"].every((n) => open.includes(n)) && open.indexOf("Forge") > open.indexOf("Spark"), names.join(","));
   expect("each message has its own avatar", (await page.locator(".rm-msg > .avatar").count()) === (await page.locator(".rm-msg").count()));
+  const passLines = await page.locator(".rm-passline").allInnerTexts();
+  expect("passes are faint 'x passed' lines, one per round, never bubbles", passLines.length >= 1 && passLines.every((t) => /^[\w ,]+ passed$/.test(t)) && !(await page.locator(".rm-msg .rm-text").allInnerTexts()).some((t) => /^\s*PASS\s*$/.test(t)), passLines.join("|"));
   const before = (await page.locator(".rm-msg").count());
 
   // mention gating
@@ -222,6 +224,14 @@ async function roomsChecks(browser, tag) {
   await idle();
   const after = (await page.locator(".rm-msg .rm-meta b").allInnerTexts()).slice(before);
   expect("@spark: only Spark answers", after.join(",") === "You,Spark", after.join(","));
+
+  const beforeCc = await page.locator(".rm-msg").count();
+  await send("@forge ccnote please");
+  await page.waitForFunction((n) => document.querySelectorAll(".rm-msg").length >= n + 2, beforeCc, { timeout: 15000 });
+  await idle();
+  const afterCc = (await page.locator(".rm-msg .rm-meta b").allInnerTexts()).slice(beforeCc);
+  const ccText = await page.locator(".rm-msg").last().innerText();
+  expect("a member only cc'd by another agent does not reply (no turn, no hand-off chip)", afterCc.join(",") === "You,Forge" && /cc @?Spark/i.test(ccText) && (await page.locator(".rm-msg").last().locator(".rm-hand").count()) === 0, `${afterCc.join(",")} | ${ccText}`);
 
   // members: add Ops, remove Research
   await page.click("[data-act=add-toggle]");
