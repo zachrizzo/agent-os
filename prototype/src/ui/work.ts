@@ -26,6 +26,8 @@ export function mountWork(el: HTMLElement, store: ShellStore, opts: { onOpenSess
 
   toggle.addEventListener('click', () => store.setShowAllWork(!store.get().showAllWork));
   list.addEventListener('click', (e) => {
+    const chip = (e.target as HTMLElement).closest<HTMLElement>('.wk-sess');
+    if (chip?.dataset.open) { opts.onOpenSession(chip.dataset.open); return; }
     const row = (e.target as HTMLElement).closest<HTMLElement>('.wk-row');
     if (row?.dataset.session) opts.onOpenSession(row.dataset.session);
   });
@@ -36,9 +38,10 @@ export function mountWork(el: HTMLElement, store: ShellStore, opts: { onOpenSess
     const ms = r.milestone;
     const keyChip = r.ticket ? `<span class="wk-key">${esc(r.ticket)}</span>` : '';
     const mrs = r.mrs.map((m) => `<span class="wk-mr">${esc(m)}</span>`).join('');
+    const chips = r.sessions.length > 1 ? `<span class="wk-sessions">${r.sessions.slice(0, 4).map((k) => `<span class="wk-sess" role="link" tabindex="0" data-open="${esc(k)}" title="${esc(k)}">${esc(nameOf(s, k) || k)}</span>`).join('')}${r.sessions.length > 4 ? `<span class="wk-sess-more">+${r.sessions.length - 4}</span>` : ''}</span>` : '';
     return `<button class="wk-row st-${r.state}" role="listitem" data-key="${esc(r.key)}" data-session="${esc(r.session)}" title="Open ${esc(nameOf(s, r.session) || r.session)}">
       <span class="wk-state"><i></i>${STATE_LABEL[r.state]}</span>
-      <span class="wk-main"><span class="wk-line">${keyChip}${mrs}<span class="wk-title">${esc(r.title)}</span></span>${r.now ? `<span class="wk-now">${esc(r.now)}</span>` : ''}</span>
+      <span class="wk-main"><span class="wk-line">${keyChip}${mrs}<span class="wk-title">${esc(r.title)}</span></span>${r.now ? `<span class="wk-now">${esc(r.now)}</span>` : ''}${chips}</span>
       <span class="wk-lead">${avatarHtml(r.lead || 'main', r.leadName, undefined, 'sm')}<span>${esc(r.leadName)}</span></span>
       <span class="wk-ms${ms?.bad ? ' bad' : ''}">${ms ? `<b>${esc(ms.label)}</b><small>${esc(nameOf(s, ms.by))} · ${ageLabel(ms.ts, now)} ago</small>` : '<span class="wk-none">—</span>'}</span>
       <span class="wk-block">${r.blocker ? esc(r.blocker) : '<span class="wk-none">—</span>'}</span>

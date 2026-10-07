@@ -27,6 +27,7 @@ const setMode = async (p, mode) => {
   throw new Error(`could not switch the room to ${mode}`);
 };
 const toFleet = async (p) => { await p.click(".view-tabs [data-view=fleet]"); await p.waitForSelector("#work", { state: "hidden" }); await p.waitForSelector(".view-tabs [data-view=fleet][aria-selected=true]"); };
+const showActivity = async (p) => { if (await p.locator("#activity").isHidden()) await p.click("#sessions [data-side-tab=activity]"); await p.waitForSelector("#activity:not([hidden])"); };
 const num = async (page, sel) => Number((await page.locator(sel).first().innerText()).replace(/\D+/g, ""));
 
 async function liveOnlyChecks(browser, tag) {
@@ -90,6 +91,7 @@ async function messageAgentChecks(browser, tag) {
   await page.locator(".c-compose textarea").fill(sent1);
   await page.keyboard.press("Enter");
   await page.waitForSelector(".c-compose .cmp-status.ok", { timeout: 8000 }).catch(() => bad.push(["agent view send ok", "no success status"]));
+  await showActivity(page);
   await page.fill(".search input", sent1); // the mock feed is busy: narrow Activity to this message
   await page.waitForTimeout(700);
   const feed = await page.locator("#activity .stream").innerText();
@@ -591,6 +593,7 @@ async function markdownChecks(browser, tag) {
   await page.keyboard.press("Escape");
 
   // Activity previews: inline only, single line
+  await showActivity(page);
   await page.waitForSelector("#activity .stream .esum strong, #activity .stream .esum code", { timeout: 15000 });
   const act = await page.evaluate(() => {
     const els = [...document.querySelectorAll("#activity .stream .esum")];
@@ -738,11 +741,54 @@ async function workChecks(browser, tag) {
   await page.close();
 }
 
+async function sessionsChecks(browser, tag) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 860 } });
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const bad = [];
+  const expect = (name, ok, detail = "") => { if (!ok) bad.push([name, detail]); };
+  await page.goto(base + "agent-os/?source=mock");
+  await page.waitForSelector("#work .wk-row[data-key='AIPIT-6358']", { timeout: 15000 });
+  const chip = page.locator("#work .wk-row[data-key='AIPIT-6358'] .wk-sess").first();
+  expect("a Work row links to the sessions behind it", (await chip.count()) === 1);
+  await chip.click();
+  await page.waitForSelector("#drawer.open .d-sessions");
+  expect("a session chip opens that session", (await page.locator("#drawer .d-meta .mono").first().innerText()).startsWith("agent:"));
+  await page.keyboard.press("Escape");
+  await toFleet(page);
+  await page.locator("#rail .row.team", { hasText: "Forge" }).first().click();
+  await page.waitForSelector("#sessions:not([hidden]) .ss-row", { timeout: 8000 });
+  const kinds = await page.locator("#sessions .ss-row").evaluateAll((rs) => rs.map((r) => r.dataset.kind));
+  expect("the Sessions tab lists main, subagent, automation, room and dashboard sessions", ["main", "subagent", "automation", "room", "dashboard"].every((k) => kinds.includes(k)), kinds.join(","));
+  const depths = await page.locator("#sessions .ss-row").evaluateAll((rs) => rs.map((r) => Number(r.style.getPropertyValue("--depth"))));
+  expect("subagents are nested under their parent", depths.some((d) => d > 0));
+  expect("each row has a state and a last-activity time", (await page.locator("#sessions .ss-row .ss-state").count()) === kinds.length && (await page.locator("#sessions .ss-row time").count()) === kinds.length);
+  const phi = await page.locator("#sessions .ss-row").evaluateAll((rs) => rs.filter((r) => /agent:phi/.test(r.title)).length);
+  expect("the PHI agent never appears", phi === 0);
+  await page.click("#sessions .ss-row[data-kind=dashboard]");
+  await page.waitForSelector("#drawer.open .thread .msg");
+  expect("clicking a session opens its full thread", (await page.locator("#drawer .thread .msg").count()) >= 1 && (await page.locator("#drawer .d-meta .mono").first().innerText()).includes(":dashboard:"));
+  expect("the drawer has a session picker listing the agent's sessions", (await page.locator("#drawer .d-sessions option").count()) > 3);
+  const sub = await page.locator("#drawer .d-sessions option").evaluateAll((os) => os.find((o) => o.value.includes(":subagent:"))?.value ?? "");
+  expect("the picker offers subagent sessions", !!sub);
+  await page.selectOption("#drawer .d-sessions", sub);
+  await page.waitForFunction((k) => document.querySelector("#drawer .d-meta .mono")?.textContent === k, sub);
+  await page.keyboard.press("Escape");
+  expect("the Thread button has a session picker", (await page.locator("#center .cmp-pick option").count()) > 3);
+  await page.click("#sessions [data-side-tab=activity]");
+  await page.waitForSelector("#activity:not([hidden])");
+  expect("the Activity tab brings the stream back", (await page.locator("#sessions").isHidden()) && (await page.locator("#activity .ev").count()) > 0);
+  if (errors.length) bad.push(["pageerrors", errors.join("; ")]);
+  if (bad.length) failed++;
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · Sessions (all sessions per agent, nesting, state/time, drawer thread + picker, Thread picker, Work row links, Activity tab)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  await page.close();
+}
+
 let failed = 0;
 for (const [tag, engine] of [["webkit", webkit], ["chromium", chromium]]) {
   const browser = await engine.launch();
   // One scenario failing (or timing out) must not hide the others: report it and carry on.
-  for (const check of [workChecks, liveOnlyChecks, noReplayChecks, themeChecks, messageAgentChecks, a2aChecks, roomsChecks, erroringCountChecks, activityChecks, markdownChecks, docsChecks]) {
+  for (const check of [workChecks, sessionsChecks, liveOnlyChecks, noReplayChecks, themeChecks, messageAgentChecks, a2aChecks, roomsChecks, erroringCountChecks, activityChecks, markdownChecks, docsChecks]) {
     try { await check(browser, tag); } catch (e) { failed++; console.log(`FAIL ${tag} · ${check.name} threw: ${String(e.message ?? e).split("\n").slice(0, 3).join(" ").slice(0, 300)}`); }
   }
   for (const sc of scenarios) {

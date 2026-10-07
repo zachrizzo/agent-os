@@ -3,6 +3,7 @@ import type { MapApi, Selection, Zoom } from '../contract';
 import type { ShellState, ShellStore } from '../store';
 import { mountComposer } from './composer';
 import { esc, openNeeds, svg } from './format';
+import { mountSessionPicker } from './session-picker';
 
 export function mountCenter(el: HTMLElement, store: ShellStore, opts: { onFocusMode: () => void; onOpenSession: (key: string) => void }) {
   el.innerHTML = `
@@ -15,7 +16,7 @@ export function mountCenter(el: HTMLElement, store: ShellStore, opts: { onFocusM
     </div>
     <div class="c-tools"><button class="icon-btn tool focus-btn" title="Focus map (hide panels)">${svg('expand', 16)}</button></div>
     <div class="c-state" hidden></div>
-    <div class="c-compose" hidden><div class="cmp-mount"></div><button class="cmp-thread" title="Open this session's thread">Thread</button></div>
+    <div class="c-compose" hidden><div class="cmp-mount"></div><select class="cmp-pick" aria-label="Pick a session of this agent" title="All sessions of this agent"></select><button class="cmp-thread" title="Open this session's thread">Thread</button></div>
     <div class="c-bottom">
       <div class="seg zoom-seg">${(['fleet', 'team', 'agent'] as Zoom[]).map((z) => `<button data-z="${z}">${z[0].toUpperCase() + z.slice(1)}</button>`).join('')}</div>
       <div class="legend"></div>
@@ -33,6 +34,7 @@ export function mountCenter(el: HTMLElement, store: ShellStore, opts: { onFocusM
   const composer = mountComposer(compose.querySelector<HTMLElement>('.cmp-mount')!, store);
   let composeKey = '';
   compose.querySelector('.cmp-thread')!.addEventListener('click', () => { if (composeKey) opts.onOpenSession(composeKey); });
+  const picker = mountSessionPicker(compose.querySelector<HTMLSelectElement>('.cmp-pick')!, store, (key) => opts.onOpenSession(key));
   let map: MapApi | null = null;
 
   seg.addEventListener('click', (e) => {
@@ -87,7 +89,7 @@ export function mountCenter(el: HTMLElement, store: ShellStore, opts: { onFocusM
       composeKey = target?.key ?? '';
       compose.hidden = !target;
       compose.style.setProperty('--hue', team?.hue ?? 'var(--accent)');
-      if (target) composer.setTarget(target);
+      if (target) { composer.setTarget(target); picker.set(/^agent:([^:]+):/.exec(target.key)?.[1] ?? ''); }
       title.textContent = t;
       title.style.setProperty('--hue', team?.hue ?? 'transparent');
       title.classList.toggle('has-hue', !!team);

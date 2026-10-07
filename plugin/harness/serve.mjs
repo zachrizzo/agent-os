@@ -34,7 +34,7 @@ createServer(async (req, res) => {
       r.pipe(res);
       setTimeout(() => up.destroy(), 20_000);
     });
-    up.on("error", () => { res.writeHead(502); res.end(); });
+    up.on("error", () => { if (!res.headersSent) res.writeHead(502); res.end(); });
     if (method === "POST") req.pipe(up); else up.end();
     return;
   }
@@ -44,7 +44,8 @@ createServer(async (req, res) => {
   const file = path.normalize(path.join(root, rel));
   if (!file.startsWith(root + path.sep)) { res.writeHead(404); res.end(); return; }
   try {
+    const body = await readFile(file);
     res.writeHead(200, { ...cors, "content-type": types[path.extname(file)] ?? "application/octet-stream", "cache-control": "no-store" });
-    res.end(await readFile(file));
+    res.end(body);
   } catch { res.writeHead(404); res.end(); }
 }).listen(port, "127.0.0.1", () => console.log(`harness on http://127.0.0.1:${port}/`));

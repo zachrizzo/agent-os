@@ -2,8 +2,7 @@
 //   GET /api/config
 //   GET /api/snapshot?source=live|mock
 //   GET /api/stream?source=live|mock      (SSE: "snapshot" once, then "delta")
-//   GET /api/history?source=..&key=<sessionKey>[&limit=N]     any session of a listed agent (not only the ones on the map), PHI agent excluded
-//   GET /api/sessions?source=..&agent=<agentId>|team=<teamId>  every session of that agent/team, newest first, children after their parent
+//   GET /api/history?source=..&key=<sessionKey>
 //   GET /api/board?source=..           read-only Workboard cards (boards spark + forge) for the Board view
 //   GET  /api/rooms            rooms + the live agent list (PHI excluded)      GET /api/rooms/:id   one room with its thread and run state
 //   POST /api/rooms {name, members, captain?}   create             POST /api/rooms/:id {name?, addMembers?, removeMembers?, archived?, captain?}

@@ -14,7 +14,7 @@ import { isExcludedAgent, judgeSessionKey, type TurnProgress, type TurnResult } 
 import { toolInFlight, usageFromMessages } from '../shared/turn-usage.ts';
 import { nowFromProgress, progressOf, type RunProgress } from '../shared/progress.ts';
 import { routeMessage, type Routed } from '../shared/route.ts';
-import { inScope, sessionTree, toSessionRow, type SessionRow, type SessionScope } from '../shared/sessions.ts';
+import { scopedRows, sessionTree, toSessionRow, type SessionRow, type SessionScope } from '../shared/sessions.ts';
 import { redact } from './redact.ts';
 import { createRoomsService, isRoomKey, listAgentsWithFallback, roomSessionKey, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
@@ -444,12 +444,12 @@ export function createLiveSource(): Source {
     },
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     async sessions(scope: SessionScope): Promise<SessionRow[]> {
-      const rows = everySession.filter((s) => inScope(s.agentId ?? agentOfKey(s.key), scope)).map((s) => {
+      const rows = everySession.map((s) => {
         const row = toSessionRow(s);
         const preview = gist(String(s.lastMessagePreview ?? ''), 90);
         return { ...row, label: clip(row.label, 80), ...(preview ? { preview } : {}) };
       });
-      return sessionTree(rows).map((n) => n.row);
+      return sessionTree(scopedRows(rows, scope)).map((n) => n.row);
     },
     async history(key, limit = 40): Promise<HistoryItem[]> {
       if (!agents.has(key) && !everySession.some((s) => s.key === key)) return [];

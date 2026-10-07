@@ -1,6 +1,11 @@
 import { SESSION_KIND_LABEL, SESSION_STATE_LABEL, ageShort, sessionTree, type SessionNode, type SessionRow } from '../../shared/sessions';
 import { esc } from './format';
 
+export function sideTabsHtml(active: 'activity' | 'sessions'): string {
+  const tab = (id: 'activity' | 'sessions', label: string) => `<button type="button" role="tab" data-side-tab="${id}" aria-selected="${id === active}" class="${id === active ? 'on' : ''}">${label}</button>`;
+  return `<div class="side-tabs" role="tablist">${tab('activity', 'Activity')}${tab('sessions', 'Sessions')}</div>`;
+}
+
 export interface SessionRowsOpts {
   now: number;
   activeKey?: string;

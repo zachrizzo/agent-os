@@ -4,6 +4,7 @@
 import type { FleetEvent } from '../contract';
 import type { Filter, ShellState, ShellStore } from '../store';
 import { renderInline } from '../../shared/markdown';
+import { sideTabsHtml } from './session-rows';
 import { KIND_COLOR, KIND_LABEL, esc, fmtTime, hueOf, matchesFilter, matchesQuery, nameOf, openNeeds, svg } from './format';
 
 const MAX_ROWS = 300;
@@ -15,6 +16,7 @@ const CHIPS: Array<[Filter, string]> = [['all', 'All'], ['needs', 'Needs you'], 
 
 export function mountActivity(el: HTMLElement, store: ShellStore, openEvent: (e: FleetEvent) => void) {
   el.innerHTML = `
+    ${sideTabsHtml('activity')}
     <div class="panel-head"><h2>Activity</h2><button class="grp-btn" type="button" aria-pressed="false" title="Group the stream by team">By team</button><span class="live-ind"><i></i><span>Live</span></span></div>
     <div class="chips">${CHIPS.map(([k, l]) => `<button data-f="${k}">${l}</button>`).join('')}</div>
     <div class="act-scroll">

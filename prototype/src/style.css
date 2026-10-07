@@ -764,3 +764,36 @@ button.who-btn:hover { background: color-mix(in srgb, var(--fg) 6%, transparent)
 .cmp-via { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmp-direct { display: inline-flex; align-items: center; gap: 5px; color: var(--fg-2); cursor: pointer; white-space: nowrap; }
 .cmp-direct input { margin: 0; accent-color: var(--accent); }
+#sessions { grid-area: act; background: var(--bg-1); display: flex; flex-direction: column; min-height: 0; min-width: 0; border-left: 1px solid var(--line); }
+#sessions[hidden], #activity[hidden] { display: none; }
+#app.focus #sessions { overflow: hidden; border: 0; }
+.side-tabs { display: flex; gap: 2px; padding: 10px 14px 0; }
+.side-tabs button { height: 28px; padding: 0 12px; border-radius: 7px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.side-tabs button:hover { color: var(--fg); }
+.side-tabs button.on { color: var(--fg); background: var(--bg-2); box-shadow: inset 0 0 0 1px var(--line-2); }
+.ss-title { padding: 0 18px 8px; font-size: 12px; color: var(--muted); }
+.ss-row { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; column-gap: 10px; align-items: start; width: 100%; text-align: left; padding: 8px 10px 8px calc(10px + var(--depth, 0) * 16px); border-radius: 9px; color: var(--fg-2); border: 1px solid transparent; }
+.ss-row:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.ss-row.on { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.ss-dot { width: 7px; height: 7px; margin-top: 6px; border-radius: 50%; background: var(--idle); }
+.ss-row.st-running .ss-dot { background: var(--green); }
+.ss-row.st-needs .ss-dot { background: var(--amber); }
+.ss-row.st-error .ss-dot { background: var(--red); }
+.ss-row.st-done .ss-dot { background: var(--faint); }
+.ss-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ss-line { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.ss-kind { flex: none; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.ss-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); font-size: 13px; }
+.ss-sub { display: flex; gap: 8px; min-width: 0; font-size: 11.5px; color: var(--muted); }
+.ss-state { flex: none; }
+.ss-agent { flex: none; color: var(--fg-2); }
+.ss-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-row time { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.cmp-pick { max-width: 150px; height: 34px; padding: 0 6px; border-radius: 9px; color: var(--fg-2); background: var(--bg-2); border: 1px solid var(--line-2); font-size: 12px; }
+.cmp-pick:disabled { opacity: 0.45; }
+.d-pick { padding: 0 18px 6px; }
+.d-sessions { width: 100%; height: 30px; padding: 0 8px; border-radius: 8px; color: var(--fg-2); background: var(--bg-2); border: 1px solid var(--line-2); font-size: 12px; }
+.wk-sessions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.wk-sess, .wk-sess-more { font-size: 10.5px; padding: 1px 7px; border-radius: 99px; color: var(--fg-2); background: var(--bg-2); border: 1px solid var(--line-2); cursor: pointer; }
+.wk-sess:hover { color: var(--fg); border-color: var(--accent); }
+.wk-sess-more { cursor: default; color: var(--muted); }

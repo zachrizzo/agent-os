@@ -4,6 +4,7 @@ import type { FleetEvent } from '../contract';
 import type { ShellStore } from '../store';
 import { installMarkdownHandlers, renderInline, renderMarkdown } from '../../shared/markdown';
 import { mountComposer } from './composer';
+import { mountSessionPicker } from './session-picker';
 import { KIND_COLOR, KIND_LABEL, esc, fmtTime, hueOf, nameOf, svg } from './format';
 
 export function mountDrawer(el: HTMLElement, store: ShellStore) {
@@ -51,6 +52,7 @@ export function mountDrawer(el: HTMLElement, store: ShellStore) {
         <button class="icon-btn d-close" title="Close (Esc)">${svg('close', 16)}</button>
       </header>
       <div class="d-route">${route}</div>
+      <div class="d-pick"><select class="d-sessions" aria-label="Sessions of this agent" title="All sessions of this agent"></select></div>
       <div class="d-body">
         ${ev ? `<blockquote class="d-text">${renderInline(ev.text)}${ev.label && ev.label !== ev.text ? `<small class="d-label">${esc(ev.label)}</small>` : ''}</blockquote>` : ''}
         <dl class="d-meta">
@@ -65,6 +67,7 @@ export function mountDrawer(el: HTMLElement, store: ShellStore) {
     el.setAttribute('aria-hidden', 'false');
     if (ev) store.select({ type: 'event', id: ev.id });
 
+    mountSessionPicker(el.querySelector<HTMLSelectElement>('.d-sessions')!, store, (k) => { void show(k, undefined, false); }).set(/^agent:([^:]+):/.exec(key)?.[1] ?? '', key);
     const composer = mountComposer(el.querySelector<HTMLElement>('.cmp-mount')!, store, (k, text, result) => {
       if (current === k && result.to === k) void loadThread(k, text);
     });

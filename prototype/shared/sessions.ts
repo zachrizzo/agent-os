@@ -111,6 +111,15 @@ export function teamOfAgent(agentId: string): string {
 export const inScope = (agentId: string, scope: SessionScope) =>
   scope.agent ? agentId === scope.agent : scope.team ? teamOfAgent(agentId) === scope.team : false;
 
+export function scopedRows(rows: readonly SessionRow[], scope: SessionScope): SessionRow[] {
+  const keys = new Set(rows.filter((r) => inScope(r.agentId, scope)).map((r) => r.key));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const r of rows) if (!keys.has(r.key) && r.parent && keys.has(r.parent)) { keys.add(r.key); grew = true; }
+  }
+  return rows.filter((r) => keys.has(r.key));
+}
+
 export function scopeParams(scope: SessionScope): string {
   return scope.agent ? `agent=${encodeURIComponent(scope.agent)}` : scope.team ? `team=${encodeURIComponent(scope.team)}` : '';
 }

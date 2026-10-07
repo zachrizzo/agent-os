@@ -4,7 +4,7 @@ import { parseInterSession, shortSession } from '../shared/a2a.ts';
 import { RICH_MD, scriptedReply, triggerText } from '../shared/scripted.ts';
 import type { BoardCard } from '../shared/board.ts';
 import { routeMessage } from '../shared/route.ts';
-import { inScope, sessionTree, type SessionRow, type SessionScope } from '../shared/sessions.ts';
+import { scopedRows, sessionTree, type SessionRow, type SessionScope } from '../shared/sessions.ts';
 import { createRoomsService, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
 
@@ -308,7 +308,10 @@ export function createMockSource(): Source {
   return {
     rooms,
     async sessions(scope: SessionScope): Promise<SessionRow[]> {
-      const members = all().filter((a) => inScope(a.agentId ?? '', scope) || (!!scope.agent && a.parent === `agent:${scope.agent}:main`));
+      const everyone = all();
+      const parentOf = (a: Agent) => a.parent && everyone.some((m) => m.id === a.parent) ? a.parent : undefined;
+      const members = scopedRows(everyone.map((a) => ({ key: a.id, agentId: a.agentId ?? '', kind: 'other' as const, label: '', state: 'idle' as const, updatedAt: 0, ...(parentOf(a) ? { parent: parentOf(a) } : {}) })), scope)
+        .map((r) => everyone.find((a) => a.id === r.key)!);
       const rows: SessionRow[] = members.map((a) => ({
         key: a.id, agentId: a.agentId ?? '', kind: KIND_OF[a.kind ?? ''] ?? 'other', label: a.label ?? a.name, state: STATE_OF(a), updatedAt: a.updatedAt,
         ...(a.parent && members.some((m) => m.id === a.parent) ? { parent: a.parent } : {}), ...(a.model ? { model: a.model } : {}),

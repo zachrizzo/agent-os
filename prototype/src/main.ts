@@ -15,6 +15,7 @@ import { mountCenter, mountPlaceholder } from './ui/center';
 import { mountDocs } from './ui/docs';
 import { mountDrawer } from './ui/drawer';
 import { mountRail } from './ui/rail';
+import { mountSessions } from './ui/sessions';
 import { mountRooms } from './ui/rooms';
 import { mountTopbar } from './ui/topbar';
 import { mountWork } from './ui/work';
@@ -41,6 +42,18 @@ async function boot() {
     onOpenSession: (key) => drawer.openSession(key, true),
   });
   const activity = mountActivity($('activity'), store, (e) => drawer.open(e));
+  const sessionsEl = $('sessions');
+  const sessions = mountSessions(sessionsEl, store, { onOpenSession: (key) => drawer.openSession(key), activeKey: () => null });
+  const applySide = () => {
+    const sessionsTab = store.get().sideTab === 'sessions';
+    $('activity').hidden = sessionsTab;
+    sessionsEl.hidden = !sessionsTab;
+    sessions.update();
+  };
+  for (const panel of [$('activity'), sessionsEl]) panel.addEventListener('click', (e) => {
+    const t = (e.target as HTMLElement).closest<HTMLElement>('[data-side-tab]');
+    if (t) store.setSideTab(t.dataset.sideTab as 'activity' | 'sessions');
+  });
   const workEl = $('work');
   const work = mountWork(workEl, store, { onOpenSession: (key) => drawer.openSession(key) });
   const closeOverlays = () => { rooms.hide(); board.hide(); docs.hide(); renderTop.setRooms(roomCount, false); renderTop.setBoard(false); renderTop.setDocs(false); };
@@ -83,6 +96,7 @@ async function boot() {
     center.update(s);
     activity.update(s);
     work.update();
+    applySide();
   });
 
   let map: MapApi;

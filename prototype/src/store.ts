@@ -19,7 +19,7 @@ export interface ShellState extends State {
   view: View;
   showAllWork: boolean;
   sideTab: SideTab;
-  scopeSel: Selection;    // the agent/team last picked: what the Sessions tab lists (an opened event does not clear it)
+  scopeSel: Selection;
   liveCount: number;      // live agents; the headline "agents" number
   historyCount: number;   // retired sessions the toggle would reveal (or is revealing)
   agentsAll: Map<string, Agent>; // every retained session, incl. hidden ones (name/team lookups for old events)

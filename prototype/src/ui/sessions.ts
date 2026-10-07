@@ -2,7 +2,7 @@ import type { SessionRow, SessionScope } from '../../shared/sessions';
 import { createSessionsApi } from '../sessions-api';
 import type { ShellState, ShellStore } from '../store';
 import { esc, nameOf } from './format';
-import { sessionRowsHtml } from './session-rows';
+import { sessionRowsHtml, sideTabsHtml } from './session-rows';
 
 const REFRESH_MS = 5000;
 
@@ -19,6 +19,7 @@ export function sessionScopeOf(s: ShellState): { scope: SessionScope; title: str
 
 export function mountSessions(el: HTMLElement, store: ShellStore, opts: { onOpenSession: (key: string) => void; activeKey: () => string | null }) {
   el.innerHTML = `
+    ${sideTabsHtml('sessions')}
     <div class="panel-head"><h2>Sessions</h2><span class="head-meta ss-count"></span></div>
     <div class="ss-title"></div>
     <div class="act-scroll"><div class="ss-list" role="list"></div><div class="act-empty ss-empty" hidden></div></div>`;
