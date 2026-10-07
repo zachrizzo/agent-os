@@ -483,7 +483,7 @@ test('rate limits are retried through the service with the configured backoff, a
   let v = await svc.get(room.id);
   assert.equal(v.run?.stopReason, 'passed');
   assert.ok(v.room.messages.some((m) => m.from === 'rfc-skeptic'));
-  assert.ok(!v.room.messages.some((m) => m.from === 'system'), 'a retry that worked leaves no failure note');
+  assert.ok(!v.room.messages.some((m) => m.from === 'system' && !m.passed), 'a retry that worked leaves no failure note');
   await svc.send(room.id, 'dead one');
   await svc.idle(room.id);
   v = await svc.get(room.id);

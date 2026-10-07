@@ -98,7 +98,7 @@ test('every member sees the whole discussion so far, and is told to PASS when it
   const round2 = prompts.find((p) => /It is round 2\./.test(p) && /You are Forge Coder/.test(p))!;
   assert.match(round2, /Alpha: Alpha here/);
   assert.match(round2, /Bravo: Bravo here/);
-  assert.match(round2, /Reply if you can add something/);
+  assert.match(round2, /Reply only if you were asked a direct question/);
   assert.match(round2, /reply exactly PASS/);
   assert.match(round2, /ends when everyone passes/);
   const lead = prompts.find((p) => /It is round 2\./.test(p) && /You are Alpha/.test(p))!;
@@ -122,7 +122,7 @@ test('there is no round cap: a long discussion keeps going until a round of PASS
   const s = setup('long one');
   assert.equal(await run(s, t), 'passed');
   assert.equal(rounds, 60);
-  assert.ok(!s.room.messages.some((m) => m.from === 'system'), 'no cap note');
+  assert.ok(!s.room.messages.some((m) => m.from === 'system' && !m.passed), 'no cap note');
 });
 
 test('the lead may steer by @mention and a steering lead keeps the discussion going; a lead that summarises on request is a normal message', async () => {
@@ -150,7 +150,7 @@ test("an @mention in Zach's message is a direct question: only they reply, hando
 
 const FAST = { retryDelayMs: () => 1 };
 const runFast = (s: ReturnType<typeof setup>, t: RoomTransport, members = M) => runDiscussion(s.room, members, s.trigger, t, s.hooks, new AbortController().signal, FAST);
-const sysNotes = (room: Room) => room.messages.filter((m) => m.from === 'system').map((m) => m.text);
+const sysNotes = (room: Room) => room.messages.filter((m) => m.from === 'system' && !m.passed).map((m) => m.text);
 
 test('classifyFailure: rate limit and overload are transient; auth and billing are terminal (billing wins over a 429); timeouts and unknowns are not retried', () => {
   for (const m of ['429 Too Many Requests', 'rate_limit_error: slow down', 'HTTP 529 overloaded_error', '503 Service Unavailable']) assert.equal(classifyFailure(new Error(m)).kind, 'transient', m);
@@ -554,4 +554,92 @@ test('context note: purpose (or the name), members, lead, the quiet rule and the
   assert.match(contextNote({ room: { id: 'r00000001', name: 'Rollout', captain: 'bravo' }, members: M, files: [] }), /Purpose: Rollout\n/);
   assert.ok(!/Relevant files/.test(contextNote({ room: { id: 'r00000001', name: 'x', captain: '' }, members: M, files: [] })));
   assert.ok(!/^Members: |Lead: /m.test(note), 'does not look like the per-turn room header');
+});
+
+import { handedMentions, mentionIntents } from './rooms.ts';
+
+const handed = (text: string) => handedMentions(text, M);
+
+test('agent mentions: cc and FYI start no turn', () => {
+  for (const t of ['Build is green. cc @bravo', 'Build is green (cc @bravo)', 'CC: @bravo', 'FYI @bravo the deploy finished.', '@bravo fyi, the deploy finished.', 'Done, cc @alpha, @bravo and @forge-coder']) assert.deepEqual(handed(t), [], t);
+});
+
+test('agent mentions: "no need to reply" in the same or the next sentence starts no turn', () => {
+  for (const t of ['@bravo no need to reply.', '@bravo, no reply needed: the tests pass.', 'Tests pass, @bravo. No need to respond.', '@bravo you don’t need to answer this.', 'For your awareness @bravo, the flag is on.', '@bravo nothing needed from you.']) assert.deepEqual(handed(t), [], t);
+});
+
+test('agent mentions: "don\'t …" and "stand down" start no turn unless it is a question', () => {
+  for (const t of ["@bravo don't merge until QA passes.", '@bravo please do not touch the migration.', '@bravo, don’t rerun it.', '@bravo stand down, I have it.', 'Stand down @bravo.', '@bravo you can hold off on the review.']) assert.deepEqual(handed(t), [], t);
+  assert.deepEqual(handed("@bravo don't you think we should wait?"), ['bravo']);
+});
+
+test('agent mentions: passing references start no turn', () => {
+  for (const t of ["As @bravo said, Thursday works.", "@bravo's numbers look right.", '@bravo already covered the rollback.']) assert.deepEqual(handed(t), [], t);
+});
+
+test('agent mentions: a direct ask or an action starts a turn, and one ask wins over a cc of the same member', () => {
+  assert.deepEqual(handed('@bravo can you check the logs?'), ['bravo']);
+  assert.deepEqual(handed('@bravo please run the migration on staging.'), ['bravo']);
+  assert.deepEqual(handed('Over to @bravo for the numbers.'), ['bravo']);
+  assert.deepEqual(handed('@bravo can you run QA? cc @forge-coder'), ['bravo']);
+  assert.deepEqual(handed("@bravo don't merge yet. @bravo can you rerun QA first?"), ['bravo']);
+  assert.deepEqual(handed('@bravo no need to reply. @alpha please review.'), ['alpha']);
+  assert.deepEqual(handed('just @all'), []);
+  assert.deepEqual(mentionIntents("cc @bravo. @alpha don't merge. @forge-coder no need to reply. As @alpha said. @bravo go ahead.", M).map((x) => `${x.id}:${x.intent}`),
+    ['bravo:cc', 'alpha:negation', 'forge-coder:no-reply', 'alpha:reference', 'bravo:ask']);
+});
+
+test('quiet room: a member only cc\'d or told to stand down is not handed a turn, and the pause names nobody', async () => {
+  for (const reply of ['Build is green. cc @bravo', '@bravo stand down, I have it.', '@bravo no need to reply.']) {
+    const s = setup('@alpha status?', M, 'alpha', { responderMode: 'quiet' });
+    const asked: string[] = [];
+    let detail = '';
+    await runH(s, { async turn(a) { asked.push(a); return asked.length === 1 ? reply : PASS_TOKEN; } },
+      { waitForContinue: async () => { detail ||= s.state.pause?.detail ?? ''; }, state: (p) => { Object.assign(s.state, p); } });
+    assert.ok(!asked.includes('bravo'), reply);
+    assert.equal(detail, 'Alpha replied', reply);
+  }
+});
+
+test('directed run: FYI to a member ends the run, a direct ask pulls the member in', async () => {
+  const cc = setup('@alpha status?', M, 'alpha', { responderMode: 'mentions' });
+  const asked: string[] = [];
+  assert.equal(await run(cc, { async turn(a) { asked.push(a); return 'Deploy is done, FYI @bravo.'; } }), 'complete');
+  assert.deepEqual(asked, ['alpha']);
+  const ask = setup('@alpha status?', M, 'alpha', { responderMode: 'mentions' });
+  const asked2: string[] = [];
+  await run(ask, { async turn(a) { asked2.push(a); return a === 'alpha' && asked2.length === 1 ? '@bravo can you confirm the numbers?' : PASS_TOKEN; } });
+  assert.ok(asked2.includes('bravo'));
+});
+
+test('handoffs: a cc or a "no need to reply" is not shown as a hand-off', () => {
+  const h = handoffsOf([
+    { id: '1', ts: 1, from: 'you', text: 'plan?' },
+    { id: '2', ts: 2, from: 'alpha', text: 'Plan is ready. cc @bravo' },
+    { id: '3', ts: 3, from: 'alpha', text: '@bravo no need to reply. @forge-coder please review.' },
+  ], M);
+  assert.equal(h.get('2'), undefined);
+  assert.deepEqual(h.get('3')?.to, ['forge-coder']);
+});
+
+test('passes are never bubbles: one system line per round names who passed, in member order', async () => {
+  const s = setup('Ship Thursday?');
+  await run(s, { async turn(a, p) { return /round 1\./.test(p) && a === 'bravo' ? 'Thursday works.' : PASS_TOKEN; } });
+  assert.deepEqual(who(s.room), ['you', 'bravo']);
+  const lines = s.room.messages.filter((m) => m.passed);
+  assert.deepEqual(lines.map((m) => [m.from, m.round, m.passed, m.text]), [
+    ['system', 1, ['alpha', 'forge-coder'], 'Alpha, Forge Coder passed'],
+    ['system', 2, ['alpha', 'bravo', 'forge-coder'], 'Alpha, Bravo, Forge Coder passed'],
+  ]);
+  assert.ok(!/passed/.test(discussionBlock(s.room.messages, s.trigger, (id) => id).discussion), 'agents never see pass lines');
+});
+
+test('room turn prompt: reply only when needed, otherwise PASS; acknowledgements and stand-down are PASS', () => {
+  const { room, trigger } = setup('q', M, 'alpha');
+  for (const round of [1, 2]) {
+    const p = memberPrompt({ room, members: M, agent: M[1], lead: M[0], trigger, round, directed: false });
+    assert.match(p, /Reply only if you were asked a direct question, were given an action, have new information, or disagree with something that matters\. Otherwise reply exactly PASS\./);
+    assert.match(p, /Acknowledgements, thanks, agreement and restating what was said are all PASS\./);
+    assert.match(p, /told not to do something or to stand down, reply PASS unless you actually disagree/);
+  }
 });
