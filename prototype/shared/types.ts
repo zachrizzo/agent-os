@@ -79,6 +79,23 @@ export interface HistoryItem {
   sender?: string;
   /** Present when the message was routed from another session (sessions_send etc.); `text` is then the sender's own words. */
   a2a?: { from: string; tool?: string; routing: string };
+  id?: string;
+  from?: string;
+  task?: { depth?: string };
+  relay?: string;
+  tools?: HistoryTool[];
+  notice?: 'system' | 'error';
+  truncated?: boolean;
+}
+
+export interface HistoryTool {
+  id?: string;
+  name: string;
+  summary: string;
+  detail?: string;
+  result?: string;
+  error?: boolean;
+  running?: boolean;
 }
 
 export const COS_ID = 'agent:main:main';

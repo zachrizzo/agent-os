@@ -118,6 +118,7 @@ export const ICONS = {
   play: '<path d="M7 4.5v15l12-7.5-12-7.5Z" fill="currentColor"/>',
   pause: '<path d="M8 5v14M16 5v14"/>',
   expand: '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>',
+  shrink: '<path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/>',
   menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   crown: '<path d="m3 7 4.5 4L12 4l4.5 7L21 7l-2 12H5L3 7Z"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',

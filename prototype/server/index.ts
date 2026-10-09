@@ -3,6 +3,7 @@
 //   GET /api/snapshot?source=live|mock
 //   GET /api/stream?source=live|mock      (SSE: "snapshot" once, then "delta")
 //   GET /api/history?source=..&key=<sessionKey>
+//   GET /api/thread?source=..&key=<sessionKey>   transcript items, session status (state, tokens, cost) and the in-flight run
 //   GET /api/board?source=..           read-only Workboard cards (boards spark + forge) for the Board view
 //   GET  /api/rooms            rooms + the live agent list (PHI excluded)      GET /api/rooms/:id   one room with its thread and run state
 //   POST /api/rooms {name, members, captain?}   create             POST /api/rooms/:id {name?, addMembers?, removeMembers?, archived?, captain?}
@@ -147,6 +148,13 @@ const server = createServer(async (req, res) => {
       const s = source(src);
       await s.ready;
       return json(res, 200, { items: await s.history(key, limit) });
+    }
+    if (url.pathname === '/api/thread') {
+      const key = url.searchParams.get('key') ?? '';
+      const limit = Math.min(300, Math.max(1, Math.trunc(Number(url.searchParams.get('limit'))) || 150));
+      const s = source(src);
+      await s.ready;
+      return json(res, 200, await s.thread(key, limit));
     }
     if (url.pathname === '/api/sessions') {
       const scope = { agent: url.searchParams.get('agent') ?? undefined, team: url.searchParams.get('team') ?? undefined };

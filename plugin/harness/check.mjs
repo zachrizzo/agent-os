@@ -84,8 +84,10 @@ async function messageAgentChecks(browser, tag) {
   await row.click();
   await page.waitForFunction(() => /@[\w-]+/.test(document.querySelector(".c-compose .cmp-via")?.textContent ?? ""), null, { timeout: 5000 }).catch(() => {});
   const agentId = await page.evaluate(() => [...document.querySelectorAll(".c-compose .cmp-via")].map((e) => e.textContent).join("").match(/@([\w-]+)/)?.[1] ?? "");
-  if (!agentId) bad.push(["composer says it relays through the Chief of Staff", await page.locator(".c-compose .cmp-via").innerText()]);
-  if (await page.locator(".c-compose .cmp-direct:visible").count()) bad.push(["no Send direct for an agent with a lead", "visible"]);
+  if (!agentId) bad.push(["composer names the agent", await page.locator(".c-compose .cmp-via").innerText()]);
+  if ((await page.locator(".c-compose .cmp-mode [aria-checked=true]").innerText()) !== "Direct") bad.push(["Direct is the default for a non-main agent", await page.locator(".c-compose .cmp-via").innerText()]);
+  await page.click(".c-compose .cmp-mode [data-mode=relay]");
+  if (!(await page.locator(".c-compose .cmp-via").innerText()).includes(`relays it to @${agentId}`)) bad.push(["Via Chief of Staff says it relays", await page.locator(".c-compose .cmp-via").innerText()]);
   await page.waitForSelector(".c-compose:visible");
   const sent1 = `harness ping ${tag} ${Date.now()}`;
   await page.locator(".c-compose textarea").fill(sent1);
@@ -117,21 +119,22 @@ async function messageAgentChecks(browser, tag) {
     const post = (body, hdr = true) => fetch(new URL("api/send?source=mock", document.baseURI), { method: "POST", headers: { "content-type": "application/json", ...(hdr ? { "x-agent-os-send": "1" } : {}) }, body: JSON.stringify(body) });
     const r = await post({ key: "agent:nope:main", message: "x" });
     const nohdr = await post({}, false);
-    const chained = await post({ key: "agent:agent-service-lead:main", message: "x", direct: true });
+    const chained = await (await post({ key: "agent:agent-service-lead:main", message: "harness direct lead", direct: true })).json();
     const relayed = await (await post({ key: "agent:agent-service-lead:main", message: "harness relay" })).json();
     const direct = await (await post({ key: "agent:scrum:cron:w0rk0006", message: "harness direct", direct: true })).json();
-    return [r.status, nohdr.status, chained.status, relayed.to, relayed.relayed, direct.to, direct.relayed];
+    return [r.status, nohdr.status, chained.to, chained.relayed, relayed.to, relayed.relayed, direct.to, direct.relayed];
   });
-  if (JSON.stringify(refused) !== JSON.stringify([400, 403, 400, "agent:main:main", true, "agent:scrum:cron:w0rk0006", false])) bad.push(["unknown 400 / no header 403 / direct to a chained agent 400 / relay to main / direct to scrum", JSON.stringify(refused)]);
+  if (JSON.stringify(refused) !== JSON.stringify([400, 403, "agent:agent-service-lead:main", false, "agent:main:main", true, "agent:scrum:cron:w0rk0006", false])) bad.push(["unknown 400 / no header 403 / direct to a lead / relay to main / direct to scrum", JSON.stringify(refused)]);
   // Team view: a team row targets its lead.
   await page.keyboard.press("Escape");
   await page.fill(".search input", "");
   await page.locator("#rail .row.team").nth(1).click();
   await page.waitForSelector(".c-compose:visible");
-  if (!/via Chief of Staff/.test(await page.locator(".c-compose textarea").getAttribute("placeholder") ?? "")) bad.push(["team view composer goes through the Chief of Staff", await page.locator(".c-compose textarea").getAttribute("placeholder")]);
+  await page.click(".c-compose .cmp-mode [data-mode=relay]");
+  if (!/via Chief of Staff/.test(await page.locator(".c-compose textarea").getAttribute("placeholder") ?? "")) bad.push(["team view composer can go through the Chief of Staff", await page.locator(".c-compose textarea").getAttribute("placeholder")]);
   if (errors.length) bad.push(["pageerrors", errors.join("; ")]);
   if (bad.length) failed++;
-  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · Message agent composer via the Chief of Staff (agent view, team view, drawer, Activity You -> Chief of Staff, direct only without a chain)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · Message agent composer (agent view, team view, drawer, Direct by default, Via Chief of Staff -> Activity You -> Chief of Staff)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
   await page.close();
 }
 
@@ -725,19 +728,19 @@ async function workChecks(browser, tag) {
   await row("AIPIT-6000").click();
   await page.waitForSelector("#drawer.open .d-compose textarea");
   expect("a row opens its session", (await page.locator("#drawer .d-meta .mono").first().innerText()) === "agent:scrum:cron:w0rk0006");
-  expect("Send direct is offered for an agent with no approval chain", (await page.locator("#drawer .cmp-direct:visible").count()) === 1);
-  await page.locator("#drawer .cmp-direct input").check();
-  expect("checking it says the message goes straight to the agent", (await page.locator("#drawer .cmp-via").innerText()).includes("straight to @scrum"));
+  expect("the drawer composer defaults to Direct", (await page.locator("#drawer .cmp-mode [aria-checked=true]").innerText()) === "Direct");
+  expect("Direct says the message goes straight to the session", (await page.locator("#drawer .cmp-via").innerText()).includes("straight to this @scrum session"));
   await page.keyboard.press("Escape");
   await row("AIPIT-6358").click();
   await page.waitForSelector("#drawer.open .d-compose textarea");
-  expect("no Send direct for an agent under a lead", (await page.locator("#drawer .cmp-direct:visible").count()) === 0 && (await page.locator("#drawer .cmp-via").innerText()).includes("relays it to @agent-service-coder"));
+  await page.click("#drawer .cmp-mode [data-mode=relay]");
+  expect("Via Chief of Staff for an agent under a lead", (await page.locator("#drawer .cmp-via").innerText()).includes("relays it to @agent-service-coder"));
   await page.keyboard.press("Escape");
   await toFleet(page);
   expect("Fleet shows the map", (await page.locator("#center .aos-map canvas").count()) >= 1 && (await page.getAttribute(".view-tabs [data-view=fleet]", "aria-selected")) === "true");
   if (errors.length) bad.push(["pageerrors", errors.join("; ")]);
   if (bad.length) failed++;
-  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · Work view (default tab, rows per ticket/MR, Needs Zach pinned, lead/milestone/blocker/age, automation toggle, row opens session, direct only without a chain)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
+  console.log(`${bad.length ? "FAIL" : "ok  "} ${tag} · Work view (default tab, rows per ticket/MR, Needs Zach pinned, lead/milestone/blocker/age, automation toggle, row opens session, Direct / Via Chief of Staff)${bad.length ? " <- " + JSON.stringify(bad) : ""}`);
   await page.close();
 }
 

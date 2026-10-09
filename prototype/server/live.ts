@@ -6,7 +6,6 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { COS_ID, TEAM_PALETTE, type Agent, type AgentStatus, type Delta, type EventKind, type FleetEvent, type HistoryItem, type Meters, type Snapshot, type Team } from '../shared/types.ts';
-import { parseInterSession, shortSession } from '../shared/a2a.ts';
 import { attentionEvent, deriveSessionEvents, mergeEvents, sessionMetaOf, spawnEvent, openNeedsOf, type RawMessage } from '../shared/activity.ts';
 import { classifySession, isRunning } from '../shared/liveness.ts';
 import { BOARDS, normalizeCard, type BoardCard } from '../shared/board.ts';
@@ -15,11 +14,12 @@ import { toolInFlight, usageFromMessages } from '../shared/turn-usage.ts';
 import { nowFromProgress, progressOf, type RunProgress } from '../shared/progress.ts';
 import { routeMessage, type Routed } from '../shared/route.ts';
 import { scopedRows, sessionTree, toSessionRow, type SessionRow, type SessionScope } from '../shared/sessions.ts';
+import { liveRunOf, needsUsageLookup, sessionStatusOf, toHistoryItems, usageFromSessionsUsage, type SessionThread, type SessionUsage } from '../shared/transcript.ts';
 import { redact } from './redact.ts';
 import { createRoomsService, isRoomKey, listAgentsWithFallback, roomSessionKey, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
 
-const READ_METHODS = new Set(['sessions.list', 'agents.list', 'chat.history', 'usage.cost', 'workboard.cards.list']);
+const READ_METHODS = new Set(['sessions.list', 'agents.list', 'chat.history', 'sessions.usage', 'usage.cost', 'workboard.cards.list']);
 const SEND_METHOD = 'sessions.send';
 const CREATE_METHOD = 'sessions.create'; // only for dedicated room sessions (agent:<id>:room-<roomId>), see call()
 const ABORT_METHOD = 'chat.abort'; // Stop / member timeout: only for dedicated room sessions, see call()
@@ -29,6 +29,7 @@ const agentOfKey = (key: unknown) => String(key ?? '').match(/^agent:([^:]+):/)?
 const MAX_MESSAGE_CHARS = 4000;
 const HIST_PER_POLL = 2; // chat.history reads per poll (single-flight CLI; main's history is ~3 MB)
 const HIST_MESSAGES = 120;
+const USAGE_RETRY_MS = 15_000;
 const PROGRESS_PER_POLL = 2;
 const PROGRESS_EVERY_MS = 8000;
 const RING_MAX = 600;
@@ -52,6 +53,7 @@ function call(method: string, params: Record<string, unknown> = {}, timeoutMs = 
   if (method === ABORT_METHOD && !isRoomKey(String(params.sessionKey))) return Promise.reject(new Error('chat.abort is only allowed for room sessions'));
   if (method === SEND_METHOD && isExcludedAgent(agentOfKey(params.key))) return Promise.reject(new Error('unknown session')); // the PHI agent is never messaged
   if (method === 'chat.history' && isExcludedAgent(agentOfKey(params.sessionKey))) return Promise.reject(new Error('unknown session')); // ...nor read
+  if (method === 'sessions.usage' && isExcludedAgent(agentOfKey(params.key))) return Promise.reject(new Error('unknown session'));
   const run = () => new Promise((resolve, reject) => {
     const t0 = Date.now();
     execFile(OPENCLAW, ['gateway', 'call', method, '--json', '--params', JSON.stringify(params), '--timeout', String(timeoutMs)],
@@ -437,6 +439,35 @@ export function createLiveSource(): Source {
   const roomsFile = process.env.AGENT_OS_ROOMS_FILE ?? `${process.env.HOME ?? ''}/.openclaw/agent-os/rooms.json`;
   const rooms = createRoomsService({ gateway: roomGateway, file: roomsFile });
 
+  const usageCache = new Map<string, { sig: string; at: number; usage?: SessionUsage }>();
+  const sessionRow = (key: string): Record<string, any> | undefined => everySession.find((s) => s.key === key) ?? (agents.has(key) ? raw.get(key) : undefined);
+  const threadContext = (key: string, row: Record<string, any>) => {
+    const spawnedBy = row.spawnedBy ?? row.controlOwnerSessionKey ?? row.parentSessionKey;
+    return { key, redact, ...(typeof spawnedBy === 'string' && spawnedBy !== key ? { spawnedBy } : {}) };
+  };
+  async function usageOf(key: string, row: Record<string, any>): Promise<SessionUsage | undefined> {
+    if (!needsUsageLookup(row)) return undefined;
+    const sig = String(row.updatedAt ?? '');
+    const hit = usageCache.get(key);
+    if (hit && hit.sig === sig && (hit.usage || Date.now() - hit.at < USAGE_RETRY_MS)) return hit.usage;
+    try {
+      const usage = usageFromSessionsUsage(await call('sessions.usage', { key, range: '30d' }, 15_000));
+      usageCache.set(key, { sig, at: Date.now(), ...(usage ? { usage } : {}) });
+      return usage;
+    } catch { return hit?.usage; }
+  }
+  async function readThread(key: string, limit = 150): Promise<SessionThread> {
+    const known = sessionRow(key);
+    if (!known) return { items: [] };
+    const res = await call('chat.history', { sessionKey: key, limit }, 15_000);
+    const row = { ...known, ...(res?.sessionInfo ?? {}) };
+    const items = toHistoryItems(((res?.messages ?? []) as any[]).slice(-limit), threadContext(key, row));
+    const seen = new Set(items.flatMap((it) => (it.tools ?? []).map((t) => t.id ?? '')).filter(Boolean));
+    const live = liveRunOf(res?.inFlightRun, seen, redact);
+    const status = sessionStatusOf(key, row, row.hasActiveRun ? undefined : await usageOf(key, row));
+    return { items, status, ...(live ? { live } : {}) };
+  }
+
   return {
     rooms,
     snapshot(): Snapshot {
@@ -452,22 +483,9 @@ export function createLiveSource(): Source {
       return sessionTree(scopedRows(rows, scope)).map((n) => n.row);
     },
     async history(key, limit = 40): Promise<HistoryItem[]> {
-      if (!agents.has(key) && !everySession.some((s) => s.key === key)) return [];
-      const res = await call('chat.history', { sessionKey: key, limit }, 15_000);
-      const msgs: any[] = (res.messages ?? []).slice(-limit);
-      return msgs.map((m): HistoryItem => {
-        const raw = typeof m.content === 'string' ? m.content : Array.isArray(m.content)
-          ? m.content.map((c: any) => (c?.type === 'text' ? c.text : c?.type === 'toolCall' || c?.type === 'tool_use' ? `⚙ ${c.name ?? 'tool'}` : '')).filter(Boolean).join(' ')
-          : '';
-        const role = String(m.role ?? '?');
-        const ts = Number(m.timestamp ?? 0);
-        // Agent-to-agent traffic: show "sender → this session: body" and keep the wrapper out of the way. Display only; the transcript is untouched.
-        const inter = role === 'user' ? parseInterSession(raw) : null;
-        if (inter) return { role, ts, sender: clip(shortSession(inter.from), 60), text: clip(inter.body, 600), a2a: { from: inter.from, ...(inter.tool ? { tool: inter.tool } : {}), routing: clip(inter.routing, 400) } };
-        const sender = m.senderLabel ?? (m.senderSession?.sessionKey ? shortKey(m.senderSession.sessionKey) : undefined);
-        return { role, ts, ...(sender ? { sender: clip(sender, 60) } : {}), text: clip(raw, 600) };
-      }).filter((m) => m.text);
+      return (await readThread(key, limit)).items;
     },
+    thread: readThread,
     async send(key, text, direct): Promise<Routed> {
       const message = String(text ?? '').trim();
       if (!message) throw new Error('empty message');

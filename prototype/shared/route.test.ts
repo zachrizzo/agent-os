@@ -14,13 +14,13 @@ test('main sessions are messaged directly', () => {
   assert.equal(routeMessage('agent:main:main', 'hi').relayed, false);
 });
 
-test('send direct only for agents with no lead or main approval chain', () => {
-  for (const k of ['agent:coder:main', 'agent:radar:cron:x', 'agent:scout:main']) {
+test('direct send goes straight to any non-main session, marked as from Zach', () => {
+  for (const k of ['agent:coder:main', 'agent:radar:cron:x', 'agent:agent-service-lead:main', 'agent:engineering-lead:subagent:s']) {
     assert.ok(canSendDirect(k), k);
-    assert.deepEqual(routeMessage(k, 'go', true), { key: k, message: 'go', relayed: false, agent: k.split(':')[1] });
+    assert.deepEqual(routeMessage(k, 'go', true), { key: k, message: '[agent-os] Zach: go', relayed: false, agent: k.split(':')[1] });
   }
-  for (const k of ['agent:agent-service-lead:main', 'agent:security:subagent:s', 'agent:main:main']) assert.ok(!canSendDirect(k), k);
-  assert.throws(() => routeMessage('agent:agent-service-coder:main', 'go', true), /direct send is only for agents/);
-  assert.equal(routeMessage('agent:coder:main', 'go', false).relayed, true, 'direct is opt-in');
+  for (const k of ['agent:main:main', 'agent:main:dashboard:d1', 'nonsense']) assert.ok(!canSendDirect(k), k);
+  assert.equal(routeMessage('agent:main:main', 'hi', true).message, 'hi', 'main sessions get the text unchanged');
+  assert.equal(routeMessage('agent:coder:main', 'go', false).relayed, true, 'relay when direct is off');
   assert.throws(() => routeMessage('nonsense', 'x'), /unknown session/);
 });

@@ -5,6 +5,7 @@ import { RICH_MD, scriptedReply, triggerText } from '../shared/scripted.ts';
 import type { BoardCard } from '../shared/board.ts';
 import { routeMessage } from '../shared/route.ts';
 import { scopedRows, sessionTree, type SessionRow, type SessionScope } from '../shared/sessions.ts';
+import { toHistoryItems, type SessionThread } from '../shared/transcript.ts';
 import { createRoomsService, type RoomAgent, type RoomGateway } from './rooms.ts';
 import type { Source } from './source.ts';
 
@@ -334,17 +335,30 @@ export function createMockSource(): Source {
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     async history(key) {
       const a = agents.get(key);
-      if (!a && isExtra(key)) return [{ role: 'user', ts: Date.now() - 3600_000, text: 'Kick off.' }, { role: 'assistant', ts: Date.now() - 3500_000, text: `Session ${key.split(':').slice(2).join(':')}: done.` }];
+      if (!a && isExtra(key)) return [{ role: 'user', ts: Date.now() - 3600_000, text: 'Kick off.' }, { role: 'assistant', ts: Date.now() - 3500_000, from: key, text: `Session ${key.split(':').slice(2).join(':')}: done.` }];
       if (!a) return [];
       const t = Date.now();
+      const task: HistoryItem[] = a.kind === 'subagent' ? [{ role: 'user', ts: t - 200_000, id: `${key}:task`, from: a.parent ?? COS_ID, text: `${a.label ?? a.name}\n\n${pick(MSG.handoff)}. Report back with the repro and the test output.`, task: { depth: '1/5' } }] : [];
       return [
+        ...task,
         briefItem(t - 180_000, a.parent ?? COS_ID, `**Brief:** ${pick(MSG.handoff)}\n\n- start in \`src/parser.ts:88\`\n- report back with the *repro*`),
-        { role: 'assistant', ts: t - 120_000, text: `${a.now}…` },
-        { role: 'assistant', ts: t - 60_000, text: `⚙ exec · ${pick(MSG.done)}` },
-        { role: 'assistant', ts: t - 30_000, text: RICH_MD.replace('@FIRST', '@forge') },
-        { role: 'assistant', ts: t - 5_000, text: a.ask ?? pick(MSG.done) },
+        { role: 'assistant', ts: t - 120_000, from: key, text: `${a.now}…` },
+        { role: 'assistant', ts: t - 60_000, from: key, text: '', tools: [{ id: `${key}:t1`, name: 'exec', summary: pick(MSG.done), detail: '{\n  "command": "npm test"\n}', result: 'tests 12 passed' }, { id: `${key}:t2`, name: 'Read', summary: 'src/parser.ts', result: 'export function parse() {}' }] },
+        { role: 'assistant', ts: t - 30_000, from: key, text: RICH_MD.replace('@FIRST', '@forge') },
+        { role: 'assistant', ts: t - 5_000, from: key, text: a.ask ?? pick(MSG.done) },
         ...(sentLog.get(key) ?? []),
       ];
+    },
+    async thread(key): Promise<SessionThread> {
+      const items = await this.history(key);
+      const a = agents.get(key);
+      if (!a) return { items };
+      const running = a.status === 'active';
+      return {
+        items,
+        status: { key, state: STATE_OF(a), running, ...(a.model ? { model: a.model } : {}), ...(a.tokens ? { tokens: a.tokens } : {}), ...(a.costUsd ? { costUsd: a.costUsd } : {}), ...(running ? { startedAt: a.updatedAt - 240_000 } : {}), updatedAt: a.updatedAt },
+        ...(running ? { live: { text: `${a.now}…`, tools: [{ id: `${key}:live`, name: 'exec', summary: 'npm test', running: true }] } } : {}),
+      };
     },
     async send(key, text, direct) {
       const message = String(text ?? '').trim();
@@ -355,7 +369,7 @@ export function createMockSource(): Source {
       const a = agents.get(routed.key);
       if (!a) throw new Error('unknown session');
       const ts = Date.now();
-      sentLog.set(routed.key, [...(sentLog.get(routed.key) ?? []), { role: 'user', ts, text: routed.message }]);
+      sentLog.set(routed.key, [...(sentLog.get(routed.key) ?? []), ...toHistoryItems([{ role: 'user', content: routed.message, timestamp: ts }], { key: routed.key })]);
       push({ ts, from: 'zach', to: routed.key, kind: 'message', text: routed.relayed ? `@${routed.agent}: ${message}` : message, session: routed.key });
       a.updatedAt = ts; changed.add(routed.key);
       return routed;
